@@ -1563,7 +1563,7 @@ bool is_mba_sc(struct rdt_resource *r)
 	return r->membw.mba_sc;
 }
 
-/* RANGE schema is bandwidth (MBA/SMBA). BITMAP is cache. */
+/* RANGE schema is bandwidth (MBA/SMBA/MB_MIN/MB_WGHT). BITMAP is cache. */
 bool resctrl_is_membw(struct rdt_resource *r)
 {
 	return r->schema_fmt == RESCTRL_SCHEMA_RANGE;
@@ -2416,6 +2416,8 @@ static unsigned long fflags_from_resource(struct rdt_resource *r)
 		return RFTYPE_RES_CACHE;
 	case RDT_RESOURCE_MBA:
 	case RDT_RESOURCE_SMBA:
+	case RDT_RESOURCE_MB_MIN:
+	case RDT_RESOURCE_MB_WGHT:
 		return RFTYPE_RES_MB;
 	case RDT_RESOURCE_PERF_PKG:
 		return RFTYPE_RES_PERF_PKG;
