@@ -89,6 +89,15 @@ bool resctrl_arch_match_iommu_closid(struct iommu_group *group, u32 closid);
 bool resctrl_arch_match_iommu_closid_rmid(struct iommu_group *group, u32 closid, u32 rmid);
 int  resctrl_arch_set_iommu_closid_rmid(struct iommu_group *group, u32 closid, u32 rmid);
 int  resctrl_arch_mon_ctx_alloc_no_wait(struct rdt_resource *r, int evtid);
+/* v6.2 backport: these are defined in qos_resctrl.c but were omitted from the
+ * forward-decls above. <linux/resctrl.h> declares resctrl_arch_mon_ctx_alloc()
+ * but not _free(); the CDP and rmid-idx-count hooks aren't declared anywhere
+ * the generic fs/resctrl/ code can see. Declare them here so monitor.c and
+ * rdtgroup.c compile without -Werror=implicit-function-declaration. */
+void resctrl_arch_mon_ctx_free(struct rdt_resource *r, int evtid, int arch_mon_ctx);
+bool resctrl_arch_get_cdp_enabled(enum resctrl_res_level rid);
+int  resctrl_arch_set_cdp_enabled(enum resctrl_res_level rid, bool enable);
+u32  resctrl_arch_system_num_rmid_idx(void);
 u32  resctrl_get_default_ctrl(struct rdt_resource *r);
 void resctrl_sched_in(void);
 

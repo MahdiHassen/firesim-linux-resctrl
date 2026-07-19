@@ -625,8 +625,13 @@ u32 resctrl_arch_get_config(struct rdt_resource *r, struct rdt_domain *d,
 		/* Clear cc_block_mask before read limit operation */
 		cbqri_set_cbm(ctrl, 0);
 
-		/* Capacity read limit operation for RCID (closid) */
-		err = cbqri_cc_alloc_op(ctrl, CBQRI_CC_ALLOC_CTL_OP_READ_LIMIT, type, closid);
+		/* Capacity read limit operation for RCID (closid).
+		 * cbqri_cc_alloc_op(ctrl, operation, rcid, type): pass closid as the
+		 * RCID and type as the access-type. These were swapped, which made
+		 * the cache schemata read-back always query RCID 0 (type==CDP_NONE==0),
+		 * so every sub-group's L2/L3 line showed the root group's value even
+		 * though the write path programmed the correct per-RCID limit. */
+		err = cbqri_cc_alloc_op(ctrl, CBQRI_CC_ALLOC_CTL_OP_READ_LIMIT, closid, type);
 		if (err < 0) {
 			pr_err("%s(): operation failed: err = %d", __func__, err);
 			return -EIO;
