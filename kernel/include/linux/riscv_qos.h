@@ -21,6 +21,8 @@ struct cbqri_controller_info {
 	enum cbqri_controller_type type;
 	u32 rcid_count;
 	u32 mcid_count;
+	/* FireSim regulators: has the non-spec enable/period registers */
+	bool has_regulator_ctl;
 	struct list_head list;
 
 	struct cache_controller {

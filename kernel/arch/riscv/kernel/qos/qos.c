@@ -12,6 +12,8 @@
 
 /* cached value of sqoscfg csr for each cpu */
 DEFINE_PER_CPU(u32, cpu_srmcfg);
+/* per-CPU default rcid/mcid (resctrl "cpus" assignment) */
+DEFINE_PER_CPU(u32, cpu_default_srmcfg);
 
 static int __init qos_arch_late_init(void)
 {

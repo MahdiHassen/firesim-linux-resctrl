@@ -4,6 +4,9 @@
 
 #include <linux/slab.h>
 #include <linux/err.h>
+#include <linux/cpu.h>
+#include <linux/cpumask.h>
+#include <linux/moduleparam.h>
 #include <linux/riscv_qos.h>
 #include <linux/resctrl.h>
 #include <linux/types.h>
@@ -15,8 +18,24 @@
 static struct cbqri_controller controllers[MAX_CONTROLLERS];
 static struct cbqri_resctrl_res cbqri_resctrl_resources[RDT_NUM_RESOURCES];
 
+/*
+ * FireSim (crsullivan13) regulators are off at reset and need a period.
+ * Boot-time: qos_resctrl.period=<cycles> qos_resctrl.regulate=<0|1>
+ * With the default period, MB 100% = nbwblks fills per bank per period.
+ */
+static unsigned int period = 1000000;
+module_param(period, uint, 0444);
+MODULE_PARM_DESC(period, "CBQRI bandwidth-regulator period in regulator clock cycles");
+static bool regulate = true;
+module_param(regulate, bool, 0444);
+MODULE_PARM_DESC(regulate, "Turn CBQRI bandwidth regulation on at boot");
+
 static bool exposed_alloc_capable;
 static bool exposed_mon_capable;
+/* set when a bandwidth controller supports monitoring: mbm_total_bytes */
+static bool exposed_mbm_total;
+/* set when a capacity controller supports monitoring: llc_occupancy */
+static bool exposed_llc_occupancy;
 /* CDP (code data prioritization) on x86 is AT (access type) on RISC-V */
 static bool exposed_cdp_l2_capable;
 static bool exposed_cdp_l3_capable;
@@ -29,6 +48,8 @@ static u32 max_rmid;
 LIST_HEAD(cbqri_controllers);
 
 static int cbqri_wait_busy_flag(struct cbqri_controller *ctrl, int reg_offset);
+static int cbqri_bc_mon_op(struct cbqri_controller *ctrl, int operation,
+			   u32 mcid, u32 evt_id);
 
 bool resctrl_arch_alloc_capable(void)
 {
@@ -42,7 +63,7 @@ bool resctrl_arch_mon_capable(void)
 
 bool resctrl_arch_is_llc_occupancy_enabled(void)
 {
-	return true;
+	return exposed_llc_occupancy;
 }
 
 bool resctrl_arch_is_mbm_local_enabled(void)
@@ -52,7 +73,7 @@ bool resctrl_arch_is_mbm_local_enabled(void)
 
 bool resctrl_arch_is_mbm_total_enabled(void)
 {
-	return false;
+	return exposed_mbm_total;
 }
 
 bool resctrl_arch_get_cdp_enabled(enum resctrl_res_level rid)
@@ -135,9 +156,35 @@ void resctrl_arch_mon_ctx_free(struct rdt_resource *r, int evtid,
 	/* not implemented for the RISC-V resctrl interface */
 }
 
+/*
+ * Called on umount: put every RCID of every alloc-capable resource back to
+ * its default (all cache blocks / the maximum reservable bandwidth). The
+ * per-CPU and per-task srmcfg values are reset by fs/resctrl itself.
+ */
 void resctrl_arch_reset_resources(void)
 {
-	/* not implemented for the RISC-V resctrl implementation */
+	struct rdt_resource *r;
+	struct rdt_domain *d;
+	u32 closid, num_closid, def;
+	int i, err;
+
+	for (i = 0; i < RDT_NUM_RESOURCES; i++) {
+		r = &cbqri_resctrl_resources[i].resctrl_res;
+		if (!r->alloc_capable)
+			continue;
+		num_closid = resctrl_arch_get_num_closid(r);
+		def = resctrl_get_default_ctrl(r);
+		list_for_each_entry(d, &r->domains, list) {
+			for (closid = 0; closid < num_closid; closid++) {
+				err = resctrl_arch_update_one(r, d, closid,
+							      CDP_NONE, def);
+				if (err)
+					pr_warn("%s(): %s domain %d rcid %u: err %d",
+						__func__, r->name, d->id,
+						closid, err);
+			}
+		}
+	}
 }
 
 void resctrl_arch_config_cntr(struct rdt_resource *r, struct rdt_domain *d,
@@ -216,8 +263,19 @@ void resctrl_arch_rmid_idx_decode(u32 idx, u32 *closid, u32 *rmid)
 	*rmid = idx;
 }
 
-/* RISC-V resctrl interface does not maintain a default srmcfg value for a given CPU */
-void resctrl_arch_set_cpu_default_closid_rmid(int cpu, u32 closid, u32 rmid) { }
+/*
+ * Per-CPU default RCID/MCID, used for tasks whose own value is zero (the
+ * default group). This is what the "cpus" / "cpus_list" files control.
+ * The CSR itself is rewritten by resctrl_arch_sync_cpu_defaults() ->
+ * resctrl_arch_sched_in(current) on the target CPU.
+ */
+void resctrl_arch_set_cpu_default_closid_rmid(int cpu, u32 closid, u32 rmid)
+{
+	WARN_ON_ONCE((closid & SRMCFG_RCID_MASK) != closid);
+	WARN_ON_ONCE((rmid & SRMCFG_MCID_MASK) != rmid);
+
+	per_cpu(cpu_default_srmcfg, cpu) = (rmid << SRMCFG_MCID_SHIFT) | closid;
+}
 
 void resctrl_arch_sched_in(struct task_struct *tsk)
 {
@@ -271,26 +329,60 @@ bool resctrl_arch_match_rmid(struct task_struct *tsk, u32 closid, u32 rmid)
 	return tsk_rmid == rmid;
 }
 
+/*
+ * mbm_total_bytes: the bandwidth controller keeps a free-running 62-bit
+ * count of 64-byte line fills per MCID (started by a CONFIG_EVENT op, see
+ * resctrl_arch_reset_rmid()). Return it in bytes; fs/resctrl keeps the
+ * per-group baseline and computes rates. Serialised by rdtgroup_mutex like
+ * every other access to the controller's registers.
+ */
 int resctrl_arch_rmid_read(struct rdt_resource *r, struct rdt_domain *d,
 			   u32 closid, u32 rmid, enum resctrl_event_id eventid,
 			   u64 *val, int arch_mon_ctx)
 {
-	/*
-	 * The current Qemu implementation of CBQRI capacity and bandwidth
-	 * controllers do not emulate the utilization of resources over
-	 * time. Therefore, Qemu currently sets the invalid bit in
-	 * cc_mon_ctr_val and bc_mon_ctr_val, and there is no meaningful
-	 * value other than 0 to return for reading an RMID (e.g. MCID in
-	 * CBQRI terminology)
-	 */
+	struct cbqri_resctrl_dom *hw_dom;
+	struct cbqri_controller *ctrl;
+	u64 reg;
+	int err;
 
+	hw_dom = container_of(d, struct cbqri_resctrl_dom, resctrl_dom);
+	ctrl = hw_dom->hw_ctrl;
+
+	if (eventid != QOS_L3_MBM_TOTAL_EVENT_ID ||
+	    ctrl->ctrl_info->type != CBQRI_CONTROLLER_TYPE_BANDWIDTH ||
+	    !ctrl->mon_capable)
+		return -EINVAL;
+
+	err = cbqri_bc_mon_op(ctrl, CBQRI_BC_MON_CTL_OP_READ_COUNTER, rmid,
+			      CBQRI_BC_MON_EVT_RDWR_COUNT);
+	if (err)
+		return err;
+
+	reg = ioread64(ctrl->base + CBQRI_BC_MON_CTR_VAL_OFF);
+	if (reg & CBQRI_BC_MON_CTR_INV)
+		return -EINVAL;
+
+	*val = (reg & CBQRI_BC_MON_CTR_VAL_MASK) * CBQRI_FS_LINE_BYTES;
 	return 0;
 }
 
+/* Re-arm the MCID's counter: CONFIG_EVENT zeroes it and starts counting. */
 void resctrl_arch_reset_rmid(struct rdt_resource *r, struct rdt_domain *d,
 			     u32 closid, u32 rmid, enum resctrl_event_id eventid)
 {
-	/* not implemented for the RISC-V resctrl interface */
+	struct cbqri_resctrl_dom *hw_dom;
+	struct cbqri_controller *ctrl;
+
+	hw_dom = container_of(d, struct cbqri_resctrl_dom, resctrl_dom);
+	ctrl = hw_dom->hw_ctrl;
+
+	if (eventid != QOS_L3_MBM_TOTAL_EVENT_ID ||
+	    ctrl->ctrl_info->type != CBQRI_CONTROLLER_TYPE_BANDWIDTH ||
+	    !ctrl->mon_capable)
+		return;
+
+	cbqri_bc_mon_op(ctrl, CBQRI_BC_MON_CTL_OP_CONFIG_EVENT, rmid,
+			CBQRI_BC_MON_EVT_RDWR_COUNT);
 }
 
 void resctrl_arch_mon_event_config_read(void *info)
@@ -305,12 +397,25 @@ void resctrl_arch_mon_event_config_write(void *info)
 
 void resctrl_arch_reset_rmid_all(struct rdt_resource *r, struct rdt_domain *d)
 {
-	/* not implemented for the RISC-V resctrl implementation */
+	struct cbqri_resctrl_dom *hw_dom;
+	u32 mcid;
+
+	hw_dom = container_of(d, struct cbqri_resctrl_dom, resctrl_dom);
+	for (mcid = 0; mcid < hw_dom->hw_ctrl->ctrl_info->mcid_count; mcid++)
+		resctrl_arch_reset_rmid(r, d, 0, mcid, QOS_L3_MBM_TOTAL_EVENT_ID);
 }
 
 void resctrl_arch_reset_all_ctrls(struct rdt_resource *r)
 {
-	/* not implemented for the RISC-V resctrl implementation */
+	struct rdt_domain *d;
+	u32 closid, num_closid = resctrl_arch_get_num_closid(r);
+	u32 def = resctrl_get_default_ctrl(r);
+
+	if (!r->alloc_capable)
+		return;
+	list_for_each_entry(d, &r->domains, list)
+		for (closid = 0; closid < num_closid; closid++)
+			resctrl_arch_update_one(r, d, closid, CDP_NONE, def);
 }
 
 /* Set capacity block mask (cc_block_mask) */
@@ -498,6 +603,41 @@ static int cbqri_bc_alloc_op(struct cbqri_controller *ctrl, int operation, int r
 	if (status != 1) {
 		pr_err("%s(): operation %d failed with status = %d",
 		       __func__, operation, status);
+		return -EIO;
+	}
+
+	return 0;
+}
+
+/* Perform a bandwidth monitoring control operation on a bandwidth controller */
+static int cbqri_bc_mon_op(struct cbqri_controller *ctrl, int operation,
+			   u32 mcid, u32 evt_id)
+{
+	int reg_offset = CBQRI_BC_MON_CTL_OFF;
+	int status;
+	u64 reg;
+
+	reg = ioread64(ctrl->base + reg_offset);
+	reg &= ~((u64)CBQRI_CONTROL_REGISTERS_OP_MASK << CBQRI_CONTROL_REGISTERS_OP_SHIFT);
+	reg |= (u64)(operation & CBQRI_CONTROL_REGISTERS_OP_MASK) <<
+		CBQRI_CONTROL_REGISTERS_OP_SHIFT;
+	reg &= ~((u64)CBQRI_MON_CTL_MCID_MASK << CBQRI_MON_CTL_MCID_SHIFT);
+	reg |= (u64)(mcid & CBQRI_MON_CTL_MCID_MASK) << CBQRI_MON_CTL_MCID_SHIFT;
+	reg &= ~((u64)CBQRI_MON_CTL_EVT_ID_MASK << CBQRI_MON_CTL_EVT_ID_SHIFT);
+	reg |= (u64)(evt_id & CBQRI_MON_CTL_EVT_ID_MASK) << CBQRI_MON_CTL_EVT_ID_SHIFT;
+	iowrite64(reg, ctrl->base + reg_offset);
+
+	if (cbqri_wait_busy_flag(ctrl, reg_offset) < 0) {
+		pr_err("%s(): BUSY timeout when executing the operation", __func__);
+		return -EIO;
+	}
+
+	reg = ioread64(ctrl->base + reg_offset);
+	status = (reg >> CBQRI_CONTROL_REGISTERS_STATUS_SHIFT) &
+		  CBQRI_CONTROL_REGISTERS_STATUS_MASK;
+	if (status != CBQRI_BC_MON_CTL_STATUS_SUCCESS) {
+		pr_err("%s(): operation %d mcid %u failed with status = %d",
+		       __func__, operation, mcid, status);
 		return -EIO;
 	}
 
@@ -991,13 +1131,105 @@ static int qos_init_domain_ctrlval(struct rdt_resource *r, struct rdt_domain *d)
 
 	hw_dom->ctrl_val = dc;
 
-	for (i = 0; i < hw_res->max_rcid; i++, dc++) {
+	/*
+	 * Give every RCID its default. This must succeed for all of them:
+	 * on the FireSim regulators an RCID whose budget was never set stalls
+	 * on its first request once regulation is enabled.
+	 * resctrl_arch_update_one() records the programmed value (in blocks)
+	 * in ctrl_val[]; nothing else must overwrite it with a percentage.
+	 */
+	for (i = 0; i < hw_res->max_rcid; i++) {
 		err = resctrl_arch_update_one(r, d, i, 0, resctrl_get_default_ctrl(r));
-		if (err)
-			return 0;
-		*dc = resctrl_get_default_ctrl(r);
+		if (err) {
+			pr_err("%s(): %s domain %d: rcid %d default failed (%d)",
+			       __func__, r->name, d->id, i, err);
+			kfree(dc);
+			hw_dom->ctrl_val = NULL;
+			return err;
+		}
 	}
 	return 0;
+}
+
+/*
+ * Bandwidth controllers with per-MCID counters are exposed to fs/resctrl the
+ * way x86 does it: as monitoring domains of the L3 resource, which is where
+ * resctrl looks for mbm_total_bytes. The domain shares the controller with
+ * the MB (allocation) domain of the same id.
+ */
+static int qos_resctrl_add_bw_mon_domain(struct cbqri_controller *ctrl, int id)
+{
+	struct cbqri_resctrl_res *l3 = &cbqri_resctrl_resources[RDT_RESOURCE_L3];
+	struct rdt_resource *res = &l3->resctrl_res;
+	struct rdt_domain *domain;
+	u32 mcid;
+	int err;
+
+	domain = qos_new_domain(ctrl);
+	if (!domain)
+		return -ENOMEM;
+	domain->id = id;
+	cpumask_copy(&domain->cpu_mask, cpu_online_mask);
+
+	if (!res->name) {
+		/* no L3 capacity controller filled this in */
+		res->rid = RDT_RESOURCE_L3;
+		res->name = "L3";
+		res->cache_level = 3;
+		res->fflags = RFTYPE_RES_CACHE;
+		res->format_str = "%d=%0*x";
+	}
+	res->mon_capable = true;
+	res->num_rmid = ctrl->ctrl_info->mcid_count;
+	if (ctrl->ctrl_info->mcid_count > l3->max_mcid)
+		l3->max_mcid = ctrl->ctrl_info->mcid_count;
+	exposed_mbm_total = true;
+
+	/* start every MCID counter so values are valid before the first reset */
+	for (mcid = 0; mcid < ctrl->ctrl_info->mcid_count; mcid++) {
+		err = cbqri_bc_mon_op(ctrl, CBQRI_BC_MON_CTL_OP_CONFIG_EVENT, mcid,
+				      CBQRI_BC_MON_EVT_RDWR_COUNT);
+		if (err) {
+			kfree(container_of(domain, struct cbqri_resctrl_dom, resctrl_dom));
+			return err;
+		}
+	}
+
+	list_add_tail(&domain->list, &res->domains);
+	err = resctrl_online_domain(res, domain);
+	if (err) {
+		pr_warn("%s(): failed to online L3 mon domain %d", __func__, id);
+		list_del(&domain->list);
+		kfree(container_of(domain, struct cbqri_resctrl_dom, resctrl_dom));
+		return err;
+	}
+	return 0;
+}
+
+/*
+ * FireSim regulators: program the period and switch regulation on. Called
+ * once every RCID has a valid budget (see qos_init_domain_ctrlval()).
+ */
+static void cbqri_enable_regulation(struct cbqri_controller *ctrl)
+{
+	if (!ctrl->ctrl_info->has_regulator_ctl ||
+	    ctrl->ctrl_info->type != CBQRI_CONTROLLER_TYPE_BANDWIDTH ||
+	    !ctrl->alloc_capable)
+		return;
+
+	if (period == 0 || period > CBQRI_FS_PERIOD_MAX) {
+		pr_warn("period %u out of range (1..%u), using %u", period,
+			CBQRI_FS_PERIOD_MAX, CBQRI_FS_PERIOD_MAX);
+		period = CBQRI_FS_PERIOD_MAX;
+	}
+
+	iowrite64(period, ctrl->base + CBQRI_FS_PERIOD_LEN_OFF);
+	iowrite64(regulate ? 1 : 0, ctrl->base + CBQRI_FS_GLOBAL_EN_OFF);
+
+	pr_info("bandwidth regulation %s at 0x%lx: period=%llu cycles, MB 100%% = %u fills/bank/period, max %u%%",
+		regulate ? "enabled" : "left off", ctrl->ctrl_info->addr,
+		(unsigned long long)ioread64(ctrl->base + CBQRI_FS_PERIOD_LEN_OFF),
+		ctrl->bc.nbwblks, ctrl->bc.mrbwb * 100u / ctrl->bc.nbwblks);
 }
 
 static int qos_resctrl_add_controller_domain(struct cbqri_controller *ctrl, int *id)
@@ -1107,6 +1339,16 @@ static int qos_resctrl_add_controller_domain(struct cbqri_controller *ctrl, int 
 	}
 
 	domain->id = internal_id;
+	if (ctrl->ctrl_info->type == CBQRI_CONTROLLER_TYPE_BANDWIDTH) {
+		if (!cbqri_res) {
+			/* bandwidth controller without allocation: monitor only */
+			kfree(container_of(domain, struct cbqri_resctrl_dom, resctrl_dom));
+			domain = NULL;
+			goto add_mon;
+		}
+		/* the regulators sit on the whole system's memory path */
+		cpumask_copy(&domain->cpu_mask, cpu_online_mask);
+	}
 	err = qos_init_domain_ctrlval(res, domain);
 	if (err)
 		goto err_free_domain;
@@ -1119,6 +1361,14 @@ static int qos_resctrl_add_controller_domain(struct cbqri_controller *ctrl, int 
 			pr_warn("%s(): failed to online cbqri_res domain", __func__);
 			goto err_free_domain;
 		}
+	}
+
+add_mon:
+	if (ctrl->ctrl_info->type == CBQRI_CONTROLLER_TYPE_BANDWIDTH &&
+	    ctrl->mon_capable) {
+		err = qos_resctrl_add_bw_mon_domain(ctrl, internal_id);
+		if (err)
+			return err;
 	}
 
 	return 0;
@@ -1153,6 +1403,23 @@ int qos_resctrl_setup(void)
 			pr_warn("%s(): increase MAX_CONTROLLERS value", __func__);
 			break;
 		}
+	}
+
+	/*
+	 * Domain ids follow controller order. Sort by MMIO address so the ids
+	 * are stable and don't depend on device-tree node order (on the FireSim
+	 * SoC this makes MB:0 the core->LLC regulator at 0x20000000 and MB:1
+	 * the LLC->DRAM one at 0x21000000).
+	 */
+	for (i = 1; i < found_controllers; i++) {
+		struct cbqri_controller tmp = controllers[i];
+		int j = i - 1;
+
+		while (j >= 0 && controllers[j].ctrl_info->addr > tmp.ctrl_info->addr) {
+			controllers[j + 1] = controllers[j];
+			j--;
+		}
+		controllers[j + 1] = tmp;
 	}
 
 	for (i = 0; i < RDT_NUM_RESOURCES; i++) {
@@ -1190,8 +1457,13 @@ int qos_resctrl_setup(void)
 		}
 	}
 
+	/* every RCID now has a valid budget: safe to turn the regulators on */
+	for (i = 0; i < found_controllers; i++)
+		cbqri_enable_regulation(&controllers[i]);
+
 	pr_info("exposed_alloc_capable = %d", exposed_alloc_capable);
 	pr_info("exposed_mon_capable = %d", exposed_mon_capable);
+	pr_info("exposed_mbm_total = %d", exposed_mbm_total);
 	pr_info("exposed_cdp_l2_capable = %d", exposed_cdp_l2_capable);
 	pr_info("exposed_cdp_l3_capable = %d", exposed_cdp_l3_capable);
 
@@ -1215,8 +1487,33 @@ err_unmap_controllers:
 	return err;
 }
 
+/* bandwidth-controller domains span every CPU */
+static void qos_resctrl_update_domain_cpu(unsigned int cpu, bool online)
+{
+	struct cbqri_resctrl_dom *hw_dom;
+	struct rdt_resource *r;
+	struct rdt_domain *d;
+	int i;
+
+	for (i = 0; i < RDT_NUM_RESOURCES; i++) {
+		r = &cbqri_resctrl_resources[i].resctrl_res;
+		list_for_each_entry(d, &r->domains, list) {
+			hw_dom = container_of(d, struct cbqri_resctrl_dom, resctrl_dom);
+			if (hw_dom->hw_ctrl->ctrl_info->type !=
+			    CBQRI_CONTROLLER_TYPE_BANDWIDTH)
+				continue;
+			if (online)
+				cpumask_set_cpu(cpu, &d->cpu_mask);
+			else
+				cpumask_clear_cpu(cpu, &d->cpu_mask);
+		}
+	}
+}
+
 int qos_resctrl_online_cpu(unsigned int cpu)
 {
+	per_cpu(cpu_default_srmcfg, cpu) = 0;
+	qos_resctrl_update_domain_cpu(cpu, true);
 	resctrl_online_cpu(cpu);
 	return 0;
 }
@@ -1224,6 +1521,7 @@ int qos_resctrl_online_cpu(unsigned int cpu)
 int qos_resctrl_offline_cpu(unsigned int cpu)
 {
 	resctrl_offline_cpu(cpu);
+	qos_resctrl_update_domain_cpu(cpu, false);
 	return 0;
 }
 
@@ -1290,19 +1588,25 @@ int resctrl_arch_mon_ctx_alloc_no_wait(struct rdt_resource *r, int evtid)
 
 /* qos_resctrl.c uses resctrl_get_default_ctrl(); upstream has it as a
  * tiny helper that returns the resource's default mask. v6.2 doesn't
- * declare it publicly. Compute the all-bits-set CBM for caches; return
- * 0 for everything else (good enough for the QEMU smoke test). */
+ * declare it publicly. Compute the all-bits-set CBM for caches; for MB
+ * return r->default_ctrl (mrbwb as a percentage). Returning 0 here made
+ * boot program rbwb=0, which CBQRI hardware rejects (status 5,
+ * INVALID_BWB) and which would leave every RCID at a zero budget. */
 u32 resctrl_get_default_ctrl(struct rdt_resource *r)
 {
 	if (r->cache.cbm_len > 0)
 		return GENMASK(r->cache.cbm_len - 1, 0);
-	return 0;
+	return r->default_ctrl;
 }
 
-/* fs/resctrl/rdtgroup.c calls resctrl_sched_in() (no _arch_ prefix) on
- * task switches it owns. We already wire arch-side switching via the
- * switch_to macro; this is a redundant no-op for our backport. */
+/*
+ * fs/resctrl/rdtgroup.c calls resctrl_sched_in() by IPI on the CPU a task is
+ * running on after moving it to another group (or after changing the CPU's
+ * default). Reload srmcfg now; otherwise the change would only take effect
+ * at the task's next context switch.
+ */
 void resctrl_sched_in(void)
 {
+	resctrl_arch_sched_in(current);
 }
 

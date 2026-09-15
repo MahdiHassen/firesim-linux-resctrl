@@ -7,6 +7,27 @@
 
 static const struct of_device_id cbqri_mem_ctrl_ids[] = {
 	{ .compatible = "riscv,cbqri-bandwidth" },
+	/* FireSim CBQRIBwController emits a typo'd compatible ("rsicv"); match it too */
+	{ .compatible = "rsicv,cbqri-bandwidth" },
+	{ .compatible = "rsicv,cbqri-bandwidth-cache" },
+	{ .compatible = "rsicv,cbqri-bandwidth-memory" },
+	{ .compatible = "riscv,cbqri-bandwidth-cache" },
+	{ .compatible = "riscv,cbqri-bandwidth-memory" },
+	{ }
+};
+
+/*
+ * The crsullivan13 (FireSim) bandwidth regulators add two registers that are
+ * not in the CBQRI spec: a global regulation enable and a period length. They
+ * reset to "off", so the kernel has to program them. Only controllers with
+ * these compatibles get that treatment.
+ */
+static const struct of_device_id cbqri_regulator_ctl_ids[] = {
+	{ .compatible = "rsicv,cbqri-bandwidth-cache" },
+	{ .compatible = "rsicv,cbqri-bandwidth-memory" },
+	{ .compatible = "rsicv,cbqri-bandwidth" },
+	{ .compatible = "riscv,cbqri-bandwidth-cache" },
+	{ .compatible = "riscv,cbqri-bandwidth-memory" },
 	{ }
 };
 
@@ -55,6 +76,9 @@ static int __init cbqri_mem_ctrl_init(void)
 			goto err_kfree_ctrl_info;
 		}
 		ctrl_info->mcid_count = value;
+
+		ctrl_info->has_regulator_ctl =
+			of_match_node(cbqri_regulator_ctl_ids, np) != NULL;
 
 		of_node_put(np);
 

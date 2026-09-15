@@ -65,6 +65,34 @@
 #define CBQRI_BC_ALLOC_CTL_OP_READ_LIMIT   2
 #define CBQRI_BC_ALLOC_CTL_STATUS_SUCCESS  1
 
+/* bc_mon_ctl / cc_mon_ctl fields (CBQRI spec 4.2 / 3.2) */
+#define CBQRI_MON_CTL_MCID_SHIFT   8
+#define CBQRI_MON_CTL_MCID_MASK    0xFFF
+#define CBQRI_MON_CTL_EVT_ID_SHIFT 20
+#define CBQRI_MON_CTL_EVT_ID_MASK  0xFF
+
+/* bc_mon_ctl event IDs (CBQRI spec table 4.4) */
+#define CBQRI_BC_MON_EVT_NONE       0
+#define CBQRI_BC_MON_EVT_RDWR_COUNT 1
+#define CBQRI_BC_MON_EVT_RD_COUNT   2
+#define CBQRI_BC_MON_EVT_WR_COUNT   3
+
+/* bc_mon_ctr_val fields */
+#define CBQRI_BC_MON_CTR_VAL_MASK  GENMASK_ULL(61, 0)
+#define CBQRI_BC_MON_CTR_INV       BIT_ULL(62)
+#define CBQRI_BC_MON_CTR_OVF       BIT_ULL(63)
+
+/*
+ * crsullivan13 (FireSim) bandwidth regulators: non-spec registers.
+ * Regulation is OFF at reset; period is in regulator clock cycles (25 bits).
+ * Counters count 64-byte line fills per MCID; budgets are fills per bank per
+ * period.
+ */
+#define CBQRI_FS_GLOBAL_EN_OFF  0x100
+#define CBQRI_FS_PERIOD_LEN_OFF 0x108
+#define CBQRI_FS_PERIOD_MAX     ((1u << 25) - 1)
+#define CBQRI_FS_LINE_BYTES     64
+
 int qos_resctrl_setup(void);
 void qos_resctrl_exit(void);
 int qos_resctrl_online_cpu(unsigned int cpu);
