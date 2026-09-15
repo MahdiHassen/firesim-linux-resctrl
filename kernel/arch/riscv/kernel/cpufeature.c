@@ -249,6 +249,15 @@ void __init riscv_fill_hwcap(void)
 			bitmap_and(riscv_isa, riscv_isa, this_isa, RISCV_ISA_EXT_MAX);
 	}
 
+	/*
+	 * FireSim CBQRI SoC implements the srmcfg CSR (Ssqosid) in RTL, but its
+	 * bitstream-baked device tree does not advertise "ssqosid" in riscv,isa.
+	 * Force the ISA bit so the RISC-V QoS/resctrl backend (qos.c late_initcall
+	 * and has_srmcfg() on the switch path) enables. The CSR is really present,
+	 * so csr_write(CSR_SRMCFG) is safe. Remove once the DTB advertises ssqosid.
+	 */
+	set_bit(RISCV_ISA_EXT_SSQOSID, riscv_isa);
+
 	/* We don't support systems with F but without D, so mask those out
 	 * here. */
 	if ((elf_hwcap & COMPAT_HWCAP_ISA_F) && !(elf_hwcap & COMPAT_HWCAP_ISA_D)) {
