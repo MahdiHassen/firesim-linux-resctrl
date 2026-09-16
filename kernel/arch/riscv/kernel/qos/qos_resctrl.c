@@ -51,6 +51,33 @@ static int cbqri_wait_busy_flag(struct cbqri_controller *ctrl, int reg_offset);
 static int cbqri_bc_mon_op(struct cbqri_controller *ctrl, int operation,
 			   u32 mcid, u32 evt_id);
 
+/* number of RCIDs the controller behind a domain implements */
+static u32 cbqri_dom_num_rcid(struct rdt_domain *d)
+{
+	struct cbqri_resctrl_dom *hw_dom;
+
+	hw_dom = container_of(d, struct cbqri_resctrl_dom, resctrl_dom);
+	return hw_dom->hw_ctrl->ctrl_info->rcid_count;
+}
+
+/*
+ * Several controllers can back one resctrl resource (e.g. both bandwidth
+ * regulators are "MB"). Expose the smallest RCID/MCID space so every id
+ * resctrl hands out is valid on every controller.
+ */
+static void cbqri_res_set_counts(struct cbqri_resctrl_res *hw_res,
+				 struct cbqri_controller *ctrl)
+{
+	u32 nr = ctrl->ctrl_info->rcid_count;
+	u32 nm = ctrl->ctrl_info->mcid_count;
+
+	if (!hw_res->max_rcid || nr < hw_res->max_rcid)
+		hw_res->max_rcid = nr;
+	if (!hw_res->max_mcid || nm < hw_res->max_mcid)
+		hw_res->max_mcid = nm;
+	hw_res->resctrl_res.num_rmid = hw_res->max_mcid;
+}
+
 bool resctrl_arch_alloc_capable(void)
 {
 	return exposed_alloc_capable;
@@ -172,9 +199,9 @@ void resctrl_arch_reset_resources(void)
 		r = &cbqri_resctrl_resources[i].resctrl_res;
 		if (!r->alloc_capable)
 			continue;
-		num_closid = resctrl_arch_get_num_closid(r);
 		def = resctrl_get_default_ctrl(r);
 		list_for_each_entry(d, &r->domains, list) {
+			num_closid = cbqri_dom_num_rcid(d);
 			for (closid = 0; closid < num_closid; closid++) {
 				err = resctrl_arch_update_one(r, d, closid,
 							      CDP_NONE, def);
@@ -408,14 +435,16 @@ void resctrl_arch_reset_rmid_all(struct rdt_resource *r, struct rdt_domain *d)
 void resctrl_arch_reset_all_ctrls(struct rdt_resource *r)
 {
 	struct rdt_domain *d;
-	u32 closid, num_closid = resctrl_arch_get_num_closid(r);
+	u32 closid, num_closid;
 	u32 def = resctrl_get_default_ctrl(r);
 
 	if (!r->alloc_capable)
 		return;
-	list_for_each_entry(d, &r->domains, list)
+	list_for_each_entry(d, &r->domains, list) {
+		num_closid = cbqri_dom_num_rcid(d);
 		for (closid = 0; closid < num_closid; closid++)
 			resctrl_arch_update_one(r, d, closid, CDP_NONE, def);
+	}
 }
 
 /* Set capacity block mask (cc_block_mask) */
@@ -885,8 +914,9 @@ static int cbqri_probe_controller(struct cbqri_controller_info *ctrl_info,
 		ctrl_info->type, ctrl_info->addr, ctrl_info->size,
 		ctrl_info->rcid_count, ctrl_info->mcid_count);
 
-	/* max_rmid is used by resctrl_arch_system_num_rmid_idx() */
-	max_rmid = ctrl_info->mcid_count;
+	/* max_rmid is used by resctrl_arch_system_num_rmid_idx(): smallest MCID space */
+	if (!max_rmid || ctrl_info->mcid_count < max_rmid)
+		max_rmid = ctrl_info->mcid_count;
 
 	ctrl->ctrl_info = ctrl_info;
 
@@ -1112,6 +1142,7 @@ static int qos_init_domain_ctrlval(struct rdt_resource *r, struct rdt_domain *d)
 {
 	struct cbqri_resctrl_res *hw_res;
 	struct cbqri_resctrl_dom *hw_dom;
+	u32 num_rcid;
 	u64 *dc;
 	int err = 0;
 	int i;
@@ -1124,8 +1155,9 @@ static int qos_init_domain_ctrlval(struct rdt_resource *r, struct rdt_domain *d)
 	if (!hw_dom)
 		return -ENOMEM;
 
-	dc = kmalloc_array(hw_res->max_rcid, sizeof(*hw_dom->ctrl_val),
-			   GFP_KERNEL);
+	/* program every RCID the controller has, not just the ones resctrl uses */
+	num_rcid = cbqri_dom_num_rcid(d);
+	dc = kmalloc_array(num_rcid, sizeof(*hw_dom->ctrl_val), GFP_KERNEL);
 	if (!dc)
 		return -ENOMEM;
 
@@ -1138,7 +1170,7 @@ static int qos_init_domain_ctrlval(struct rdt_resource *r, struct rdt_domain *d)
 	 * resctrl_arch_update_one() records the programmed value (in blocks)
 	 * in ctrl_val[]; nothing else must overwrite it with a percentage.
 	 */
-	for (i = 0; i < hw_res->max_rcid; i++) {
+	for (i = 0; i < num_rcid; i++) {
 		err = resctrl_arch_update_one(r, d, i, 0, resctrl_get_default_ctrl(r));
 		if (err) {
 			pr_err("%s(): %s domain %d: rcid %d default failed (%d)",
@@ -1180,9 +1212,7 @@ static int qos_resctrl_add_bw_mon_domain(struct cbqri_controller *ctrl, int id)
 		res->format_str = "%d=%0*x";
 	}
 	res->mon_capable = true;
-	res->num_rmid = ctrl->ctrl_info->mcid_count;
-	if (ctrl->ctrl_info->mcid_count > l3->max_mcid)
-		l3->max_mcid = ctrl->ctrl_info->mcid_count;
+	cbqri_res_set_counts(l3, ctrl);
 	exposed_mbm_total = true;
 
 	/* start every MCID counter so values are valid before the first reset */
@@ -1247,10 +1277,8 @@ static int qos_resctrl_add_controller_domain(struct cbqri_controller *ctrl, int 
 		cpumask_copy(&domain->cpu_mask, &ctrl->ctrl_info->cache.cpu_mask);
 		if (ctrl->ctrl_info->cache.cache_level == 2) {
 			cbqri_res = &cbqri_resctrl_resources[RDT_RESOURCE_L2];
-			cbqri_res->max_rcid = ctrl->ctrl_info->rcid_count;
-			cbqri_res->max_mcid = ctrl->ctrl_info->mcid_count;
+			cbqri_res_set_counts(cbqri_res, ctrl);
 			res = &cbqri_res->resctrl_res;
-			res->num_rmid = ctrl->ctrl_info->mcid_count;
 			res->rid = RDT_RESOURCE_L2;
 			res->name = "L2";
 			res->alloc_capable = ctrl->alloc_capable;
@@ -1271,10 +1299,8 @@ static int qos_resctrl_add_controller_domain(struct cbqri_controller *ctrl, int 
 			res->cache.shareable_bits = res->default_ctrl;
 		} else if (ctrl->ctrl_info->cache.cache_level == 3) {
 			cbqri_res = &cbqri_resctrl_resources[RDT_RESOURCE_L3];
-			cbqri_res->max_rcid = ctrl->ctrl_info->rcid_count;
-			cbqri_res->max_mcid = ctrl->ctrl_info->mcid_count;
+			cbqri_res_set_counts(cbqri_res, ctrl);
 			res = &cbqri_res->resctrl_res;
-			res->num_rmid = ctrl->ctrl_info->mcid_count;
 			res->rid = RDT_RESOURCE_L3;
 			res->name = "L3";
 			res->format_str = "%d=%0*x";
@@ -1300,10 +1326,8 @@ static int qos_resctrl_add_controller_domain(struct cbqri_controller *ctrl, int 
 	} else if (ctrl->ctrl_info->type == CBQRI_CONTROLLER_TYPE_BANDWIDTH) {
 		if (ctrl->alloc_capable) {
 			cbqri_res = &cbqri_resctrl_resources[RDT_RESOURCE_MBA];
-			cbqri_res->max_rcid = ctrl->ctrl_info->rcid_count;
-			cbqri_res->max_mcid = ctrl->ctrl_info->mcid_count;
+			cbqri_res_set_counts(cbqri_res, ctrl);
 			res = &cbqri_res->resctrl_res;
-			res->num_rmid = ctrl->ctrl_info->mcid_count;
 			res->rid = RDT_RESOURCE_MBA;
 			res->name = "MB";
 			res->format_str = "%d=%*u";
