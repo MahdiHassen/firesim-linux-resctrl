@@ -107,6 +107,12 @@ static void cbqri_fs_regulator_enable(struct cbqri_controller *ctrl, int dom_id)
 		ctrl->bc.mrbwb, ctrl->bc.nbwblks);
 }
 
+/* FireSim regulators count 64-byte line fills; the spec's counter is in bytes */
+static u64 cbqri_bc_bytes(struct cbqri_controller *bc, u64 count)
+{
+	return bc->fs_regulator ? count * 64 : count;
+}
+
 static struct cbqri_controller *cbqri_mon_bc_for_domain(int id)
 {
 	struct cbqri_controller *ctrl;
@@ -435,7 +441,7 @@ int resctrl_arch_rmid_read(struct rdt_resource *r, struct rdt_domain_hdr *hdr,
 			 * Return the last good total and leave prev_ctr so
 			 * the next valid sample resumes from there.
 			 */
-			*val = bc->mbm_total_states[rmid].chunks;
+			*val = cbqri_bc_bytes(bc, bc->mbm_total_states[rmid].chunks);
 		} else if (ctr_val & CBQRI_BC_MON_CTR_VAL_OVF) {
 			/*
 			 * OVF is sticky until next CONFIG_EVENT.
@@ -454,14 +460,14 @@ int resctrl_arch_rmid_read(struct rdt_resource *r, struct rdt_domain_hdr *hdr,
 				goto out_bc;
 
 			s->prev_ctr = 0;
-			*val = s->chunks;
+			*val = cbqri_bc_bytes(bc, s->chunks);
 		} else {
 			struct cbqri_bc_mon_state *s = &bc->mbm_total_states[rmid];
 			u64 cur = ctr_val & CBQRI_BC_MON_CTR_VAL_CTR_MASK;
 
 			s->chunks  += cbqri_bc_mon_overflow(s->prev_ctr, cur);
 			s->prev_ctr = cur;
-			*val        = s->chunks;
+			*val        = cbqri_bc_bytes(bc, s->chunks);
 		}
 out_bc:
 		mutex_unlock(&bc->lock);
