@@ -130,7 +130,12 @@ skip_context_tracking:
 
 	/* Handle interrupts */
 	move a0, sp /* pt_regs */
+#ifdef CONFIG_RISCV_ISA_SSQOSID
+	/* runs the handler under the RCID picked by qos_resctrl.irq_policy (qos/qos.c) */
+	la a1, riscv_qos_handle_irq
+#else
 	la a1, generic_handle_arch_irq
+#endif
 	jr a1
 1:
 	/*

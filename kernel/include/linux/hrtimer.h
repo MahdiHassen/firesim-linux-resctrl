@@ -124,6 +124,7 @@ struct hrtimer {
 	u8				is_rel;
 	u8				is_soft;
 	u8				is_hard;
+	unsigned long			qos_tag;	/* srmcfg of the armer (qos_work.h) */
 };
 
 /**

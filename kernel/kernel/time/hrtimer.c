@@ -23,6 +23,7 @@
  */
 
 #include <linux/cpu.h>
+#include <linux/qos_work.h>
 #include <linux/export.h>
 #include <linux/percpu.h>
 #include <linux/hrtimer.h>
@@ -1238,6 +1239,7 @@ static int __hrtimer_start_range_ns(struct hrtimer *timer, ktime_t tim,
 	 * avoids programming the underlying clock event twice (once at
 	 * removal and once after enqueue).
 	 */
+	timer->qos_tag = qos_work_tag();
 	remove_hrtimer(timer, base, true, force_local);
 
 	if (mode & HRTIMER_MODE_REL)
@@ -1682,7 +1684,13 @@ static void __run_hrtimer(struct hrtimer_cpu_base *cpu_base,
 	trace_hrtimer_expire_entry(timer, now);
 	expires_in_hardirq = lockdep_hrtimer_enter(timer);
 
-	restart = fn(timer);
+	{
+		/* hard hrtimers (the tick among them) follow the hardirq rule; soft ones their armer */
+		unsigned long qc = qos_work_begin(QOS_WORK_TIMER, 0, timer->is_soft ? timer->qos_tag : QOS_NOSWITCH);
+
+		restart = fn(timer);
+		qos_work_end(qc);
+	}
 
 	lockdep_hrtimer_exit(expires_in_hardirq);
 	trace_hrtimer_expire_exit(timer);
