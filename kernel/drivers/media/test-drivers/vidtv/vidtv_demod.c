@@ -407,8 +407,8 @@ static const struct dvb_frontend_ops vidtv_demod_ops = {
 };
 
 static const struct i2c_device_id vidtv_demod_i2c_id_table[] = {
-	{"dvb_vidtv_demod", 0},
-	{}
+	{ .name = "dvb_vidtv_demod" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, vidtv_demod_i2c_id_table);
 
@@ -418,7 +418,7 @@ static int vidtv_demod_i2c_probe(struct i2c_client *client)
 	struct vidtv_demod_state *state;
 
 	/* allocate memory for the internal state */
-	state = kzalloc(sizeof(*state), GFP_KERNEL);
+	state = kzalloc_obj(*state);
 	if (!state)
 		return -ENOMEM;
 
@@ -449,7 +449,7 @@ static struct i2c_driver vidtv_demod_i2c_driver = {
 		.name                = "dvb_vidtv_demod",
 		.suppress_bind_attrs = true,
 	},
-	.probe_new = vidtv_demod_i2c_probe,
+	.probe    = vidtv_demod_i2c_probe,
 	.remove   = vidtv_demod_i2c_remove,
 	.id_table = vidtv_demod_i2c_id_table,
 };

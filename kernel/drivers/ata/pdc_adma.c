@@ -123,7 +123,7 @@ static void adma_freeze(struct ata_port *ap);
 static void adma_thaw(struct ata_port *ap);
 static int adma_prereset(struct ata_link *link, unsigned long deadline);
 
-static struct scsi_host_template adma_ata_sht = {
+static const struct scsi_host_template adma_ata_sht = {
 	ATA_BASE_SHT(DRV_NAME),
 	.sg_tablesize		= LIBATA_MAX_PRD,
 	.dma_boundary		= ADMA_DMA_BOUNDARY,
@@ -140,7 +140,7 @@ static struct ata_port_operations adma_ata_ops = {
 
 	.freeze			= adma_freeze,
 	.thaw			= adma_thaw,
-	.prereset		= adma_prereset,
+	.reset.prereset		= adma_prereset,
 
 	.port_start		= adma_port_start,
 	.port_stop		= adma_port_stop,
@@ -157,8 +157,7 @@ static struct ata_port_info adma_port_info[] = {
 };
 
 static const struct pci_device_id adma_ata_pci_tbl[] = {
-	{ PCI_VDEVICE(PDC, 0x1841), board_1841_idx },
-
+	{ PCI_VDEVICE(PDC, 0x1841), .driver_data = board_1841_idx },
 	{ }	/* terminate list */
 };
 

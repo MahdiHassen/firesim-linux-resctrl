@@ -85,13 +85,12 @@ static int amd_create_gatt_pages(int nr_tables)
 	int retval = 0;
 	int i;
 
-	tables = kcalloc(nr_tables + 1, sizeof(struct amd_page_map *),
-			 GFP_KERNEL);
+	tables = kzalloc_objs(struct amd_page_map *, nr_tables + 1);
 	if (tables == NULL)
 		return -ENOMEM;
 
 	for (i = 0; i < nr_tables; i++) {
-		entry = kzalloc(sizeof(struct amd_page_map), GFP_KERNEL);
+		entry = kzalloc_obj(struct amd_page_map);
 		tables[i] = entry;
 		if (entry == NULL) {
 			retval = -ENOMEM;
@@ -549,4 +548,5 @@ static void __exit agp_amdk7_cleanup(void)
 module_init(agp_amdk7_init);
 module_exit(agp_amdk7_cleanup);
 
+MODULE_DESCRIPTION("AMD K7 AGPGART routines");
 MODULE_LICENSE("GPL and additional rights");

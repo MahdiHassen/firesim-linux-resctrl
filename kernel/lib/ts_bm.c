@@ -55,34 +55,53 @@ struct ts_bm
 	unsigned int	good_shift[];
 };
 
+static unsigned int matchpat(const u8 *pattern, unsigned int patlen,
+			     const u8 *text, bool icase)
+{
+	unsigned int i;
+
+	for (i = 0; i < patlen; i++) {
+		u8 t = *(text-i);
+
+		if (icase)
+			t = toupper(t);
+
+		if (t != *(pattern-i))
+			break;
+	}
+
+	return i;
+}
+
 static unsigned int bm_find(struct ts_config *conf, struct ts_state *state)
 {
 	struct ts_bm *bm = ts_config_priv(conf);
 	unsigned int i, text_len, consumed = state->offset;
 	const u8 *text;
-	int shift = bm->patlen - 1, bs;
+	int bs;
 	const u8 icase = conf->flags & TS_IGNORECASE;
 
 	for (;;) {
+		int shift = bm->patlen - 1;
+
 		text_len = conf->get_next_block(consumed, &text, conf, state);
 
 		if (unlikely(text_len == 0))
 			break;
 
 		while (shift < text_len) {
-			DEBUGP("Searching in position %d (%c)\n", 
-				shift, text[shift]);
-			for (i = 0; i < bm->patlen; i++) 
-				if ((icase ? toupper(text[shift-i])
-				    : text[shift-i])
-					!= bm->pattern[bm->patlen-1-i])
-				     goto next;
+			DEBUGP("Searching in position %d (%c)\n",
+			       shift, text[shift]);
 
-			/* London calling... */
-			DEBUGP("found!\n");
-			return consumed + (shift-(bm->patlen-1));
+			i = matchpat(&bm->pattern[bm->patlen-1], bm->patlen,
+				     &text[shift], icase);
+			if (i == bm->patlen) {
+				/* London calling... */
+				DEBUGP("found!\n");
+				return consumed + (shift-(bm->patlen-1));
+			}
 
-next:			bs = bm->bad_shift[text[shift-i]];
+			bs = bm->bad_shift[text[shift-i]];
 
 			/* Now jumping to... */
 			shift = max_t(int, shift-i+bs, shift+bm->good_shift[i]);
@@ -144,8 +163,22 @@ static struct ts_config *bm_init(const void *pattern, unsigned int len,
 	struct ts_config *conf;
 	struct ts_bm *bm;
 	int i;
-	unsigned int prefix_tbl_len = len * sizeof(unsigned int);
-	size_t priv_size = sizeof(*bm) + len + prefix_tbl_len;
+	unsigned int prefix_tbl_len;
+	size_t priv_size;
+
+	/* Zero-length patterns would underflow bm_find()'s initial shift. */
+	if (unlikely(!len))
+		return ERR_PTR(-EINVAL);
+
+	/*
+	 * bm->pattern is stored immediately after the good_shift[] table.
+	 * Reject lengths that would wrap while sizing either region.
+	 */
+	if (unlikely(check_mul_overflow(len, sizeof(*bm->good_shift),
+					&prefix_tbl_len) ||
+		     check_add_overflow(sizeof(*bm), (size_t)len, &priv_size) ||
+		     check_add_overflow(priv_size, prefix_tbl_len, &priv_size)))
+		return ERR_PTR(-EINVAL);
 
 	conf = alloc_ts_config(priv_size, gfp_mask);
 	if (IS_ERR(conf))
@@ -197,6 +230,7 @@ static void __exit exit_bm(void)
 	textsearch_unregister(&bm_ops);
 }
 
+MODULE_DESCRIPTION("Boyer-Moore text search implementation");
 MODULE_LICENSE("GPL");
 
 module_init(init_bm);

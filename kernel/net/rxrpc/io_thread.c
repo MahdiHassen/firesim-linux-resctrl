@@ -25,9 +25,16 @@ static int rxrpc_input_packet_on_conn(struct rxrpc_connection *conn,
  */
 int rxrpc_encap_rcv(struct sock *udp_sk, struct sk_buff *skb)
 {
+	struct sk_buff_head *rx_queue;
 	struct rxrpc_local *local = rcu_dereference_sk_user_data(udp_sk);
+	struct task_struct *io_thread;
 
 	if (unlikely(!local)) {
+		kfree_skb(skb);
+		return 0;
+	}
+	io_thread = READ_ONCE(local->io_thread);
+	if (!io_thread) {
 		kfree_skb(skb);
 		return 0;
 	}
@@ -36,8 +43,17 @@ int rxrpc_encap_rcv(struct sock *udp_sk, struct sk_buff *skb)
 
 	skb->mark = RXRPC_SKB_MARK_PACKET;
 	rxrpc_new_skb(skb, rxrpc_skb_new_encap_rcv);
-	skb_queue_tail(&local->rx_queue, skb);
-	rxrpc_wake_up_io_thread(local);
+	rx_queue = &local->rx_queue;
+#ifdef CONFIG_AF_RXRPC_INJECT_RX_DELAY
+	if (rxrpc_inject_rx_delay ||
+	    !skb_queue_empty(&local->rx_delay_queue)) {
+		skb->tstamp = ktime_add_ms(skb->tstamp, rxrpc_inject_rx_delay);
+		rx_queue = &local->rx_delay_queue;
+	}
+#endif
+
+	skb_queue_tail(rx_queue, skb);
+	wake_up_process(io_thread);
 	return 0;
 }
 
@@ -81,6 +97,20 @@ bool rxrpc_direct_abort(struct sk_buff *skb, enum rxrpc_abort_reason why,
 	return false;
 }
 
+/*
+ * Directly produce a connection abort from a packet.
+ */
+bool rxrpc_direct_conn_abort(struct sk_buff *skb, enum rxrpc_abort_reason why,
+			     s32 abort_code, int err)
+{
+	struct rxrpc_skb_priv *sp = rxrpc_skb(skb);
+
+	trace_rxrpc_abort(0, why, sp->hdr.cid, 0, sp->hdr.seq, abort_code, err);
+	skb->mark = RXRPC_SKB_MARK_REJECT_CONN_ABORT;
+	skb->priority = abort_code;
+	return false;
+}
+
 static bool rxrpc_bad_message(struct sk_buff *skb, enum rxrpc_abort_reason why)
 {
 	return rxrpc_direct_abort(skb, why, RX_PROTOCOL_ERROR, -EBADMSG);
@@ -114,6 +144,7 @@ static bool rxrpc_extract_header(struct rxrpc_skb_priv *sp,
 				 struct sk_buff *skb)
 {
 	struct rxrpc_wire_header whdr;
+	struct rxrpc_ackpacket ack;
 
 	/* dig out the RxRPC connection details */
 	if (skb_copy_bits(skb, 0, &whdr, sizeof(whdr)) < 0)
@@ -131,6 +162,16 @@ static bool rxrpc_extract_header(struct rxrpc_skb_priv *sp,
 	sp->hdr.securityIndex	= whdr.securityIndex;
 	sp->hdr._rsvd		= ntohs(whdr._rsvd);
 	sp->hdr.serviceId	= ntohs(whdr.serviceId);
+
+	if (sp->hdr.type == RXRPC_PACKET_TYPE_ACK) {
+		if (skb_copy_bits(skb, sizeof(whdr), &ack, sizeof(ack)) < 0)
+			return rxrpc_bad_message(skb, rxrpc_badmsg_short_ack);
+		sp->ack.first_ack	= ntohl(ack.firstPacket);
+		sp->ack.prev_ack	= ntohl(ack.previousPacket);
+		sp->ack.acked_serial	= ntohl(ack.serial);
+		sp->ack.reason		= ack.reason;
+		sp->ack.nr_acks		= ack.nAcks;
+	}
 	return true;
 }
 
@@ -151,13 +192,12 @@ static bool rxrpc_extract_abort(struct sk_buff *skb)
 /*
  * Process packets received on the local endpoint
  */
-static bool rxrpc_input_packet(struct rxrpc_local *local, struct sk_buff **_skb)
+static bool rxrpc_input_packet(struct rxrpc_local *local, struct sk_buff *skb)
 {
 	struct rxrpc_connection *conn;
 	struct sockaddr_rxrpc peer_srx;
 	struct rxrpc_skb_priv *sp;
 	struct rxrpc_peer *peer = NULL;
-	struct sk_buff *skb = *_skb;
 	bool ret = false;
 
 	skb_pull(skb, sizeof(struct udphdr));
@@ -203,25 +243,6 @@ static bool rxrpc_input_packet(struct rxrpc_local *local, struct sk_buff **_skb)
 			return rxrpc_bad_message(skb, rxrpc_badmsg_zero_call);
 		if (sp->hdr.seq == 0)
 			return rxrpc_bad_message(skb, rxrpc_badmsg_zero_seq);
-
-		/* Unshare the packet so that it can be modified for in-place
-		 * decryption.
-		 */
-		if (sp->hdr.securityIndex != 0) {
-			skb = skb_unshare(skb, GFP_ATOMIC);
-			if (!skb) {
-				rxrpc_eaten_skb(*_skb, rxrpc_skb_eaten_by_unshare_nomem);
-				*_skb = NULL;
-				return just_discard;
-			}
-
-			if (skb != *_skb) {
-				rxrpc_eaten_skb(*_skb, rxrpc_skb_eaten_by_unshare);
-				*_skb = skb;
-				rxrpc_new_skb(skb, rxrpc_skb_new_unshared);
-				sp = rxrpc_skb(skb);
-			}
-		}
 		break;
 
 	case RXRPC_PACKET_TYPE_CHALLENGE:
@@ -311,7 +332,6 @@ static int rxrpc_input_packet_on_conn(struct rxrpc_connection *conn,
 	struct rxrpc_channel *chan;
 	struct rxrpc_call *call = NULL;
 	unsigned int channel;
-	bool ret;
 
 	if (sp->hdr.securityIndex != conn->security_ix)
 		return rxrpc_direct_abort(skb, rxrpc_eproto_wrong_security,
@@ -336,6 +356,12 @@ static int rxrpc_input_packet_on_conn(struct rxrpc_connection *conn,
 	/* It's a connection-level packet if the call number is 0. */
 	if (sp->hdr.callNumber == 0)
 		return rxrpc_input_conn_packet(conn, skb);
+
+	/* Deal with path MTU discovery probing. */
+	if (sp->hdr.type == RXRPC_PACKET_TYPE_ACK &&
+	    conn->pmtud_probe &&
+	    after_eq(sp->ack.acked_serial, conn->pmtud_probe))
+		rxrpc_input_probe_for_pmtud(conn, sp->ack.acked_serial, false);
 
 	/* Call-bound packets are routed by connection channel. */
 	channel = sp->hdr.cid & RXRPC_CHANNELMASK;
@@ -373,7 +399,8 @@ static int rxrpc_input_packet_on_conn(struct rxrpc_connection *conn,
 
 	if (sp->hdr.callNumber > chan->call_id) {
 		if (rxrpc_to_client(sp)) {
-			rxrpc_put_call(call, rxrpc_call_put_input);
+			if (call)
+				rxrpc_put_call(call, rxrpc_call_put_input);
 			return rxrpc_protocol_error(skb,
 						    rxrpc_eproto_unexpected_implicit_end);
 		}
@@ -392,9 +419,9 @@ static int rxrpc_input_packet_on_conn(struct rxrpc_connection *conn,
 					       peer_srx, skb);
 	}
 
-	ret = rxrpc_input_call_event(call, skb);
+	rxrpc_queue_rx_call_packet(call, skb);
 	rxrpc_put_call(call, rxrpc_call_put_input);
-	return ret;
+	return true;
 }
 
 /*
@@ -407,7 +434,12 @@ int rxrpc_io_thread(void *data)
 	struct rxrpc_local *local = data;
 	struct rxrpc_call *call;
 	struct sk_buff *skb;
+#ifdef CONFIG_AF_RXRPC_INJECT_RX_DELAY
+	ktime_t now;
+#endif
 	bool should_stop;
+	LIST_HEAD(conn_attend_q);
+	LIST_HEAD(call_attend_q);
 
 	complete(&local->io_thread_ready);
 
@@ -418,48 +450,31 @@ int rxrpc_io_thread(void *data)
 	for (;;) {
 		rxrpc_inc_stat(local->rxnet, stat_io_loop);
 
-		/* Deal with connections that want immediate attention. */
-		conn = list_first_entry_or_null(&local->conn_attend_q,
-						struct rxrpc_connection,
-						attend_link);
-		if (conn) {
-			spin_lock_bh(&local->lock);
-			list_del_init(&conn->attend_link);
-			spin_unlock_bh(&local->lock);
+		/* Inject a delay into packets if requested. */
+#ifdef CONFIG_AF_RXRPC_INJECT_RX_DELAY
+		now = ktime_get_real();
+		while ((skb = skb_peek(&local->rx_delay_queue))) {
+			if (ktime_before(now, skb->tstamp))
+				break;
+			skb = skb_dequeue(&local->rx_delay_queue);
+			skb_queue_tail(&local->rx_queue, skb);
+		}
+#endif
 
-			rxrpc_input_conn_event(conn, NULL);
-			rxrpc_put_connection(conn, rxrpc_conn_put_poke);
-			continue;
+		if (!skb_queue_empty(&local->rx_queue)) {
+			spin_lock_irq(&local->rx_queue.lock);
+			skb_queue_splice_tail_init(&local->rx_queue, &rx_queue);
+			spin_unlock_irq(&local->rx_queue.lock);
+			trace_rxrpc_iothread_rx(local, skb_queue_len(&rx_queue));
 		}
 
-		if (test_and_clear_bit(RXRPC_CLIENT_CONN_REAP_TIMER,
-				       &local->client_conn_flags))
-			rxrpc_discard_expired_client_conns(local);
-
-		/* Deal with calls that want immediate attention. */
-		if ((call = list_first_entry_or_null(&local->call_attend_q,
-						     struct rxrpc_call,
-						     attend_link))) {
-			spin_lock_bh(&local->lock);
-			list_del_init(&call->attend_link);
-			spin_unlock_bh(&local->lock);
-
-			trace_rxrpc_call_poked(call);
-			rxrpc_input_call_event(call, NULL);
-			rxrpc_put_call(call, rxrpc_call_put_poke);
-			continue;
-		}
-
-		if (!list_empty(&local->new_client_calls))
-			rxrpc_connect_client_calls(local);
-
-		/* Process received packets and errors. */
-		if ((skb = __skb_dequeue(&rx_queue))) {
+		/* Distribute packets and errors. */
+		while ((skb = __skb_dequeue(&rx_queue))) {
 			struct rxrpc_skb_priv *sp = rxrpc_skb(skb);
 			switch (skb->mark) {
 			case RXRPC_SKB_MARK_PACKET:
 				skb->priority = 0;
-				if (!rxrpc_input_packet(local, &skb))
+				if (!rxrpc_input_packet(local, skb))
 					rxrpc_reject_packet(local, skb);
 				trace_rxrpc_rx_done(skb->mark, skb->priority);
 				rxrpc_free_skb(skb, rxrpc_skb_put_input);
@@ -469,8 +484,8 @@ int rxrpc_io_thread(void *data)
 				rxrpc_free_skb(skb, rxrpc_skb_put_error_report);
 				break;
 			case RXRPC_SKB_MARK_SERVICE_CONN_SECURED:
-				rxrpc_input_conn_event(sp->conn, skb);
-				rxrpc_put_connection(sp->conn, rxrpc_conn_put_poke);
+				rxrpc_input_conn_event(sp->poke_conn, skb);
+				rxrpc_put_connection(sp->poke_conn, rxrpc_conn_put_poke);
 				rxrpc_free_skb(skb, rxrpc_skb_put_conn_secured);
 				break;
 			default:
@@ -478,15 +493,47 @@ int rxrpc_io_thread(void *data)
 				rxrpc_free_skb(skb, rxrpc_skb_put_unknown);
 				break;
 			}
-			continue;
 		}
 
-		if (!skb_queue_empty(&local->rx_queue)) {
-			spin_lock_irq(&local->rx_queue.lock);
-			skb_queue_splice_tail_init(&local->rx_queue, &rx_queue);
-			spin_unlock_irq(&local->rx_queue.lock);
-			continue;
+		/* Deal with connections that want immediate attention. */
+		if (!list_empty_careful(&local->conn_attend_q)) {
+			spin_lock_irq(&local->lock);
+			list_splice_tail_init(&local->conn_attend_q, &conn_attend_q);
+			spin_unlock_irq(&local->lock);
 		}
+
+		while ((conn = list_first_entry_or_null(&conn_attend_q,
+							struct rxrpc_connection,
+							attend_link))) {
+			spin_lock_irq(&local->lock);
+			list_del_init(&conn->attend_link);
+			spin_unlock_irq(&local->lock);
+			rxrpc_input_conn_event(conn, NULL);
+			rxrpc_put_connection(conn, rxrpc_conn_put_poke);
+		}
+
+		if (test_and_clear_bit(RXRPC_CLIENT_CONN_REAP_TIMER,
+				       &local->client_conn_flags))
+			rxrpc_discard_expired_client_conns(local);
+
+		/* Deal with calls that want immediate attention. */
+		spin_lock_irq(&local->lock);
+		list_splice_tail_init(&local->call_attend_q, &call_attend_q);
+		spin_unlock_irq(&local->lock);
+
+		while ((call = list_first_entry_or_null(&call_attend_q,
+							struct rxrpc_call,
+							attend_link))) {
+			spin_lock_irq(&local->lock);
+			list_del_init(&call->attend_link);
+			spin_unlock_irq(&local->lock);
+			trace_rxrpc_call_poked(call);
+			rxrpc_input_call_event(call);
+			rxrpc_put_call(call, rxrpc_call_put_poke);
+		}
+
+		if (!list_empty(&local->new_client_calls))
+			rxrpc_connect_client_calls(local);
 
 		set_current_state(TASK_INTERRUPTIBLE);
 		should_stop = kthread_should_stop();
@@ -502,13 +549,35 @@ int rxrpc_io_thread(void *data)
 
 		if (should_stop)
 			break;
+
+#ifdef CONFIG_AF_RXRPC_INJECT_RX_DELAY
+		skb = skb_peek(&local->rx_delay_queue);
+		if (skb) {
+			unsigned long timeout;
+			ktime_t tstamp = skb->tstamp;
+			ktime_t now = ktime_get_real();
+			s64 delay_ns = ktime_to_ns(ktime_sub(tstamp, now));
+
+			if (delay_ns <= 0) {
+				__set_current_state(TASK_RUNNING);
+				continue;
+			}
+
+			timeout = nsecs_to_jiffies(delay_ns);
+			timeout = umax(timeout, 1);
+			schedule_timeout(timeout);
+			__set_current_state(TASK_RUNNING);
+			continue;
+		}
+#endif
+
 		schedule();
 	}
 
 	__set_current_state(TASK_RUNNING);
 	rxrpc_see_local(local, rxrpc_local_stop);
 	rxrpc_destroy_local(local);
-	local->io_thread = NULL;
+	WRITE_ONCE(local->io_thread, NULL);
 	rxrpc_see_local(local, rxrpc_local_stopped);
 	return 0;
 }

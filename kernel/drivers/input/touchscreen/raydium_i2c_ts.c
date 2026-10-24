@@ -24,7 +24,7 @@
 #include <linux/pm_wakeirq.h>
 #include <linux/regulator/consumer.h>
 #include <linux/slab.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 /* Slave I2C mode */
 #define RM_BOOT_BLDR		0x02
@@ -169,10 +169,9 @@ static int raydium_i2c_send(struct i2c_client *client,
 {
 	int tries = 0;
 	int error;
-	u8 *tx_buf;
 	u8 reg_addr = addr & 0xff;
 
-	tx_buf = kmalloc(len + 1, GFP_KERNEL);
+	u8 *tx_buf __free(kfree) = kmalloc(len + 1, GFP_KERNEL);
 	if (!tx_buf)
 		return -ENOMEM;
 
@@ -210,14 +209,12 @@ static int raydium_i2c_send(struct i2c_client *client,
 
 		error = raydium_i2c_xfer(client, addr, xfer, ARRAY_SIZE(xfer));
 		if (likely(!error))
-			goto out;
+			return 0;
 
 		msleep(RM_RETRY_DELAY_MS);
 	} while (++tries < RM_MAX_RETRIES);
 
 	dev_err(&client->dev, "%s failed: %d\n", __func__, error);
-out:
-	kfree(tx_buf);
 	return error;
 }
 
@@ -815,21 +812,21 @@ static int raydium_i2c_do_update_firmware(struct raydium_data *ts,
 static int raydium_i2c_fw_update(struct raydium_data *ts)
 {
 	struct i2c_client *client = ts->client;
-	const struct firmware *fw = NULL;
-	char *fw_file;
 	int error;
 
-	fw_file = kasprintf(GFP_KERNEL, "raydium_%#04x.fw",
-			    le32_to_cpu(ts->info.hw_ver));
+	const char *fw_file __free(kfree) =
+		kasprintf(GFP_KERNEL, "raydium_%#04x.fw",
+			  le32_to_cpu(ts->info.hw_ver));
 	if (!fw_file)
 		return -ENOMEM;
 
 	dev_dbg(&client->dev, "firmware name: %s\n", fw_file);
 
+	const struct firmware *fw __free(firmware) = NULL;
 	error = request_firmware(&fw, fw_file, &client->dev);
 	if (error) {
 		dev_err(&client->dev, "Unable to open firmware %s\n", fw_file);
-		goto out_free_fw_file;
+		return error;
 	}
 
 	disable_irq(client->irq);
@@ -855,11 +852,6 @@ static int raydium_i2c_fw_update(struct raydium_data *ts)
 out_enable_irq:
 	enable_irq(client->irq);
 	msleep(100);
-
-	release_firmware(fw);
-
-out_free_fw_file:
-	kfree(fw_file);
 
 	return error;
 }
@@ -965,15 +957,12 @@ static ssize_t raydium_i2c_update_fw_store(struct device *dev,
 	struct raydium_data *ts = i2c_get_clientdata(client);
 	int error;
 
-	error = mutex_lock_interruptible(&ts->sysfs_mutex);
-	if (error)
-		return error;
+	scoped_guard(mutex_intr, &ts->sysfs_mutex) {
+		error = raydium_i2c_fw_update(ts);
+		return error ?: count;
+	}
 
-	error = raydium_i2c_fw_update(ts);
-
-	mutex_unlock(&ts->sysfs_mutex);
-
-	return error ?: count;
+	return -EINTR;
 }
 
 static ssize_t raydium_i2c_calibrate_store(struct device *dev,
@@ -985,17 +974,20 @@ static ssize_t raydium_i2c_calibrate_store(struct device *dev,
 	static const u8 cal_cmd[] = { 0x00, 0x01, 0x9E };
 	int error;
 
-	error = mutex_lock_interruptible(&ts->sysfs_mutex);
-	if (error)
-		return error;
+	scoped_guard(mutex_intr, &ts->sysfs_mutex) {
+		error = raydium_i2c_write_object(client,
+						 cal_cmd, sizeof(cal_cmd),
+						 RAYDIUM_WAIT_READY);
+		if (error) {
+			dev_err(&client->dev,
+				"calibrate command failed: %d\n", error);
+			return error;
+		}
 
-	error = raydium_i2c_write_object(client, cal_cmd, sizeof(cal_cmd),
-					 RAYDIUM_WAIT_READY);
-	if (error)
-		dev_err(&client->dev, "calibrate command failed: %d\n", error);
+		return count;
+	}
 
-	mutex_unlock(&ts->sysfs_mutex);
-	return error ?: count;
+	return -EINTR;
 }
 
 static DEVICE_ATTR(fw_version, S_IRUGO, raydium_i2c_fw_ver_show, NULL);
@@ -1004,7 +996,7 @@ static DEVICE_ATTR(boot_mode, S_IRUGO, raydium_i2c_boot_mode_show, NULL);
 static DEVICE_ATTR(update_fw, S_IWUSR, NULL, raydium_i2c_update_fw_store);
 static DEVICE_ATTR(calibrate, S_IWUSR, NULL, raydium_i2c_calibrate_store);
 
-static struct attribute *raydium_i2c_attributes[] = {
+static struct attribute *raydium_i2c_attrs[] = {
 	&dev_attr_update_fw.attr,
 	&dev_attr_boot_mode.attr,
 	&dev_attr_fw_version.attr,
@@ -1012,10 +1004,7 @@ static struct attribute *raydium_i2c_attributes[] = {
 	&dev_attr_calibrate.attr,
 	NULL
 };
-
-static const struct attribute_group raydium_i2c_attribute_group = {
-	.attrs = raydium_i2c_attributes,
-};
+ATTRIBUTE_GROUPS(raydium_i2c);
 
 static int raydium_i2c_power_on(struct raydium_data *ts)
 {
@@ -1087,32 +1076,20 @@ static int raydium_i2c_probe(struct i2c_client *client)
 	i2c_set_clientdata(client, ts);
 
 	ts->avdd = devm_regulator_get(&client->dev, "avdd");
-	if (IS_ERR(ts->avdd)) {
-		error = PTR_ERR(ts->avdd);
-		if (error != -EPROBE_DEFER)
-			dev_err(&client->dev,
-				"Failed to get 'avdd' regulator: %d\n", error);
-		return error;
-	}
+	if (IS_ERR(ts->avdd))
+		return dev_err_probe(&client->dev, PTR_ERR(ts->avdd),
+				     "Failed to get 'avdd' regulator\n");
 
 	ts->vccio = devm_regulator_get(&client->dev, "vccio");
-	if (IS_ERR(ts->vccio)) {
-		error = PTR_ERR(ts->vccio);
-		if (error != -EPROBE_DEFER)
-			dev_err(&client->dev,
-				"Failed to get 'vccio' regulator: %d\n", error);
-		return error;
-	}
+	if (IS_ERR(ts->vccio))
+		return dev_err_probe(&client->dev, PTR_ERR(ts->vccio),
+				     "Failed to get 'vccio' regulator\n");
 
 	ts->reset_gpio = devm_gpiod_get_optional(&client->dev, "reset",
 						 GPIOD_OUT_LOW);
-	if (IS_ERR(ts->reset_gpio)) {
-		error = PTR_ERR(ts->reset_gpio);
-		if (error != -EPROBE_DEFER)
-			dev_err(&client->dev,
-				"failed to get reset gpio: %d\n", error);
-		return error;
-	}
+	if (IS_ERR(ts->reset_gpio))
+		return dev_err_probe(&client->dev, PTR_ERR(ts->reset_gpio),
+				     "Failed to get reset gpio\n");
 
 	error = raydium_i2c_power_on(ts);
 	if (error)
@@ -1186,18 +1163,10 @@ static int raydium_i2c_probe(struct i2c_client *client)
 		return error;
 	}
 
-	error = devm_device_add_group(&client->dev,
-				   &raydium_i2c_attribute_group);
-	if (error) {
-		dev_err(&client->dev, "failed to create sysfs attributes: %d\n",
-			error);
-		return error;
-	}
-
 	return 0;
 }
 
-static void __maybe_unused raydium_enter_sleep(struct i2c_client *client)
+static void raydium_enter_sleep(struct i2c_client *client)
 {
 	static const u8 sleep_cmd[] = { 0x5A, 0xff, 0x00, 0x0f };
 	int error;
@@ -1209,7 +1178,7 @@ static void __maybe_unused raydium_enter_sleep(struct i2c_client *client)
 			"sleep command failed: %d\n", error);
 }
 
-static int __maybe_unused raydium_i2c_suspend(struct device *dev)
+static int raydium_i2c_suspend(struct device *dev)
 {
 	struct i2c_client *client = to_i2c_client(dev);
 	struct raydium_data *ts = i2c_get_clientdata(client);
@@ -1229,7 +1198,7 @@ static int __maybe_unused raydium_i2c_suspend(struct device *dev)
 	return 0;
 }
 
-static int __maybe_unused raydium_i2c_resume(struct device *dev)
+static int raydium_i2c_resume(struct device *dev)
 {
 	struct i2c_client *client = to_i2c_client(dev);
 	struct raydium_data *ts = i2c_get_clientdata(client);
@@ -1246,12 +1215,12 @@ static int __maybe_unused raydium_i2c_resume(struct device *dev)
 	return 0;
 }
 
-static SIMPLE_DEV_PM_OPS(raydium_i2c_pm_ops,
-			 raydium_i2c_suspend, raydium_i2c_resume);
+static DEFINE_SIMPLE_DEV_PM_OPS(raydium_i2c_pm_ops,
+				raydium_i2c_suspend, raydium_i2c_resume);
 
 static const struct i2c_device_id raydium_i2c_id[] = {
-	{ "raydium_i2c", 0 },
-	{ "rm32380", 0 },
+	{ .name = "raydium_i2c" },
+	{ .name = "rm32380" },
 	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(i2c, raydium_i2c_id);
@@ -1273,11 +1242,12 @@ MODULE_DEVICE_TABLE(of, raydium_of_match);
 #endif
 
 static struct i2c_driver raydium_i2c_driver = {
-	.probe_new = raydium_i2c_probe,
+	.probe = raydium_i2c_probe,
 	.id_table = raydium_i2c_id,
 	.driver = {
 		.name = "raydium_ts",
-		.pm = &raydium_i2c_pm_ops,
+		.dev_groups = raydium_i2c_groups,
+		.pm = pm_sleep_ptr(&raydium_i2c_pm_ops),
 		.acpi_match_table = ACPI_PTR(raydium_acpi_id),
 		.of_match_table = of_match_ptr(raydium_of_match),
 	},

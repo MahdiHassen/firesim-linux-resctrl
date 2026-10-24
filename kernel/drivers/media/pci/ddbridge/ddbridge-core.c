@@ -3117,7 +3117,6 @@ static struct device_attribute ddb_attrs_fanspeed[] = {
 
 static struct class ddb_class = {
 	.name		= "ddbridge",
-	.owner          = THIS_MODULE,
 	.devnode        = ddb_devnode,
 };
 
@@ -3431,7 +3430,7 @@ int ddb_init_ddbridge(void)
 
 	if (ddb_class_create() < 0)
 		return -1;
-	ddb_wq = alloc_workqueue("ddbridge", 0, 0);
+	ddb_wq = alloc_workqueue("ddbridge", WQ_PERCPU, 0);
 	if (!ddb_wq)
 		return ddb_exit_ddbridge(1, -1);
 

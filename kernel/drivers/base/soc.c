@@ -5,15 +5,16 @@
  * Author: Lee Jones <lee.jones@linaro.org> for ST-Ericsson.
  */
 
-#include <linux/sysfs.h>
-#include <linux/init.h>
-#include <linux/stat.h>
-#include <linux/slab.h>
-#include <linux/idr.h>
-#include <linux/spinlock.h>
-#include <linux/sys_soc.h>
 #include <linux/err.h>
 #include <linux/glob.h>
+#include <linux/idr.h>
+#include <linux/init.h>
+#include <linux/of.h>
+#include <linux/slab.h>
+#include <linux/spinlock.h>
+#include <linux/stat.h>
+#include <linux/sysfs.h>
+#include <linux/sys_soc.h>
 
 static DEFINE_IDA(soc_ida);
 
@@ -27,9 +28,10 @@ struct soc_device {
 	int soc_dev_num;
 };
 
-static struct bus_type soc_bus_type = {
+static const struct bus_type soc_bus_type = {
 	.name  = "soc",
 };
+static bool soc_bus_registered;
 
 static DEVICE_ATTR(machine,		0444, soc_info_show,  NULL);
 static DEVICE_ATTR(family,		0444, soc_info_show,  NULL);
@@ -104,10 +106,19 @@ static void soc_release(struct device *dev)
 {
 	struct soc_device *soc_dev = container_of(dev, struct soc_device, dev);
 
-	ida_simple_remove(&soc_ida, soc_dev->soc_dev_num);
+	ida_free(&soc_ida, soc_dev->soc_dev_num);
 	kfree(soc_dev->dev.groups);
 	kfree(soc_dev);
 }
+
+int soc_attr_read_machine(struct soc_device_attribute *soc_dev_attr)
+{
+	if (soc_dev_attr->machine)
+		return -EBUSY;
+
+	return of_machine_read_model(&soc_dev_attr->machine);
+}
+EXPORT_SYMBOL_GPL(soc_attr_read_machine);
 
 static struct soc_device_attribute *early_soc_dev_attr;
 
@@ -117,20 +128,22 @@ struct soc_device *soc_device_register(struct soc_device_attribute *soc_dev_attr
 	const struct attribute_group **soc_attr_groups;
 	int ret;
 
-	if (!soc_bus_type.p) {
+	soc_attr_read_machine(soc_dev_attr);
+
+	if (!soc_bus_registered) {
 		if (early_soc_dev_attr)
 			return ERR_PTR(-EBUSY);
 		early_soc_dev_attr = soc_dev_attr;
 		return NULL;
 	}
 
-	soc_dev = kzalloc(sizeof(*soc_dev), GFP_KERNEL);
+	soc_dev = kzalloc_obj(*soc_dev);
 	if (!soc_dev) {
 		ret = -ENOMEM;
 		goto out1;
 	}
 
-	soc_attr_groups = kcalloc(3, sizeof(*soc_attr_groups), GFP_KERNEL);
+	soc_attr_groups = kzalloc_objs(*soc_attr_groups, 3);
 	if (!soc_attr_groups) {
 		ret = -ENOMEM;
 		goto out2;
@@ -139,7 +152,7 @@ struct soc_device *soc_device_register(struct soc_device_attribute *soc_dev_attr
 	soc_attr_groups[1] = soc_dev_attr->custom_attr_group;
 
 	/* Fetch a unique (reclaimable) SOC ID. */
-	ret = ida_simple_get(&soc_ida, 0, 0, GFP_KERNEL);
+	ret = ida_alloc(&soc_ida, GFP_KERNEL);
 	if (ret < 0)
 		goto out3;
 	soc_dev->soc_dev_num = ret;
@@ -183,6 +196,7 @@ static int __init soc_bus_register(void)
 	ret = bus_register(&soc_bus_type);
 	if (ret)
 		return ret;
+	soc_bus_registered = true;
 
 	if (early_soc_dev_attr)
 		return PTR_ERR(soc_device_register(early_soc_dev_attr));

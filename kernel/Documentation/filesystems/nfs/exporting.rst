@@ -119,46 +119,11 @@ For a filesystem to be exportable it must:
 
 A file system implementation declares that instances of the filesystem
 are exportable by setting the s_export_op field in the struct
-super_block.  This field must point to a "struct export_operations"
-struct which has the following members:
+super_block.  This field must point to a struct export_operations
+which has the following members:
 
- encode_fh  (optional)
-    Takes a dentry and creates a filehandle fragment which can later be used
-    to find or create a dentry for the same object.  The default
-    implementation creates a filehandle fragment that encodes a 32bit inode
-    and generation number for the inode encoded, and if necessary the
-    same information for the parent.
-
-  fh_to_dentry (mandatory)
-    Given a filehandle fragment, this should find the implied object and
-    create a dentry for it (possibly with d_obtain_alias).
-
-  fh_to_parent (optional but strongly recommended)
-    Given a filehandle fragment, this should find the parent of the
-    implied object and create a dentry for it (possibly with
-    d_obtain_alias).  May fail if the filehandle fragment is too small.
-
-  get_parent (optional but strongly recommended)
-    When given a dentry for a directory, this should return  a dentry for
-    the parent.  Quite possibly the parent dentry will have been allocated
-    by d_alloc_anon.  The default get_parent function just returns an error
-    so any filehandle lookup that requires finding a parent will fail.
-    ->lookup("..") is *not* used as a default as it can leave ".." entries
-    in the dcache which are too messy to work with.
-
-  get_name (optional)
-    When given a parent dentry and a child dentry, this should find a name
-    in the directory identified by the parent dentry, which leads to the
-    object identified by the child dentry.  If no get_name function is
-    supplied, a default implementation is provided which uses vfs_readdir
-    to find potential names, and matches inode numbers to find the correct
-    match.
-
-  flags
-    Some filesystems may need to be handled differently than others. The
-    export_operations struct also includes a flags field that allows the
-    filesystem to communicate such information to nfsd. See the Export
-    Operations Flags section below for more explanation.
+.. kernel-doc:: include/linux/exportfs.h
+   :identifiers: struct export_operations
 
 A filehandle fragment consists of an array of 1 or more 4byte words,
 together with a one byte "type".
@@ -215,3 +180,114 @@ following flags are defined:
     This flag causes nfsd to close any open files for this inode _before_
     calling into the vfs to do an unlink or a rename that would replace
     an existing file.
+
+  EXPORT_OP_REMOTE_FS - Backing storage for this filesystem is remote
+    PF_LOCAL_THROTTLE exists for loopback NFSD, where a thread needs to
+    write to one bdi (the final bdi) in order to free up writes queued
+    to another bdi (the client bdi). Such threads get a private balance
+    of dirty pages so that dirty pages for the client bdi do not imact
+    the daemon writing to the final bdi. For filesystems whose durable
+    storage is not local (such as exported NFS filesystems), this
+    constraint has negative consequences. EXPORT_OP_REMOTE_FS enables
+    an export to disable writeback throttling.
+
+  EXPORT_OP_NOATOMIC_ATTR - Filesystem does not update attributes atomically
+    EXPORT_OP_NOATOMIC_ATTR indicates that the exported filesystem
+    cannot provide the semantics required by the "atomic" boolean in
+    NFSv4's change_info4. This boolean indicates to a client whether the
+    returned before and after change attributes were obtained atomically
+    with the respect to the requested metadata operation (UNLINK,
+    OPEN/CREATE, MKDIR, etc).
+
+  EXPORT_OP_FLUSH_ON_CLOSE - Filesystem flushes file data on close(2)
+    On most filesystems, inodes can remain under writeback after the
+    file is closed. NFSD relies on client activity or local flusher
+    threads to handle writeback. Certain filesystems, such as NFS, flush
+    all of an inode's dirty data on last close. Exports that behave this
+    way should set EXPORT_OP_FLUSH_ON_CLOSE so that NFSD knows to skip
+    waiting for writeback when closing such files.
+
+Signed Filehandles
+------------------
+
+To protect against filehandle guessing attacks, the Linux NFS server can be
+configured to sign filehandles with a Message Authentication Code (MAC).
+
+Standard NFS filehandles are often predictable. If an attacker can guess
+a valid filehandle for a file they do not have permission to access via
+directory traversal, they may be able to bypass path-based permissions
+(though they still remain subject to inode-level permissions).
+
+Signed filehandles prevent this by appending a MAC to the filehandle
+before it is sent to the client. Upon receiving a filehandle back from a
+client, the server re-calculates the MAC using its internal key and
+verifies it against the one provided. If the signatures do not match,
+the server treats the filehandle as invalid (returning NFS[34]ERR_STALE).
+
+Note that signing filehandles provides integrity and authenticity but
+not confidentiality. The contents of the filehandle remain visible to
+the client; they simply cannot be forged or modified.
+
+Configuration
+~~~~~~~~~~~~~
+
+To enable signed filehandles, the administrator must provide a signing
+key to the kernel and enable the "sign_fh" export option.
+
+1. Providing a Key
+   The signing key is managed via the nfsd netlink interface. This key
+   is per-network-namespace and must be set before any exports using
+   "sign_fh" become active.
+
+2. Export Options
+   The feature is controlled on a per-export basis in /etc/exports:
+
+   sign_fh
+     Enables signing for all filehandles generated under this export.
+
+   no_sign_fh
+     (Default) Disables signing.
+
+Key Management and Rotation
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The security of this mechanism relies entirely on the secrecy of the
+signing key.
+
+Initial Setup:
+  The key should be generated using a high-quality random source and
+  loaded early in the boot process or during the nfs-server startup
+  sequence.
+
+Changing Keys:
+  If a key is changed while clients have active mounts, existing
+  filehandles held by those clients will become invalid, resulting in
+  "Stale file handle" errors on the client side.
+
+Safe Rotation:
+  Currently, there is no mechanism for "graceful" key rotation
+  (maintaining multiple valid keys). Changing the key is an atomic
+  operation that immediately invalidates all previous signatures.
+
+Transitioning Exports
+~~~~~~~~~~~~~~~~~~~~~
+
+When adding or removing the "sign_fh" flag from an active export, the
+following behaviors should be expected:
+
++-------------------+---------------------------------------------------+
+| Change            | Result for Existing Clients                       |
++===================+===================================================+
+| Adding sign_fh    | Clients holding unsigned filehandles will find    |
+|                   | them rejected, as the server now expects a        |
+|                   | signature.                                        |
++-------------------+---------------------------------------------------+
+| Removing sign_fh  | Clients holding signed filehandles will find them |
+|                   | rejected, as the server now expects the           |
+|                   | filehandle to end at its traditional boundary     |
+|                   | without a MAC.                                    |
++-------------------+---------------------------------------------------+
+
+Because filehandles are often cached persistently by clients, adding or
+removing this option should generally be done during a scheduled maintenance
+window involving a NFS client unmount/remount.

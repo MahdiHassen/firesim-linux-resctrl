@@ -12,7 +12,6 @@
 #include <linux/firewire.h>
 #include <linux/firewire-constants.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/mutex.h>
 #include <linux/slab.h>
 #include <linux/compat.h>
@@ -97,6 +96,8 @@ struct snd_ff {
 	wait_queue_head_t hwdep_wait;
 
 	struct amdtp_domain domain;
+
+	void *msg_parser;
 };
 
 enum snd_ff_clock_src {
@@ -110,8 +111,11 @@ enum snd_ff_clock_src {
 };
 
 struct snd_ff_protocol {
-	void (*handle_midi_msg)(struct snd_ff *ff, unsigned int offset,
-				__le32 *buf, size_t length);
+	size_t msg_parser_size;
+	bool (*has_msg)(struct snd_ff *ff);
+	long (*copy_msg_to_user)(struct snd_ff *ff, char __user *buf, long count);
+	void (*handle_msg)(struct snd_ff *ff, unsigned int offset, const __le32 *buf,
+			   size_t length, u32 tstamp);
 	int (*fill_midi_msg)(struct snd_ff *ff,
 			     struct snd_rawmidi_substream *substream,
 			     unsigned int port);

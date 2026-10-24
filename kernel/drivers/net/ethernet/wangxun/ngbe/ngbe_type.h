@@ -37,11 +37,6 @@
 
 #define NGBE_OEM_MASK				0x00FF
 
-#define NGBE_NCSI_SUP				0x8000
-#define NGBE_NCSI_MASK				0x8000
-#define NGBE_WOL_SUP				0x4000
-#define NGBE_WOL_MASK				0x4000
-
 /**************** EM Registers ****************************/
 /* chip control Registers */
 #define NGBE_MIS_PRB_CTL			0x10010
@@ -49,7 +44,6 @@
 #define NGBE_SPI_ILDR_STATUS			0x10120
 #define NGBE_SPI_ILDR_STATUS_PERST		BIT(0) /* PCIE_PERST is done */
 #define NGBE_SPI_ILDR_STATUS_PWRRST		BIT(1) /* Power on reset is done */
-#define NGBE_SPI_ILDR_STATUS_LAN_SW_RST(_i)	BIT((_i) + 9) /* lan soft reset done */
 
 /* Checksum and EEPROM pointers */
 #define NGBE_CALSUM_COMMAND			0xE9
@@ -60,9 +54,6 @@
 #define NGBE_EEPROM_VERSION_L			0x1D
 #define NGBE_EEPROM_VERSION_H			0x1E
 
-/* Media-dependent registers. */
-#define NGBE_MDIO_CLAUSE_SELECT			0x11220
-
 /* GPIO Registers */
 #define NGBE_GPIO_DR				0x14800
 #define NGBE_GPIO_DDR				0x14804
@@ -72,17 +63,30 @@
 #define NGBE_GPIO_DDR_0				BIT(0) /* SDP0 IO direction */
 #define NGBE_GPIO_DDR_1				BIT(1) /* SDP1 IO direction */
 
-/* Wake up registers */
-#define NGBE_PSR_WKUP_CTL			0x15B80
-/* Wake Up Filter Control Bit */
-#define NGBE_PSR_WKUP_CTL_LNKC			BIT(0) /* Link Status Change Wakeup Enable*/
-#define NGBE_PSR_WKUP_CTL_MAG			BIT(1) /* Magic Packet Wakeup Enable */
-#define NGBE_PSR_WKUP_CTL_EX			BIT(2) /* Directed Exact Wakeup Enable */
-#define NGBE_PSR_WKUP_CTL_MC			BIT(3) /* Directed Multicast Wakeup Enable*/
-#define NGBE_PSR_WKUP_CTL_BC			BIT(4) /* Broadcast Wakeup Enable */
-#define NGBE_PSR_WKUP_CTL_ARP			BIT(5) /* ARP Request Packet Wakeup Enable*/
-#define NGBE_PSR_WKUP_CTL_IPV4			BIT(6) /* Directed IPv4 Pkt Wakeup Enable */
-#define NGBE_PSR_WKUP_CTL_IPV6			BIT(7) /* Directed IPv6 Pkt Wakeup Enable */
+/* Extended Interrupt Enable Set */
+#define NGBE_PX_MISC_IEN_DEV_RST		BIT(10)
+#define NGBE_PX_MISC_IEN_TIMESYNC		BIT(11)
+#define NGBE_PX_MISC_IEN_ETH_LK			BIT(18)
+#define NGBE_PX_MISC_IEN_INT_ERR		BIT(20)
+#define NGBE_PX_MISC_IC_VF_MBOX			BIT(23)
+#define NGBE_PX_MISC_IEN_GPIO			BIT(26)
+#define NGBE_PX_MISC_IEN_MASK ( \
+				NGBE_PX_MISC_IEN_DEV_RST | \
+				NGBE_PX_MISC_IEN_TIMESYNC | \
+				NGBE_PX_MISC_IEN_ETH_LK | \
+				NGBE_PX_MISC_IEN_INT_ERR | \
+				NGBE_PX_MISC_IC_VF_MBOX | \
+				NGBE_PX_MISC_IEN_GPIO)
+
+/* Extended Interrupt Cause Read */
+#define NGBE_PX_MISC_IC_TIMESYNC		BIT(11) /* time sync */
+
+#define NGBE_INTR_ALL				0x1FF
+#define NGBE_INTR_MISC(A)			BIT((A)->msix_entry->entry)
+
+#define NGBE_PHY_CONFIG(reg_offset)		(0x14000 + ((reg_offset) * 4))
+#define NGBE_CFG_LAN_SPEED			0x14440
+#define NGBE_CFG_PORT_ST			0x14404
 
 #define NGBE_FW_EEPROM_CHECKSUM_CMD		0xE9
 #define NGBE_FW_NVM_DATA_OFFSET			3
@@ -90,50 +94,36 @@
 #define NGBE_FW_CMD_ST_PASS			0x80658383
 #define NGBE_FW_CMD_ST_FAIL			0x70657376
 
-enum ngbe_phy_type {
-	ngbe_phy_unknown = 0,
-	ngbe_phy_none,
-	ngbe_phy_internal,
-	ngbe_phy_m88e1512,
-	ngbe_phy_m88e1512_sfi,
-	ngbe_phy_m88e1512_unknown,
-	ngbe_phy_yt8521s,
-	ngbe_phy_yt8521s_sfi,
-	ngbe_phy_internal_yt8521s_sfi,
-	ngbe_phy_generic
-};
+#define NGBE_MAX_FDIR_INDICES			7
+#define NGBE_MAX_RSS_INDICES			8
 
-enum ngbe_media_type {
-	ngbe_media_type_unknown = 0,
-	ngbe_media_type_fiber,
-	ngbe_media_type_copper,
-	ngbe_media_type_backplane,
-};
+#define NGBE_MAX_RX_QUEUES			(NGBE_MAX_FDIR_INDICES + 1)
+#define NGBE_MAX_TX_QUEUES			(NGBE_MAX_FDIR_INDICES + 1)
 
-enum ngbe_mac_type {
-	ngbe_mac_type_unknown = 0,
-	ngbe_mac_type_mdi,
-	ngbe_mac_type_rgmii
-};
+#define NGBE_ETH_LENGTH_OF_ADDRESS		6
+#define NGBE_MAX_MSIX_VECTORS			0x09
+#define NGBE_RAR_ENTRIES			32
+#define NGBE_RX_PB_SIZE				42
+#define NGBE_MC_TBL_SIZE			128
+#define NGBE_SP_VFT_TBL_SIZE			128
+#define NGBE_TDB_PB_SZ				(20 * 1024) /* 160KB Packet Buffer */
 
-struct ngbe_phy_info {
-	enum ngbe_phy_type type;
-	enum ngbe_media_type media_type;
+/* TX/RX descriptor defines */
+#define NGBE_DEFAULT_TXD			512 /* default ring size */
+#define NGBE_DEFAULT_TX_WORK			256
+#define NGBE_MAX_TXD				8192
+#define NGBE_MIN_TXD				128
 
-	u32 addr;
-	u32 id;
+#define NGBE_DEFAULT_RXD			512 /* default ring size */
+#define NGBE_DEFAULT_RX_WORK			256
+#define NGBE_MAX_RXD				8192
+#define NGBE_MIN_RXD				128
 
-	bool reset_if_overtemp;
+#define NGBE_MAX_VFS_DRV_LIMIT			7
+extern char ngbe_driver_name[];
 
-};
+void ngbe_down(struct wx *wx);
+void ngbe_up(struct wx *wx);
+int ngbe_setup_tc(struct net_device *dev, u8 tc);
 
-struct ngbe_hw {
-	struct wx_hw wxhw;
-	struct ngbe_phy_info phy;
-	enum ngbe_mac_type mac_type;
-
-	bool wol_enabled;
-	bool ncsi_enabled;
-	bool gpio_ctrl;
-};
 #endif /* _NGBE_TYPE_H_ */

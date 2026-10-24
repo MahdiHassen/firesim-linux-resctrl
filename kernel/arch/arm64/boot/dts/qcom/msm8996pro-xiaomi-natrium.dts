@@ -39,7 +39,11 @@
 	};
 };
 
-&dsi0 {
+&gpu_zap_shader {
+	firmware-name = "qcom/msm8996/natrium/a530_zap.mbn";
+};
+
+&mdss_dsi0 {
 	status = "okay";
 
 	vdda-supply = <&vreg_l2a_1p25>;
@@ -47,7 +51,7 @@
 
 	pinctrl-names = "default", "sleep";
 	pinctrl-0 = <&mdss_dsi_default &mdss_te_default>;
-	pinctrl-1 = <&mdss_dsi_sleep &mdss_te_sleep>;
+	pinctrl-1 = <&mdss_dsi_sleep &mdss_te_default>;
 
 	panel: panel@0 {
 		compatible = "jdi,fhd-r63452";
@@ -57,20 +61,14 @@
 
 		port {
 			panel_in: endpoint {
-				remote-endpoint = <&dsi0_out>;
+				remote-endpoint = <&mdss_dsi0_out>;
 			};
 		};
 	};
 };
 
-&dsi0_out {
+&mdss_dsi0_out {
 	remote-endpoint = <&panel_in>;
-};
-
-&gpu {
-	zap-shader {
-		firmware-name = "qcom/msm8996/natrium/a530_zap.mbn";
-	};
 };
 
 &mss_pil {
@@ -87,15 +85,15 @@
 
 &q6asmdai {
 	dai@0 {
-		reg = <0>;
+		reg = <MSM_FRONTEND_DAI_MULTIMEDIA1>;
 	};
 
 	dai@1 {
-		reg = <1>;
+		reg = <MSM_FRONTEND_DAI_MULTIMEDIA2>;
 	};
 
 	dai@2 {
-		reg = <2>;
+		reg = <MSM_FRONTEND_DAI_MULTIMEDIA3>;
 	};
 };
 
@@ -106,7 +104,7 @@
 &sound {
 	compatible = "qcom,apq8096-sndcard";
 	model = "natrium";
-	audio-routing =	"RX_BIAS", "MCLK";
+	audio-routing = "RX_BIAS", "MCLK";
 
 	mm1-dai-link {
 		link-name = "MultiMedia1";

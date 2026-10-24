@@ -539,7 +539,7 @@ static unsigned int sis_133_mode_filter(struct ata_device *adev, unsigned int ma
 	return mask;
 }
 
-static struct scsi_host_template sis_sht = {
+static const struct scsi_host_template sis_sht = {
 	ATA_BMDMA_SHT(DRV_NAME),
 };
 
@@ -552,7 +552,7 @@ static struct ata_port_operations sis_133_for_sata_ops = {
 
 static struct ata_port_operations sis_base_ops = {
 	.inherits		= &ata_bmdma_port_ops,
-	.prereset		= sis_pre_reset,
+	.reset.prereset		= sis_pre_reset,
 };
 
 static struct ata_port_operations sis_133_ops = {
@@ -891,7 +891,6 @@ static const struct pci_device_id sis_pci_tbl[] = {
 	{ PCI_VDEVICE(SI, 0x5513), },	/* SiS 5513 */
 	{ PCI_VDEVICE(SI, 0x5518), },	/* SiS 5518 */
 	{ PCI_VDEVICE(SI, 0x1180), },	/* SiS 1180 */
-
 	{ }
 };
 

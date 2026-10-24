@@ -8,7 +8,7 @@
 #include <linux/device.h>
 #include <linux/err.h>
 #include <linux/module.h>
-#include <linux/of_device.h>
+#include <linux/platform_device.h>
 #include <linux/regulator/driver.h>
 #include <linux/regulator/machine.h>
 #include <linux/regulator/of_regulator.h>
@@ -88,6 +88,7 @@ static struct platform_driver vexpress_regulator_driver = {
 	.probe = vexpress_regulator_probe,
 	.driver	= {
 		.name = DRVNAME,
+		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
 		.of_match_table = vexpress_regulator_of_match,
 	},
 };

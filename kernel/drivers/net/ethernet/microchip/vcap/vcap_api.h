@@ -164,7 +164,7 @@ struct vcap_admin {
 	struct list_head list; /* for insertion in vcap_control */
 	struct list_head rules; /* list of rules */
 	struct list_head enabled; /* list of enabled ports */
-	struct mutex lock; /* control access to rules */
+	struct vcap_control *vctrl; /* the control instance owning this vcap */
 	enum vcap_type vtype;  /* type of vcap */
 	int vinst; /* instance number within the same type */
 	int first_cid; /* first chain id in this vcap */
@@ -176,6 +176,7 @@ struct vcap_admin {
 	int first_valid_addr; /* bottom of address range to be used */
 	int last_used_addr;  /* address of lowest added rule */
 	bool w32be; /* vcap uses "32bit-word big-endian" encoding */
+	bool ingress; /* chain traffic direction */
 	struct vcap_cache_data cache; /* encoded rule data */
 };
 
@@ -199,6 +200,13 @@ struct vcap_keyset_list {
 	int max; /* size of the keyset list */
 	int cnt; /* count of keysets actually in the list */
 	enum vcap_keyfield_set *keysets; /* the list of keysets */
+};
+
+/* List of actionsets */
+struct vcap_actionset_list {
+	int max; /* size of the actionset list */
+	int cnt; /* count of actionsets actually in the list */
+	enum vcap_actionfield_set *actionsets; /* the list of actionsets */
 };
 
 /* Client output printf-like function with destination */
@@ -259,22 +267,15 @@ struct vcap_operations {
 		(struct net_device *ndev,
 		 struct vcap_admin *admin,
 		 struct vcap_output_print *out);
-	/* enable/disable the lookups in a vcap instance */
-	int (*enable)
-		(struct net_device *ndev,
-		 struct vcap_admin *admin,
-		 bool enable);
 };
 
 /* VCAP API Client control interface */
 struct vcap_control {
-	struct vcap_operations *ops;  /* client supplied operations */
+	const struct vcap_operations *ops;  /* client supplied operations */
 	const struct vcap_info *vcaps; /* client supplied vcap models */
 	const struct vcap_statistics *stats; /* client supplied vcap stats */
 	struct list_head list; /* list of vcap instances */
+	struct mutex lock; /* serialize access to all vcap instances */
 };
-
-/* Set client control interface on the API */
-int vcap_api_set_client(struct vcap_control *vctrl);
 
 #endif /* __VCAP_API__ */

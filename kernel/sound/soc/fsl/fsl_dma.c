@@ -200,7 +200,7 @@ static irqreturn_t fsl_dma_isr(int irq, void *dev_id)
 {
 	struct fsl_dma_private *dma_private = dev_id;
 	struct snd_pcm_substream *substream = dma_private->substream;
-	struct snd_soc_pcm_runtime *rtd = asoc_substream_to_rtd(substream);
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
 	struct device *dev = rtd->dev;
 	struct ccsr_dma_channel __iomem *dma_channel = dma_private->dma_channel;
 	irqreturn_t ret = IRQ_NONE;
@@ -267,14 +267,8 @@ static irqreturn_t fsl_dma_isr(int irq, void *dev_id)
 /**
  * fsl_dma_new: initialize this PCM driver.
  *
- * This function is called when the codec driver calls snd_soc_new_pcms(),
- * once for each .dai_link in the machine driver's snd_soc_card
- * structure.
- *
- * snd_dma_alloc_pages() is just a front-end to dma_alloc_coherent(), which
- * (currently) always allocates the DMA buffer in lowmem, even if GFP_HIGHMEM
- * is specified. Therefore, any DMA buffers we allocate will always be in low
- * memory, but we support for 36-bit physical addresses anyway.
+ * This function is called by soc_new_pcm(), once for each DAI link
+ * in the machine driver's snd_soc_card structure.
  *
  * Regardless of where the memory is actually allocated, since the device can
  * technically DMA to any 36-bit address, we do need to set the DMA mask to 36.
@@ -848,7 +842,7 @@ static int fsl_soc_dma_probe(struct platform_device *pdev)
 		return ret;
 	}
 
-	dma = kzalloc(sizeof(*dma), GFP_KERNEL);
+	dma = kzalloc_obj(*dma);
 	if (!dma) {
 		of_node_put(ssi_np);
 		return -ENOMEM;
@@ -860,7 +854,7 @@ static int fsl_soc_dma_probe(struct platform_device *pdev)
 	dma->dai.hw_params = fsl_dma_hw_params;
 	dma->dai.hw_free = fsl_dma_hw_free;
 	dma->dai.pointer = fsl_dma_pointer;
-	dma->dai.pcm_construct = fsl_dma_new;
+	dma->dai.pcm_new = fsl_dma_new;
 
 	/* Store the SSI-specific information that we need */
 	dma->ssi_stx_phys = res.start + REG_SSI_STX0;
@@ -890,15 +884,13 @@ static int fsl_soc_dma_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int fsl_soc_dma_remove(struct platform_device *pdev)
+static void fsl_soc_dma_remove(struct platform_device *pdev)
 {
 	struct dma_object *dma = dev_get_drvdata(&pdev->dev);
 
 	iounmap(dma->channel);
 	irq_dispose_mapping(dma->irq);
 	kfree(dma);
-
-	return 0;
 }
 
 static const struct of_device_id fsl_soc_dma_ids[] = {

@@ -530,10 +530,7 @@ static int init_hardware(struct carmine_hw *hw)
 
 static const struct fb_ops carminefb_ops = {
 	.owner		= THIS_MODULE,
-	.fb_fillrect	= cfb_fillrect,
-	.fb_copyarea	= cfb_copyarea,
-	.fb_imageblit	= cfb_imageblit,
-
+	FB_DEFAULT_IOMEM_OPS,
 	.fb_check_var	= carmine_check_var,
 	.fb_set_par	= carmine_set_par,
 	.fb_setcolreg	= carmine_setcolreg,
@@ -561,7 +558,6 @@ static int alloc_carmine_fb(void __iomem *regs, void __iomem *smem_base,
 
 	info->fix = carminefb_fix;
 	info->pseudo_palette = par->pseudo_palette;
-	info->flags = FBINFO_DEFAULT;
 
 	ret = fb_alloc_cmap(&info->cmap, 256, 1);
 	if (ret < 0)
@@ -593,6 +589,7 @@ static int alloc_carmine_fb(void __iomem *regs, void __iomem *smem_base,
 	return 0;
 
 err_dealloc_cmap:
+	fb_destroy_modelist(&info->modelist);
 	fb_dealloc_cmap(&info->cmap);
 err_free_fb:
 	framebuffer_release(info);
@@ -624,7 +621,7 @@ static int carminefb_probe(struct pci_dev *dev, const struct pci_device_id *ent)
 		return ret;
 
 	ret = -ENOMEM;
-	hw = kzalloc(sizeof *hw, GFP_KERNEL);
+	hw = kzalloc_obj(*hw);
 	if (!hw)
 		goto err_enable_pci;
 
@@ -653,13 +650,13 @@ static int carminefb_probe(struct pci_dev *dev, const struct pci_device_id *ent)
 	 * is required for that largest resolution to avoid remaps at run
 	 * time
 	 */
-	if (carminefb_fix.smem_len > CARMINE_TOTAL_DIPLAY_MEM)
-		carminefb_fix.smem_len = CARMINE_TOTAL_DIPLAY_MEM;
+	if (carminefb_fix.smem_len > CARMINE_TOTAL_DISPLAY_MEM)
+		carminefb_fix.smem_len = CARMINE_TOTAL_DISPLAY_MEM;
 
-	else if (carminefb_fix.smem_len < CARMINE_TOTAL_DIPLAY_MEM) {
+	else if (carminefb_fix.smem_len < CARMINE_TOTAL_DISPLAY_MEM) {
 		printk(KERN_ERR "carminefb: Memory bar is only %d bytes, %d "
 				"are required.", carminefb_fix.smem_len,
-				CARMINE_TOTAL_DIPLAY_MEM);
+				CARMINE_TOTAL_DISPLAY_MEM);
 		goto err_unmap_vregs;
 	}
 
@@ -757,9 +754,8 @@ static void carminefb_remove(struct pci_dev *dev)
 
 #define PCI_VENDOR_ID_FUJITU_LIMITED 0x10cf
 static struct pci_device_id carmine_devices[] = {
-{
-	PCI_DEVICE(PCI_VENDOR_ID_FUJITU_LIMITED, 0x202b)},
-	{0, 0, 0, 0, 0, 0, 0}
+	{ PCI_DEVICE(PCI_VENDOR_ID_FUJITU_LIMITED, 0x202b) },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(pci, carmine_devices);

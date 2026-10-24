@@ -36,24 +36,21 @@
 #include "dc_dmub_srv.h"
 #include "reg_helper.h"
 
+#define DC_LOGGER \
+	ctx->logger
+
 static inline void submit_dmub_read_modify_write(
 	struct dc_reg_helper_state *offload,
 	const struct dc_context *ctx)
 {
 	struct dmub_rb_cmd_read_modify_write *cmd_buf = &offload->cmd_data.read_modify_write;
-	bool gather = false;
 
 	offload->should_burst_write =
 			(offload->same_addr_count == (DMUB_READ_MODIFY_WRITE_SEQ__MAX - 1));
 	cmd_buf->header.payload_bytes =
 			sizeof(struct dmub_cmd_read_modify_write_sequence) * offload->reg_seq_count;
 
-	gather = ctx->dmub_srv->reg_helper_offload.gather_in_progress;
-	ctx->dmub_srv->reg_helper_offload.gather_in_progress = false;
-
-	dc_dmub_srv_cmd_queue(ctx->dmub_srv, &offload->cmd_data);
-
-	ctx->dmub_srv->reg_helper_offload.gather_in_progress = gather;
+	dc_wake_and_execute_dmub_cmd(ctx, &offload->cmd_data, DM_DMUB_WAIT_TYPE_NO_WAIT);
 
 	memset(cmd_buf, 0, sizeof(*cmd_buf));
 
@@ -66,17 +63,11 @@ static inline void submit_dmub_burst_write(
 	const struct dc_context *ctx)
 {
 	struct dmub_rb_cmd_burst_write *cmd_buf = &offload->cmd_data.burst_write;
-	bool gather = false;
 
 	cmd_buf->header.payload_bytes =
 			sizeof(uint32_t) * offload->reg_seq_count;
 
-	gather = ctx->dmub_srv->reg_helper_offload.gather_in_progress;
-	ctx->dmub_srv->reg_helper_offload.gather_in_progress = false;
-
-	dc_dmub_srv_cmd_queue(ctx->dmub_srv, &offload->cmd_data);
-
-	ctx->dmub_srv->reg_helper_offload.gather_in_progress = gather;
+	dc_wake_and_execute_dmub_cmd(ctx, &offload->cmd_data, DM_DMUB_WAIT_TYPE_NO_WAIT);
 
 	memset(cmd_buf, 0, sizeof(*cmd_buf));
 
@@ -88,27 +79,16 @@ static inline void submit_dmub_reg_wait(
 		const struct dc_context *ctx)
 {
 	struct dmub_rb_cmd_reg_wait *cmd_buf = &offload->cmd_data.reg_wait;
-	bool gather = false;
 
-	gather = ctx->dmub_srv->reg_helper_offload.gather_in_progress;
-	ctx->dmub_srv->reg_helper_offload.gather_in_progress = false;
-
-	dc_dmub_srv_cmd_queue(ctx->dmub_srv, &offload->cmd_data);
+	dc_wake_and_execute_dmub_cmd(ctx, &offload->cmd_data, DM_DMUB_WAIT_TYPE_NO_WAIT);
 
 	memset(cmd_buf, 0, sizeof(*cmd_buf));
 	offload->reg_seq_count = 0;
-
-	ctx->dmub_srv->reg_helper_offload.gather_in_progress = gather;
 }
 
 struct dc_reg_value_masks {
 	uint32_t value;
 	uint32_t mask;
-};
-
-struct dc_reg_sequence {
-	uint32_t addr;
-	struct dc_reg_value_masks value_masks;
 };
 
 static inline void set_reg_field_value_masks(
@@ -128,6 +108,7 @@ static void set_reg_field_values(struct dc_reg_value_masks *field_value_mask,
 		uint8_t shift1, uint32_t mask1, uint32_t field_value1,
 		va_list ap)
 {
+	(void)addr;
 	uint32_t shift, mask, field_value;
 	int i = 1;
 
@@ -141,7 +122,7 @@ static void set_reg_field_values(struct dc_reg_value_masks *field_value_mask,
 		field_value = va_arg(ap, uint32_t);
 
 		set_reg_field_value_masks(field_value_mask,
-				field_value, mask, shift);
+				field_value, mask, (uint8_t)shift);
 		i++;
 	}
 }
@@ -151,7 +132,6 @@ static void dmub_flush_buffer_execute(
 		const struct dc_context *ctx)
 {
 	submit_dmub_read_modify_write(offload, ctx);
-	dc_dmub_srv_cmd_execute(ctx->dmub_srv);
 }
 
 static void dmub_flush_burst_write_buffer_execute(
@@ -159,7 +139,6 @@ static void dmub_flush_burst_write_buffer_execute(
 		const struct dc_context *ctx)
 {
 	submit_dmub_burst_write(offload, ctx);
-	dc_dmub_srv_cmd_execute(ctx->dmub_srv);
 }
 
 static bool dmub_reg_value_burst_set_pack(const struct dc_context *ctx, uint32_t addr,
@@ -282,7 +261,6 @@ uint32_t generic_reg_set_ex(const struct dc_context *ctx,
 			field_value1, ap);
 
 	va_end(ap);
-
 
 	/* mmio write directly */
 	reg_val = (reg_val & ~field_value_mask.mask) | field_value_mask.value;
@@ -454,7 +432,7 @@ void generic_reg_wait(const struct dc_context *ctx,
 {
 	uint32_t field_value;
 	uint32_t reg_val;
-	int i;
+	unsigned int i;
 
 	if (ctx->dmub_srv &&
 	    ctx->dmub_srv->reg_helper_offload.gather_in_progress) {
@@ -469,7 +447,7 @@ void generic_reg_wait(const struct dc_context *ctx,
 	 * This value comes from experiments.
 	 *
 	 */
-	ASSERT(delay_between_poll_us * time_out_num_tries <= 3000000);
+	ASSERT(delay_between_poll_us * time_out_num_tries <= 3000000u);
 
 	for (i = 0; i <= time_out_num_tries; i++) {
 		if (i) {
@@ -481,11 +459,10 @@ void generic_reg_wait(const struct dc_context *ctx,
 
 		reg_val = dm_read_reg(ctx, addr);
 
-		field_value = get_reg_field_value_ex(reg_val, mask, shift);
+		field_value = get_reg_field_value_ex(reg_val, mask, (uint8_t)shift);
 
 		if (field_value == condition_value) {
-			if (i * delay_between_poll_us > 1000 &&
-					!IS_FPGA_MAXIMUS_DC(ctx->dce_environment))
+			if (i * delay_between_poll_us > 1000)
 				DC_LOG_DC("REG_WAIT taking a while: %dms in %s line:%d\n",
 						delay_between_poll_us * i / 1000,
 						func_name, line);
@@ -497,8 +474,7 @@ void generic_reg_wait(const struct dc_context *ctx,
 			delay_between_poll_us, time_out_num_tries,
 			func_name, line);
 
-	if (!IS_FPGA_MAXIMUS_DC(ctx->dce_environment))
-		BREAK_TO_DEBUGGER();
+	BREAK_TO_DEBUGGER();
 }
 
 void generic_write_indirect_reg(const struct dc_context *ctx,
@@ -549,7 +525,7 @@ uint32_t generic_indirect_reg_get(const struct dc_context *ctx,
 		mask = va_arg(ap, uint32_t);
 		field_value = va_arg(ap, uint32_t *);
 
-		*field_value = get_reg_field_value_ex(value, mask, shift);
+		*field_value = get_reg_field_value_ex(value, mask, (uint8_t)shift);
 		i++;
 	}
 
@@ -578,7 +554,7 @@ uint32_t generic_indirect_reg_update_ex(const struct dc_context *ctx,
 		mask = va_arg(ap, uint32_t);
 		field_value = va_arg(ap, uint32_t);
 
-		reg_val = set_reg_field_value_ex(reg_val, field_value, mask, shift);
+		reg_val = set_reg_field_value_ex(reg_val, field_value, mask, (uint8_t)shift);
 		i++;
 	}
 
@@ -608,7 +584,7 @@ uint32_t generic_indirect_reg_update_ex_sync(const struct dc_context *ctx,
 		mask = va_arg(ap, uint32_t);
 		field_value = va_arg(ap, uint32_t);
 
-		reg_val = set_reg_field_value_ex(reg_val, field_value, mask, shift);
+		reg_val = set_reg_field_value_ex(reg_val, field_value, mask, (uint8_t)shift);
 		i++;
 	}
 
@@ -639,7 +615,7 @@ uint32_t generic_indirect_reg_get_sync(const struct dc_context *ctx,
 		mask = va_arg(ap, uint32_t);
 		field_value = va_arg(ap, uint32_t *);
 
-		*field_value = get_reg_field_value_ex(value, mask, shift);
+		*field_value = get_reg_field_value_ex(value, mask, (uint8_t)shift);
 		i++;
 	}
 
@@ -691,8 +667,6 @@ void reg_sequence_start_execute(const struct dc_context *ctx)
 		default:
 			return;
 		}
-
-		dc_dmub_srv_cmd_execute(ctx->dmub_srv);
 	}
 }
 
@@ -709,6 +683,85 @@ void reg_sequence_wait_done(const struct dc_context *ctx)
 	if (offload &&
 	    ctx->dc->debug.dmub_offload_enabled &&
 	    !ctx->dc->debug.dmcub_emulation) {
-		dc_dmub_srv_wait_idle(ctx->dmub_srv);
+		dc_dmub_srv_wait_for_idle(ctx->dmub_srv, DM_DMUB_WAIT_TYPE_WAIT, NULL);
 	}
+}
+
+char *dce_version_to_string(const int version)
+{
+	switch (version) {
+	case DCE_VERSION_6_0:
+		return "DCE 6.0";
+	case DCE_VERSION_6_1:
+		return "DCE 6.1";
+	case DCE_VERSION_6_4:
+		return "DCE 6.4";
+	case DCE_VERSION_8_0:
+		return "DCE 8.0";
+	case DCE_VERSION_8_1:
+		return "DCE 8.1";
+	case DCE_VERSION_8_3:
+		return "DCE 8.3";
+	case DCE_VERSION_10_0:
+		return "DCE 10.0";
+	case DCE_VERSION_11_0:
+		return "DCE 11.0";
+	case DCE_VERSION_11_2:
+		return "DCE 11.2";
+	case DCE_VERSION_11_22:
+		return "DCE 11.22";
+	case DCE_VERSION_12_0:
+		return "DCE 12.0";
+	case DCE_VERSION_12_1:
+		return "DCE 12.1";
+	case DCN_VERSION_1_0:
+		return "DCN 1.0";
+	case DCN_VERSION_1_01:
+		return "DCN 1.0.1";
+	case DCN_VERSION_2_0:
+		return "DCN 2.0";
+	case DCN_VERSION_2_1:
+		return "DCN 2.1";
+	case DCN_VERSION_2_01:
+		return "DCN 2.0.1";
+	case DCN_VERSION_3_0:
+		return "DCN 3.0";
+	case DCN_VERSION_3_01:
+		return "DCN 3.0.1";
+	case DCN_VERSION_3_02:
+		return "DCN 3.0.2";
+	case DCN_VERSION_3_03:
+		return "DCN 3.0.3";
+	case DCN_VERSION_3_1:
+		return "DCN 3.1.2";
+	case DCN_VERSION_3_14:
+		return "DCN 3.1.4";
+	case DCN_VERSION_3_15:
+		return "DCN 3.1.5";
+	case DCN_VERSION_3_16:
+		return "DCN 3.1.6";
+	case DCN_VERSION_3_2:
+		return "DCN 3.2";
+	case DCN_VERSION_3_21:
+		return "DCN 3.2.1";
+	case DCN_VERSION_3_5:
+		return "DCN 3.5";
+	case DCN_VERSION_3_51:
+		return "DCN 3.5.1";
+	case DCN_VERSION_3_6:
+		return "DCN 3.6";
+	case DCN_VERSION_4_01:
+		return "DCN 4.0.1";
+	case DCN_VERSION_4_2:
+		return "DCN 4.2";
+	case DCN_VERSION_4_2B:
+		return "DCN 4.2B";
+	default:
+		return "Unknown";
+	}
+}
+
+bool dc_supports_vrr(const enum dce_version v)
+{
+	return v >= DCE_VERSION_8_0;
 }

@@ -7,14 +7,20 @@
 
 #include <linux/stdarg.h>
 
+#include <linux/bug.h>
+#include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/lockdep.h>
 #include <linux/math.h>
+#include <linux/panic.h>
 #include <linux/printk.h>
 #include <linux/sched/debug.h>
 #include <linux/seq_file.h>
+#include <linux/sprintf.h>
 #include <linux/stacktrace.h>
 #include <linux/string.h>
+#include <linux/string_choices.h>
+#include <linux/sched/clock.h>
 #include <trace/events/error_report.h>
 
 #include <asm/kfence.h>
@@ -26,7 +32,25 @@
 #define ARCH_FUNC_PREFIX ""
 #endif
 
-extern bool no_hash_pointers;
+static enum kfence_fault kfence_fault __ro_after_init = KFENCE_FAULT_REPORT;
+
+static int __init early_kfence_fault(char *arg)
+{
+	if (!arg)
+		return -EINVAL;
+
+	if (!strcmp(arg, "report"))
+		kfence_fault = KFENCE_FAULT_REPORT;
+	else if (!strcmp(arg, "oops"))
+		kfence_fault = KFENCE_FAULT_OOPS;
+	else if (!strcmp(arg, "panic"))
+		kfence_fault = KFENCE_FAULT_PANIC;
+	else
+		return -EINVAL;
+
+	return 0;
+}
+early_param("kfence.fault", early_kfence_fault);
 
 /* Helper function to either print to a seq_file or to console. */
 __printf(2, 3)
@@ -105,15 +129,20 @@ found:
 
 static void kfence_print_stack(struct seq_file *seq, const struct kfence_metadata *meta,
 			       bool show_alloc)
+	__must_hold(&meta->lock)
 {
 	const struct kfence_track *track = show_alloc ? &meta->alloc_track : &meta->free_track;
 	u64 ts_sec = track->ts_nsec;
 	unsigned long rem_nsec = do_div(ts_sec, NSEC_PER_SEC);
+	u64 interval_nsec = local_clock() - track->ts_nsec;
+	unsigned long rem_interval_nsec = do_div(interval_nsec, NSEC_PER_SEC);
 
 	/* Timestamp matches printk timestamp format. */
-	seq_con_printf(seq, "%s by task %d on cpu %d at %lu.%06lus:\n",
-		       show_alloc ? "allocated" : "freed", track->pid,
-		       track->cpu, (unsigned long)ts_sec, rem_nsec / 1000);
+	seq_con_printf(seq, "%s by task %d on cpu %d at %lu.%06lus (%lu.%06lus ago):\n",
+		       show_alloc ? "allocated" : meta->state == KFENCE_OBJECT_RCU_FREEING ?
+		       "rcu freeing" : "freed", track->pid,
+		       track->cpu, (unsigned long)ts_sec, rem_nsec / 1000,
+		       (unsigned long)interval_nsec, rem_interval_nsec / 1000);
 
 	if (track->num_stack_entries) {
 		/* Skip allocation/free internals stack. */
@@ -146,7 +175,7 @@ void kfence_print_object(struct seq_file *seq, const struct kfence_metadata *met
 
 	kfence_print_stack(seq, meta, true);
 
-	if (meta->state == KFENCE_OBJECT_FREED) {
+	if (meta->state == KFENCE_OBJECT_FREED || meta->state == KFENCE_OBJECT_RCU_FREEING) {
 		seq_con_printf(seq, "\n");
 		kfence_print_stack(seq, meta, false);
 	}
@@ -168,7 +197,7 @@ static void print_diff_canary(unsigned long address, size_t bytes_to_show,
 
 	pr_cont("[");
 	for (cur = (const u8 *)address; cur < end; cur++) {
-		if (*cur == KFENCE_CANARY_PATTERN(cur))
+		if (*cur == KFENCE_CANARY_PATTERN_U8(cur))
 			pr_cont(" .");
 		else if (no_hash_pointers)
 			pr_cont(" 0x%02x", *cur);
@@ -180,11 +209,12 @@ static void print_diff_canary(unsigned long address, size_t bytes_to_show,
 
 static const char *get_access_type(bool is_write)
 {
-	return is_write ? "write" : "read";
+	return str_write_read(is_write);
 }
 
-void kfence_report_error(unsigned long address, bool is_write, struct pt_regs *regs,
-			 const struct kfence_metadata *meta, enum kfence_error_type type)
+enum kfence_fault
+kfence_report_error(unsigned long address, bool is_write, struct pt_regs *regs,
+		    const struct kfence_metadata *meta, enum kfence_error_type type)
 {
 	unsigned long stack_entries[KFENCE_STACK_DEPTH] = { 0 };
 	const ptrdiff_t object_index = meta ? meta - kfence_metadata : -1;
@@ -200,10 +230,8 @@ void kfence_report_error(unsigned long address, bool is_write, struct pt_regs *r
 
 	/* Require non-NULL meta, except if KFENCE_ERROR_INVALID. */
 	if (WARN_ON(type != KFENCE_ERROR_INVALID && !meta))
-		return;
+		return KFENCE_FAULT_NONE;
 
-	if (meta)
-		lockdep_assert_held(&meta->lock);
 	/*
 	 * Because we may generate reports in printk-unfriendly parts of the
 	 * kernel, such as scheduler code, the use of printk() could deadlock.
@@ -258,6 +286,7 @@ void kfence_report_error(unsigned long address, bool is_write, struct pt_regs *r
 	stack_trace_print(stack_entries + skipnr, num_stack_entries - skipnr, 0);
 
 	if (meta) {
+		lockdep_assert_held(&meta->lock);
 		pr_err("\n");
 		kfence_print_object(NULL, meta);
 	}
@@ -277,6 +306,25 @@ void kfence_report_error(unsigned long address, bool is_write, struct pt_regs *r
 
 	/* We encountered a memory safety error, taint the kernel! */
 	add_taint(TAINT_BAD_PAGE, LOCKDEP_STILL_OK);
+
+	return kfence_fault;
+}
+
+void kfence_handle_fault(enum kfence_fault fault)
+{
+	switch (fault) {
+	case KFENCE_FAULT_NONE:
+	case KFENCE_FAULT_REPORT:
+		break;
+	case KFENCE_FAULT_OOPS:
+		BUG();
+		break;
+	case KFENCE_FAULT_PANIC:
+		/* Disable KFENCE to avoid recursion if check_on_panic is set. */
+		WRITE_ONCE(kfence_enabled, false);
+		panic("kfence.fault=panic set ...\n");
+		break;
+	}
 }
 
 #ifdef CONFIG_PRINTK
@@ -315,7 +363,7 @@ bool __kfence_obj_info(struct kmem_obj_info *kpp, void *object, struct slab *sla
 	kpp->kp_slab_cache = meta->cache;
 	kpp->kp_objp = (void *)meta->addr;
 	kfence_to_kp_stack(&meta->alloc_track, kpp->kp_stack);
-	if (meta->state == KFENCE_OBJECT_FREED)
+	if (meta->state == KFENCE_OBJECT_FREED || meta->state == KFENCE_OBJECT_RCU_FREEING)
 		kfence_to_kp_stack(&meta->free_track, kpp->kp_free_stack);
 	/* get_stack_skipnr() ensures the first entry is outside allocator. */
 	kpp->kp_ret = kpp->kp_stack[0];

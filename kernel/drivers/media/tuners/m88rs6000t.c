@@ -612,7 +612,7 @@ static int m88rs6000t_probe(struct i2c_client *client)
 		{0x75, 0xFC},
 	};
 
-	dev = kzalloc(sizeof(*dev), GFP_KERNEL);
+	dev = kzalloc_obj(*dev);
 	if (!dev) {
 		ret = -ENOMEM;
 		dev_err(&client->dev, "kzalloc() failed\n");
@@ -709,8 +709,8 @@ static void m88rs6000t_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id m88rs6000t_id[] = {
-	{"m88rs6000t", 0},
-	{}
+	{ .name = "m88rs6000t" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, m88rs6000t_id);
 
@@ -718,7 +718,7 @@ static struct i2c_driver m88rs6000t_driver = {
 	.driver = {
 		.name	= "m88rs6000t",
 	},
-	.probe_new	= m88rs6000t_probe,
+	.probe		= m88rs6000t_probe,
 	.remove		= m88rs6000t_remove,
 	.id_table	= m88rs6000t_id,
 };

@@ -2,19 +2,29 @@
 #include <linux/objtool.h>
 #include <linux/module.h>
 #include <linux/sort.h>
+#include <linux/bpf.h>
 #include <asm/ptrace.h>
 #include <asm/stacktrace.h>
 #include <asm/unwind.h>
 #include <asm/orc_types.h>
 #include <asm/orc_lookup.h>
+#include <asm/orc_header.h>
+
+ORC_HEADER;
 
 #define orc_warn(fmt, ...) \
 	printk_deferred_once(KERN_WARNING "WARNING: " fmt, ##__VA_ARGS__)
 
 #define orc_warn_current(args...)					\
 ({									\
-	if (state->task == current && !state->error)			\
+	static bool dumped_before;					\
+	if (state->task == current && !state->error) {			\
 		orc_warn(args);						\
+		if (unwind_debug && !dumped_before) {			\
+			dumped_before = true;				\
+			unwind_dump(state);				\
+		}							\
+	}								\
 })
 
 extern int __start_orc_unwind_ip[];
@@ -23,7 +33,48 @@ extern struct orc_entry __start_orc_unwind[];
 extern struct orc_entry __stop_orc_unwind[];
 
 static bool orc_init __ro_after_init;
+static bool unwind_debug __ro_after_init;
 static unsigned int lookup_num_blocks __ro_after_init;
+
+static int __init unwind_debug_cmdline(char *str)
+{
+	unwind_debug = true;
+
+	return 0;
+}
+early_param("unwind_debug", unwind_debug_cmdline);
+
+static void unwind_dump(struct unwind_state *state)
+{
+	static bool dumped_before;
+	unsigned long word, *sp;
+	struct stack_info stack_info = {0};
+	unsigned long visit_mask = 0;
+
+	if (dumped_before)
+		return;
+
+	dumped_before = true;
+
+	printk_deferred("unwind stack type:%d next_sp:%p mask:0x%lx graph_idx:%d\n",
+			state->stack_info.type, state->stack_info.next_sp,
+			state->stack_mask, state->graph_idx);
+
+	for (sp = __builtin_frame_address(0); sp;
+	     sp = PTR_ALIGN(stack_info.next_sp, sizeof(long))) {
+		if (get_stack_info(sp, state->task, &stack_info, &visit_mask))
+			break;
+
+		for (; sp < stack_info.end; sp++) {
+
+			word = READ_ONCE_NOCHECK(*sp);
+
+			printk_deferred("%0*lx: %0*lx (%pB)\n", BITS_PER_LONG/4,
+					(unsigned long)sp, BITS_PER_LONG/4,
+					word, (void *)word);
+		}
+	}
+}
 
 static inline unsigned long orc_ip(const int *ip)
 {
@@ -35,7 +86,7 @@ static struct orc_entry *__orc_find(int *ip_table, struct orc_entry *u_table,
 {
 	int *first = ip_table;
 	int *last = ip_table + num_entries - 1;
-	int *mid = first, *found = first;
+	int *mid, *found = first;
 
 	if (!num_entries)
 		return NULL;
@@ -122,6 +173,25 @@ static struct orc_entry *orc_ftrace_find(unsigned long ip)
 }
 #endif
 
+/* Fake frame pointer entry -- used as a fallback for generated code */
+static struct orc_entry orc_fp_entry = {
+	.type		= ORC_TYPE_CALL,
+	.sp_reg		= ORC_REG_BP,
+	.sp_offset	= 16,
+	.bp_reg		= ORC_REG_PREV_SP,
+	.bp_offset	= -16,
+};
+
+static struct orc_entry *orc_bpf_find(unsigned long ip)
+{
+#ifdef CONFIG_BPF_JIT
+	if (bpf_has_frame_pointer(ip))
+		return &orc_fp_entry;
+#endif
+
+	return NULL;
+}
+
 /*
  * If we crash with IP==0, the last successfully executed instruction
  * was probably an indirect function call with a NULL function pointer,
@@ -133,32 +203,7 @@ static struct orc_entry null_orc_entry = {
 	.sp_offset = sizeof(long),
 	.sp_reg = ORC_REG_SP,
 	.bp_reg = ORC_REG_UNDEFINED,
-	.type = UNWIND_HINT_TYPE_CALL
-};
-
-#ifdef CONFIG_CALL_THUNKS
-static struct orc_entry *orc_callthunk_find(unsigned long ip)
-{
-	if (!is_callthunk((void *)ip))
-		return NULL;
-
-	return &null_orc_entry;
-}
-#else
-static struct orc_entry *orc_callthunk_find(unsigned long ip)
-{
-	return NULL;
-}
-#endif
-
-/* Fake frame pointer entry -- used as a fallback for generated code */
-static struct orc_entry orc_fp_entry = {
-	.type		= UNWIND_HINT_TYPE_CALL,
-	.sp_reg		= ORC_REG_BP,
-	.sp_offset	= 16,
-	.bp_reg		= ORC_REG_PREV_SP,
-	.bp_offset	= -16,
-	.end		= 0,
+	.type = ORC_TYPE_CALL
 };
 
 static struct orc_entry *orc_find(unsigned long ip)
@@ -204,11 +249,12 @@ static struct orc_entry *orc_find(unsigned long ip)
 	if (orc)
 		return orc;
 
-	orc =  orc_ftrace_find(ip);
+	/* BPF lookup: */
+	orc = orc_bpf_find(ip);
 	if (orc)
 		return orc;
 
-	return orc_callthunk_find(ip);
+	return orc_ftrace_find(ip);
 }
 
 #ifdef CONFIG_MODULES
@@ -220,7 +266,6 @@ static struct orc_entry *cur_orc_table = __start_orc_unwind;
 static void orc_sort_swap(void *_a, void *_b, int size)
 {
 	struct orc_entry *orc_a, *orc_b;
-	struct orc_entry orc_tmp;
 	int *a = _a, *b = _b, tmp;
 	int delta = _b - _a;
 
@@ -232,9 +277,7 @@ static void orc_sort_swap(void *_a, void *_b, int size)
 	/* Swap the corresponding .orc_unwind entries: */
 	orc_a = cur_orc_table + (a - cur_orc_ip_table);
 	orc_b = cur_orc_table + (b - cur_orc_ip_table);
-	orc_tmp = *orc_a;
-	*orc_a = *orc_b;
-	*orc_b = orc_tmp;
+	swap(*orc_a, *orc_b);
 }
 
 static int orc_sort_cmp(const void *_a, const void *_b)
@@ -250,13 +293,13 @@ static int orc_sort_cmp(const void *_a, const void *_b)
 		return -1;
 
 	/*
-	 * The "weak" section terminator entries need to always be on the left
+	 * The "weak" section terminator entries need to always be first
 	 * to ensure the lookup code skips them in favor of real entries.
 	 * These terminator entries exist to handle any gaps created by
 	 * whitelisted .o files which didn't get objtool generation.
 	 */
 	orc_a = cur_orc_table + (a - cur_orc_ip_table);
-	return orc_a->sp_reg == ORC_REG_UNDEFINED && !orc_a->end ? -1 : 1;
+	return orc_a->type == ORC_TYPE_UNDEFINED ? -1 : 1;
 }
 
 void unwind_module_init(struct module *mod, void *_orc_ip, size_t orc_ip_size,
@@ -449,7 +492,7 @@ bool unwind_next_frame(struct unwind_state *state)
 		return false;
 
 	/* Don't let modules unload while we're reading their ORC data. */
-	preempt_disable();
+	guard(rcu)();
 
 	/* End-of-stack check for user tasks: */
 	if (state->regs && user_mode(state->regs))
@@ -468,21 +511,20 @@ bool unwind_next_frame(struct unwind_state *state)
 	if (!orc) {
 		/*
 		 * As a fallback, try to assume this code uses a frame pointer.
-		 * This is useful for generated code, like BPF, which ORC
-		 * doesn't know about.  This is just a guess, so the rest of
-		 * the unwind is no longer considered reliable.
+		 * This is just a guess, so the rest of the unwind is no longer
+		 * considered reliable.
 		 */
 		orc = &orc_fp_entry;
 		state->error = true;
-	}
-
-	/* End-of-stack check for kernel threads: */
-	if (orc->sp_reg == ORC_REG_UNDEFINED) {
-		if (!orc->end)
+	} else {
+		if (orc->type == ORC_TYPE_UNDEFINED)
 			goto err;
 
-		goto the_end;
+		if (orc->type == ORC_TYPE_END_OF_STACK)
+			goto the_end;
 	}
+
+	state->signal = orc->signal;
 
 	/* Find the previous frame's stack: */
 	switch (orc->sp_reg) {
@@ -504,17 +546,23 @@ bool unwind_next_frame(struct unwind_state *state)
 		indirect = true;
 		break;
 
-	case ORC_REG_R10:
-		if (!get_reg(state, offsetof(struct pt_regs, r10), &sp)) {
-			orc_warn_current("missing R10 value at %pB\n",
+	/*
+	 * Any of the below registers may temporarily hold the stack pointer,
+	 * typically during a DRAP stack realignment sequence or some other
+	 * stack swizzle.
+	 */
+
+	case ORC_REG_AX:
+		if (!get_reg(state, offsetof(struct pt_regs, ax), &sp)) {
+			orc_warn_current("missing AX value at %pB\n",
 					 (void *)state->ip);
 			goto err;
 		}
 		break;
 
-	case ORC_REG_R13:
-		if (!get_reg(state, offsetof(struct pt_regs, r13), &sp)) {
-			orc_warn_current("missing R13 value at %pB\n",
+	case ORC_REG_DX:
+		if (!get_reg(state, offsetof(struct pt_regs, dx), &sp)) {
+			orc_warn_current("missing DX value at %pB\n",
 					 (void *)state->ip);
 			goto err;
 		}
@@ -528,9 +576,17 @@ bool unwind_next_frame(struct unwind_state *state)
 		}
 		break;
 
-	case ORC_REG_DX:
-		if (!get_reg(state, offsetof(struct pt_regs, dx), &sp)) {
-			orc_warn_current("missing DX value at %pB\n",
+	case ORC_REG_R10:
+		if (!get_reg(state, offsetof(struct pt_regs, r10), &sp)) {
+			orc_warn_current("missing R10 value at %pB\n",
+					 (void *)state->ip);
+			goto err;
+		}
+		break;
+
+	case ORC_REG_R13:
+		if (!get_reg(state, offsetof(struct pt_regs, r13), &sp)) {
+			orc_warn_current("missing R13 value at %pB\n",
 					 (void *)state->ip);
 			goto err;
 		}
@@ -552,7 +608,7 @@ bool unwind_next_frame(struct unwind_state *state)
 
 	/* Find IP, SP and possibly regs: */
 	switch (orc->type) {
-	case UNWIND_HINT_TYPE_CALL:
+	case ORC_TYPE_CALL:
 		ip_p = sp - sizeof(long);
 
 		if (!deref_stack_reg(state, ip_p, &state->ip))
@@ -563,10 +619,9 @@ bool unwind_next_frame(struct unwind_state *state)
 		state->sp = sp;
 		state->regs = NULL;
 		state->prev_regs = NULL;
-		state->signal = false;
 		break;
 
-	case UNWIND_HINT_TYPE_REGS:
+	case ORC_TYPE_REGS:
 		if (!deref_stack_regs(state, sp, &state->ip, &state->sp)) {
 			orc_warn_current("can't access registers at %pB\n",
 					 (void *)orig_ip);
@@ -587,16 +642,15 @@ bool unwind_next_frame(struct unwind_state *state)
 		state->regs = (struct pt_regs *)sp;
 		state->prev_regs = NULL;
 		state->full_regs = true;
-		state->signal = true;
 		break;
 
-	case UNWIND_HINT_TYPE_REGS_PARTIAL:
+	case ORC_TYPE_REGS_PARTIAL:
 		if (!deref_stack_iret_regs(state, sp, &state->ip, &state->sp)) {
 			orc_warn_current("can't access iret registers at %pB\n",
 					 (void *)orig_ip);
 			goto err;
 		}
-		/* See UNWIND_HINT_TYPE_REGS case comment. */
+		/* See ORC_TYPE_REGS case comment. */
 		state->ip = unwind_recover_rethook(state, state->ip,
 				(unsigned long *)(state->sp - sizeof(long)));
 
@@ -604,7 +658,6 @@ bool unwind_next_frame(struct unwind_state *state)
 			state->prev_regs = state->regs;
 		state->regs = (void *)sp - IRET_FRAME_OFFSET;
 		state->full_regs = false;
-		state->signal = true;
 		break;
 
 	default:
@@ -645,14 +698,12 @@ bool unwind_next_frame(struct unwind_state *state)
 		goto err;
 	}
 
-	preempt_enable();
 	return true;
 
 err:
 	state->error = true;
 
 the_end:
-	preempt_enable();
 	state->stack_info.type = STACK_TYPE_UNKNOWN;
 	return false;
 }
@@ -699,7 +750,7 @@ void __unwind_start(struct unwind_state *state, struct task_struct *task,
 		state->sp = task->thread.sp + sizeof(*frame);
 		state->bp = READ_ONCE_NOCHECK(frame->bp);
 		state->ip = READ_ONCE_NOCHECK(frame->ret_addr);
-		state->signal = (void *)state->ip == ret_from_fork;
+		state->signal = (void *)state->ip == ret_from_fork_asm;
 	}
 
 	if (get_stack_info((unsigned long *)state->sp, state->task,

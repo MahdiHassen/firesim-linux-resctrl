@@ -100,7 +100,7 @@ static int betopff_init(struct hid_device *hid)
 		}
 	}
 
-	betopff = kzalloc(sizeof(*betopff), GFP_KERNEL);
+	betopff = kzalloc_obj(*betopff);
 	if (!betopff)
 		return -ENOMEM;
 
@@ -162,4 +162,5 @@ static struct hid_driver betop_driver = {
 };
 module_hid_driver(betop_driver);
 
+MODULE_DESCRIPTION("Force feedback support for Betop based devices");
 MODULE_LICENSE("GPL");

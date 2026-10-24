@@ -12,6 +12,7 @@
 #include <linux/idr.h>
 #include <linux/bsg.h>
 #include <linux/slab.h>
+#include <linux/io_uring/cmd.h>
 
 #include <scsi/scsi.h>
 #include <scsi/scsi_ioctl.h>
@@ -28,6 +29,7 @@ struct bsg_device {
 	unsigned int timeout;
 	unsigned int reserved_size;
 	bsg_sg_io_fn *sg_io_fn;
+	bsg_uring_cmd_fn *uring_cmd_fn;
 };
 
 static inline struct bsg_device *to_bsg_device(struct inode *inode)
@@ -36,10 +38,10 @@ static inline struct bsg_device *to_bsg_device(struct inode *inode)
 }
 
 #define BSG_DEFAULT_CMDS	64
-#define BSG_MAX_DEVS		32768
+#define BSG_MAX_DEVS		(1 << MINORBITS)
 
 static DEFINE_IDA(bsg_minor_ida);
-static struct class *bsg_class;
+static const struct class bsg_class;
 static int bsg_major;
 
 static unsigned int bsg_timeout(struct bsg_device *bd, struct sg_io_v4 *hdr)
@@ -54,7 +56,8 @@ static unsigned int bsg_timeout(struct bsg_device *bd, struct sg_io_v4 *hdr)
 	return max_t(unsigned int, timeout, BLK_MIN_SG_TIMEOUT);
 }
 
-static int bsg_sg_io(struct bsg_device *bd, fmode_t mode, void __user *uarg)
+static int bsg_sg_io(struct bsg_device *bd, bool open_for_write,
+		     void __user *uarg)
 {
 	struct sg_io_v4 hdr;
 	int ret;
@@ -63,7 +66,8 @@ static int bsg_sg_io(struct bsg_device *bd, fmode_t mode, void __user *uarg)
 		return -EFAULT;
 	if (hdr.guard != 'Q')
 		return -EINVAL;
-	ret = bd->sg_io_fn(bd->queue, &hdr, mode, bsg_timeout(bd, &hdr));
+	ret = bd->sg_io_fn(bd->queue, &hdr, open_for_write,
+			   bsg_timeout(bd, &hdr));
 	if (!ret && copy_to_user(uarg, &hdr, sizeof(hdr)))
 		return -EFAULT;
 	return ret;
@@ -146,7 +150,7 @@ static long bsg_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	case SG_EMULATED_HOST:
 		return put_user(1, intp);
 	case SG_IO:
-		return bsg_sg_io(bd, file->f_mode, uarg);
+		return bsg_sg_io(bd, file->f_mode & FMODE_WRITE, uarg);
 	case SCSI_IOCTL_SEND_COMMAND:
 		pr_warn_ratelimited("%s: calling unsupported SCSI_IOCTL_SEND_COMMAND\n",
 				current->comm);
@@ -156,11 +160,38 @@ static long bsg_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	}
 }
 
+static int bsg_check_uring_features(unsigned int issue_flags)
+{
+	/* BSG passthrough requires big SQE/CQE support */
+	if ((issue_flags & (IO_URING_F_SQE128|IO_URING_F_CQE32)) !=
+	    (IO_URING_F_SQE128|IO_URING_F_CQE32))
+		return -EOPNOTSUPP;
+	return 0;
+}
+
+static int bsg_uring_cmd(struct io_uring_cmd *ioucmd, unsigned int issue_flags)
+{
+	struct bsg_device *bd = to_bsg_device(file_inode(ioucmd->file));
+	bool open_for_write = ioucmd->file->f_mode & FMODE_WRITE;
+	struct request_queue *q = bd->queue;
+	int ret;
+
+	ret = bsg_check_uring_features(issue_flags);
+	if (ret)
+		return ret;
+
+	if (!bd->uring_cmd_fn)
+		return -EOPNOTSUPP;
+
+	return bd->uring_cmd_fn(q, ioucmd, issue_flags, open_for_write);
+}
+
 static const struct file_operations bsg_fops = {
 	.open		=	bsg_open,
 	.release	=	bsg_release,
 	.unlocked_ioctl	=	bsg_ioctl,
 	.compat_ioctl	=	compat_ptr_ioctl,
+	.uring_cmd	=	bsg_uring_cmd,
 	.owner		=	THIS_MODULE,
 	.llseek		=	default_llseek,
 };
@@ -185,18 +216,20 @@ void bsg_unregister_queue(struct bsg_device *bd)
 EXPORT_SYMBOL_GPL(bsg_unregister_queue);
 
 struct bsg_device *bsg_register_queue(struct request_queue *q,
-		struct device *parent, const char *name, bsg_sg_io_fn *sg_io_fn)
+		struct device *parent, const char *name, bsg_sg_io_fn *sg_io_fn,
+		bsg_uring_cmd_fn *uring_cmd_fn)
 {
 	struct bsg_device *bd;
 	int ret;
 
-	bd = kzalloc(sizeof(*bd), GFP_KERNEL);
+	bd = kzalloc_obj(*bd);
 	if (!bd)
 		return ERR_PTR(-ENOMEM);
 	bd->max_queue = BSG_DEFAULT_CMDS;
 	bd->reserved_size = INT_MAX;
 	bd->queue = q;
 	bd->sg_io_fn = sg_io_fn;
+	bd->uring_cmd_fn = uring_cmd_fn;
 
 	ret = ida_alloc_max(&bsg_minor_ida, BSG_MAX_DEVS - 1, GFP_KERNEL);
 	if (ret < 0) {
@@ -206,7 +239,7 @@ struct bsg_device *bsg_register_queue(struct request_queue *q,
 		return ERR_PTR(ret);
 	}
 	bd->device.devt = MKDEV(bsg_major, ret);
-	bd->device.class = bsg_class;
+	bd->device.class = &bsg_class;
 	bd->device.parent = parent;
 	bd->device.release = bsg_device_release;
 	dev_set_name(&bd->device, "%s", name);
@@ -240,15 +273,19 @@ static char *bsg_devnode(const struct device *dev, umode_t *mode)
 	return kasprintf(GFP_KERNEL, "bsg/%s", dev_name(dev));
 }
 
+static const struct class bsg_class = {
+	.name		= "bsg",
+	.devnode	= bsg_devnode,
+};
+
 static int __init bsg_init(void)
 {
 	dev_t devid;
 	int ret;
 
-	bsg_class = class_create(THIS_MODULE, "bsg");
-	if (IS_ERR(bsg_class))
-		return PTR_ERR(bsg_class);
-	bsg_class->devnode = bsg_devnode;
+	ret = class_register(&bsg_class);
+	if (ret)
+		return ret;
 
 	ret = alloc_chrdev_region(&devid, 0, BSG_MAX_DEVS, "bsg");
 	if (ret)
@@ -260,7 +297,7 @@ static int __init bsg_init(void)
 	return 0;
 
 destroy_bsg_class:
-	class_destroy(bsg_class);
+	class_unregister(&bsg_class);
 	return ret;
 }
 

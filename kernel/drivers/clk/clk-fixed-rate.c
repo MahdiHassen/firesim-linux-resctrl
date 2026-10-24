@@ -78,7 +78,7 @@ struct clk_hw *__clk_hw_register_fixed_rate(struct device *dev,
 		fixed = devres_alloc(devm_clk_hw_register_fixed_rate_release,
 				     sizeof(*fixed), GFP_KERNEL);
 	else
-		fixed = kzalloc(sizeof(*fixed), GFP_KERNEL);
+		fixed = kzalloc_obj(*fixed);
 	if (!fixed)
 		return ERR_PTR(-ENOMEM);
 
@@ -196,14 +196,12 @@ void __init of_fixed_clk_setup(struct device_node *node)
 }
 CLK_OF_DECLARE(fixed_clk, "fixed-clock", of_fixed_clk_setup);
 
-static int of_fixed_clk_remove(struct platform_device *pdev)
+static void of_fixed_clk_remove(struct platform_device *pdev)
 {
 	struct clk_hw *hw = platform_get_drvdata(pdev);
 
 	of_clk_del_provider(pdev->dev.of_node);
 	clk_hw_unregister_fixed_rate(hw);
-
-	return 0;
 }
 
 static int of_fixed_clk_probe(struct platform_device *pdev)

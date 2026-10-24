@@ -101,6 +101,7 @@
  */
 
 #include <linux/aperture.h>
+#include <linux/export.h>
 #include <linux/version.h>
 
 #include "matroxfb_base.h"
@@ -1204,6 +1205,7 @@ static const struct fb_ops matroxfb_ops = {
 	.owner =	THIS_MODULE,
 	.fb_open =	matroxfb_open,
 	.fb_release =	matroxfb_release,
+	__FB_DEFAULT_IOMEM_OPS_RDWR,
 	.fb_check_var =	matroxfb_check_var,
 	.fb_set_par =	matroxfb_set_par,
 	.fb_setcolreg =	matroxfb_setcolreg,
@@ -1214,6 +1216,7 @@ static const struct fb_ops matroxfb_ops = {
 /*	.fb_copyarea =	<set by matrox_cfbX_init>, */
 /*	.fb_imageblit =	<set by matrox_cfbX_init>, */
 /*	.fb_cursor =	<set by matrox_cfbX_init>, */
+	__FB_DEFAULT_IOMEM_OPS_MMAP,
 };
 
 #define RSDepth(X)	(((X) >> 8) & 0x0F)
@@ -1639,8 +1642,8 @@ static int initMatrox2(struct matrox_fb_info *minfo, struct board *b)
 	int err;
 
 	static const struct pci_device_id intel_82437[] = {
-		{ PCI_DEVICE(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_82437) },
-		{ },
+		{ PCI_VDEVICE(INTEL, PCI_DEVICE_ID_INTEL_82437) },
+		{ }
 	};
 
 	DBG(__func__)
@@ -2070,7 +2073,7 @@ static int matroxfb_probe(struct pci_dev* pdev, const struct pci_device_id* dumm
 		return -1;
 	}
 
-	minfo = kzalloc(sizeof(*minfo), GFP_KERNEL);
+	minfo = kzalloc_obj(*minfo);
 	if (!minfo)
 		return -ENOMEM;
 
@@ -2132,35 +2135,23 @@ static void pci_remove_matrox(struct pci_dev* pdev) {
 
 static const struct pci_device_id matroxfb_devices[] = {
 #ifdef CONFIG_FB_MATROX_MILLENIUM
-	{PCI_VENDOR_ID_MATROX,	PCI_DEVICE_ID_MATROX_MIL,
-		PCI_ANY_ID,	PCI_ANY_ID,	0, 0, 0},
-	{PCI_VENDOR_ID_MATROX,	PCI_DEVICE_ID_MATROX_MIL_2,
-		PCI_ANY_ID,	PCI_ANY_ID,	0, 0, 0},
-	{PCI_VENDOR_ID_MATROX,	PCI_DEVICE_ID_MATROX_MIL_2_AGP,
-		PCI_ANY_ID,	PCI_ANY_ID,	0, 0, 0},
+	{ PCI_VDEVICE(MATROX, PCI_DEVICE_ID_MATROX_MIL) },
+	{ PCI_VDEVICE(MATROX, PCI_DEVICE_ID_MATROX_MIL_2) },
+	{ PCI_VDEVICE(MATROX, PCI_DEVICE_ID_MATROX_MIL_2_AGP) },
 #endif
 #ifdef CONFIG_FB_MATROX_MYSTIQUE
-	{PCI_VENDOR_ID_MATROX,	PCI_DEVICE_ID_MATROX_MYS,
-		PCI_ANY_ID,	PCI_ANY_ID,	0, 0, 0},
+	{ PCI_VDEVICE(MATROX, PCI_DEVICE_ID_MATROX_MYS) },
 #endif
 #ifdef CONFIG_FB_MATROX_G
-	{PCI_VENDOR_ID_MATROX,	PCI_DEVICE_ID_MATROX_G100_MM,
-		PCI_ANY_ID,	PCI_ANY_ID,	0, 0, 0},
-	{PCI_VENDOR_ID_MATROX,	PCI_DEVICE_ID_MATROX_G100_AGP,
-		PCI_ANY_ID,	PCI_ANY_ID,	0, 0, 0},
-	{PCI_VENDOR_ID_MATROX,	PCI_DEVICE_ID_MATROX_G200_PCI,
-		PCI_ANY_ID,	PCI_ANY_ID,	0, 0, 0},
-	{PCI_VENDOR_ID_MATROX,	0x0532,
-		PCI_ANY_ID,	PCI_ANY_ID,	0, 0, 0},
-	{PCI_VENDOR_ID_MATROX,	PCI_DEVICE_ID_MATROX_G200_AGP,
-		PCI_ANY_ID,	PCI_ANY_ID,	0, 0, 0},
-	{PCI_VENDOR_ID_MATROX,	PCI_DEVICE_ID_MATROX_G400,
-		PCI_ANY_ID,	PCI_ANY_ID,	0, 0, 0},
-	{PCI_VENDOR_ID_MATROX,	PCI_DEVICE_ID_MATROX_G550,
-		PCI_ANY_ID,	PCI_ANY_ID,	0, 0, 0},
+	{ PCI_VDEVICE(MATROX, PCI_DEVICE_ID_MATROX_G100_MM) },
+	{ PCI_VDEVICE(MATROX, PCI_DEVICE_ID_MATROX_G100_AGP) },
+	{ PCI_VDEVICE(MATROX, PCI_DEVICE_ID_MATROX_G200_PCI) },
+	{ PCI_VDEVICE(MATROX, 0x0532) },
+	{ PCI_VDEVICE(MATROX, PCI_DEVICE_ID_MATROX_G200_AGP) },
+	{ PCI_VDEVICE(MATROX, PCI_DEVICE_ID_MATROX_G400) },
+	{ PCI_VDEVICE(MATROX, PCI_DEVICE_ID_MATROX_G550) },
 #endif
-	{0,			0,
-		0,		0,		0, 0, 0}
+	{ }
 };
 
 MODULE_DEVICE_TABLE(pci, matroxfb_devices);

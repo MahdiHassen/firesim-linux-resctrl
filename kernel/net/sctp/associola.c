@@ -137,7 +137,8 @@ static struct sctp_association *sctp_association_init(
 		= 5 * asoc->rto_max;
 
 	asoc->timeouts[SCTP_EVENT_TIMEOUT_SACK] = asoc->sackdelay;
-	asoc->timeouts[SCTP_EVENT_TIMEOUT_AUTOCLOSE] = sp->autoclose * HZ;
+	asoc->timeouts[SCTP_EVENT_TIMEOUT_AUTOCLOSE] =
+		(unsigned long)sp->autoclose * HZ;
 
 	/* Initializes the timers */
 	for (i = SCTP_EVENT_TIMEOUT_NONE; i < SCTP_NUM_TIMEOUT_TYPES; ++i)
@@ -288,7 +289,7 @@ struct sctp_association *sctp_association_new(const struct sctp_endpoint *ep,
 {
 	struct sctp_association *asoc;
 
-	asoc = kzalloc(sizeof(*asoc), gfp);
+	asoc = kzalloc_obj(*asoc, gfp);
 	if (!asoc)
 		goto fail;
 
@@ -361,7 +362,7 @@ void sctp_association_free(struct sctp_association *asoc)
 	 * on our state.
 	 */
 	for (i = SCTP_EVENT_TIMEOUT_NONE; i < SCTP_NUM_TIMEOUT_TYPES; ++i) {
-		if (del_timer(&asoc->timers[i]))
+		if (timer_delete(&asoc->timers[i]))
 			sctp_association_put(asoc);
 	}
 
@@ -542,6 +543,9 @@ void sctp_assoc_rm_peer(struct sctp_association *asoc,
 	    asoc->addip_last_asconf->transport == peer)
 		asoc->addip_last_asconf->transport = NULL;
 
+	if (asoc->new_transport == peer)
+		asoc->new_transport = NULL;
+
 	/* If we have something on the transmitted list, we have to
 	 * save it off.  The best place is the active path.
 	 */
@@ -569,6 +573,10 @@ void sctp_assoc_rm_peer(struct sctp_association *asoc,
 	}
 
 	list_for_each_entry(ch, &asoc->outqueue.out_chunk_list, list)
+		if (ch->transport == peer)
+			ch->transport = NULL;
+
+	list_for_each_entry(ch, &asoc->outqueue.control_chunk_list, list)
 		if (ch->transport == peer)
 			ch->transport = NULL;
 
@@ -612,6 +620,9 @@ struct sctp_transport *sctp_assoc_add_peer(struct sctp_association *asoc,
 		}
 		return peer;
 	}
+
+	if (asoc->peer.transport_count == U16_MAX)
+		return NULL;
 
 	peer = sctp_transport_new(asoc->base.net, addr, gfp);
 	if (!peer)
@@ -733,24 +744,6 @@ struct sctp_transport *sctp_assoc_add_peer(struct sctp_association *asoc,
 	}
 
 	return peer;
-}
-
-/* Delete a transport address from an association.  */
-void sctp_assoc_del_peer(struct sctp_association *asoc,
-			 const union sctp_addr *addr)
-{
-	struct list_head	*pos;
-	struct list_head	*temp;
-	struct sctp_transport	*transport;
-
-	list_for_each_safe(pos, temp, &asoc->peer.transport_addr_list) {
-		transport = list_entry(pos, struct sctp_transport, transports);
-		if (sctp_cmp_addr_exact(addr, &transport->ipaddr)) {
-			/* Do book keeping for removing the peer and free it. */
-			sctp_assoc_rm_peer(asoc, transport);
-			break;
-		}
-	}
 }
 
 /* Lookup a transport by address. */
@@ -1159,8 +1152,7 @@ int sctp_assoc_update(struct sctp_association *asoc,
 		/* Add any peer addresses from the new association. */
 		list_for_each_entry(trans, &new->peer.transport_addr_list,
 				    transports)
-			if (!sctp_assoc_lookup_paddr(asoc, &trans->ipaddr) &&
-			    !sctp_assoc_add_peer(asoc, &trans->ipaddr,
+			if (!sctp_assoc_add_peer(asoc, &trans->ipaddr,
 						 GFP_ATOMIC, trans->state))
 				return -ENOMEM;
 
@@ -1521,7 +1513,7 @@ void sctp_assoc_rwnd_increase(struct sctp_association *asoc, unsigned int len)
 
 		/* Stop the SACK timer.  */
 		timer = &asoc->timers[SCTP_EVENT_TIMEOUT_SACK];
-		if (del_timer(timer))
+		if (timer_delete(timer))
 			sctp_association_put(asoc);
 	}
 }
@@ -1597,9 +1589,10 @@ int sctp_assoc_set_bind_addr_from_cookie(struct sctp_association *asoc,
 					 struct sctp_cookie *cookie,
 					 gfp_t gfp)
 {
-	int var_size2 = ntohs(cookie->peer_init->chunk_hdr.length);
+	struct sctp_init_chunk *peer_init = (struct sctp_init_chunk *)(cookie + 1);
+	int var_size2 = ntohs(peer_init->chunk_hdr.length);
 	int var_size3 = cookie->raw_addr_list_len;
-	__u8 *raw = (__u8 *)cookie->peer_init + var_size2;
+	__u8 *raw = (__u8 *)peer_init + var_size2;
 
 	return sctp_raw_to_bind_addrs(&asoc->base.bind_addr, raw, var_size3,
 				      asoc->ep->base.bind_addr.port, gfp);
@@ -1723,6 +1716,8 @@ void sctp_asconf_queue_teardown(struct sctp_association *asoc)
 	sctp_assoc_free_asconf_queue(asoc);
 
 	/* Free any cached ASCONF chunk. */
-	if (asoc->addip_last_asconf)
+	if (asoc->addip_last_asconf) {
 		sctp_chunk_free(asoc->addip_last_asconf);
+		asoc->addip_last_asconf = NULL;
+	}
 }

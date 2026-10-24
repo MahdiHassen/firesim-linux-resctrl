@@ -11,7 +11,7 @@
 #include <linux/crypto.h>
 #include <linux/kernel.h>
 #include <linux/cpufeature.h>
-#include <asm/neon.h>
+#include <asm/simd.h>
 #include <crypto/scatterwalk.h>
 #include <crypto/internal/aead.h>
 #include <crypto/internal/skcipher.h>
@@ -35,10 +35,9 @@ static int ccm_setkey(struct crypto_aead *tfm, const u8 *key,
 	if (key_len != SM4_KEY_SIZE)
 		return -EINVAL;
 
-	kernel_neon_begin();
-	sm4_ce_expand_key(key, ctx->rkey_enc, ctx->rkey_dec,
-			  crypto_sm4_fk, crypto_sm4_ck);
-	kernel_neon_end();
+	scoped_ksimd()
+		sm4_ce_expand_key(key, ctx->rkey_enc, ctx->rkey_dec,
+				  crypto_sm4_fk, crypto_sm4_ck);
 
 	return 0;
 }
@@ -112,17 +111,12 @@ static void ccm_calculate_auth_mac(struct aead_request *req, u8 mac[])
 	scatterwalk_start(&walk, req->src);
 
 	do {
-		u32 n = scatterwalk_clamp(&walk, assoclen);
-		u8 *p, *ptr;
+		unsigned int n, orig_n;
+		const u8 *p;
 
-		if (!n) {
-			scatterwalk_start(&walk, sg_next(walk.sg));
-			n = scatterwalk_clamp(&walk, assoclen);
-		}
-
-		p = ptr = scatterwalk_map(&walk);
-		assoclen -= n;
-		scatterwalk_advance(&walk, n);
+		orig_n = scatterwalk_next(&walk, assoclen);
+		p = walk.addr;
+		n = orig_n;
 
 		while (n > 0) {
 			unsigned int l, nblocks;
@@ -136,9 +130,9 @@ static void ccm_calculate_auth_mac(struct aead_request *req, u8 mac[])
 				} else {
 					nblocks = n / SM4_BLOCK_SIZE;
 					sm4_ce_cbcmac_update(ctx->rkey_enc,
-							     mac, ptr, nblocks);
+							     mac, p, nblocks);
 
-					ptr += nblocks * SM4_BLOCK_SIZE;
+					p += nblocks * SM4_BLOCK_SIZE;
 					n %= SM4_BLOCK_SIZE;
 
 					continue;
@@ -147,15 +141,15 @@ static void ccm_calculate_auth_mac(struct aead_request *req, u8 mac[])
 
 			l = min(n, SM4_BLOCK_SIZE - len);
 			if (l) {
-				crypto_xor(mac + len, ptr, l);
+				crypto_xor(mac + len, p, l);
 				len += l;
-				ptr += l;
+				p += l;
 				n -= l;
 			}
 		}
 
-		scatterwalk_unmap(p);
-		scatterwalk_done(&walk, 0, assoclen);
+		scatterwalk_done_src(&walk, orig_n);
+		assoclen -= orig_n;
 	} while (assoclen);
 }
 
@@ -166,44 +160,32 @@ static int ccm_crypt(struct aead_request *req, struct skcipher_walk *walk,
 					unsigned int nbytes, u8 *mac))
 {
 	u8 __aligned(8) ctr0[SM4_BLOCK_SIZE];
-	int err;
+	int err = 0;
 
 	/* preserve the initial ctr0 for the TAG */
 	memcpy(ctr0, walk->iv, SM4_BLOCK_SIZE);
 	crypto_inc(walk->iv, SM4_BLOCK_SIZE);
 
-	kernel_neon_begin();
+	scoped_ksimd() {
+		if (req->assoclen)
+			ccm_calculate_auth_mac(req, mac);
 
-	if (req->assoclen)
-		ccm_calculate_auth_mac(req, mac);
+		while (walk->nbytes) {
+			unsigned int tail = walk->nbytes % SM4_BLOCK_SIZE;
 
-	do {
-		unsigned int tail = walk->nbytes % SM4_BLOCK_SIZE;
-		const u8 *src = walk->src.virt.addr;
-		u8 *dst = walk->dst.virt.addr;
+			if (walk->nbytes == walk->total)
+				tail = 0;
 
-		if (walk->nbytes == walk->total)
-			tail = 0;
-
-		if (walk->nbytes - tail)
-			sm4_ce_ccm_crypt(rkey_enc, dst, src, walk->iv,
+			sm4_ce_ccm_crypt(rkey_enc, walk->dst.virt.addr,
+					 walk->src.virt.addr, walk->iv,
 					 walk->nbytes - tail, mac);
 
-		if (walk->nbytes == walk->total)
-			sm4_ce_ccm_final(rkey_enc, ctr0, mac);
-
-		kernel_neon_end();
-
-		if (walk->nbytes) {
 			err = skcipher_walk_done(walk, tail);
-			if (err)
-				return err;
-			if (walk->nbytes)
-				kernel_neon_begin();
 		}
-	} while (walk->nbytes > 0);
+		sm4_ce_ccm_final(rkey_enc, ctr0, mac);
+	}
 
-	return 0;
+	return err;
 }
 
 static int ccm_encrypt(struct aead_request *req)

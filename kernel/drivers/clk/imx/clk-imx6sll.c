@@ -81,8 +81,7 @@ static void __init imx6sll_clocks_init(struct device_node *ccm_node)
 	struct device_node *np;
 	void __iomem *base;
 
-	clk_hw_data = kzalloc(struct_size(clk_hw_data, hws,
-					  IMX6SLL_CLK_END), GFP_KERNEL);
+	clk_hw_data = kzalloc_flex(*clk_hw_data, hws, IMX6SLL_CLK_END);
 	if (WARN_ON(!clk_hw_data))
 		return;
 
@@ -340,7 +339,7 @@ static void __init imx6sll_clocks_init(struct device_node *ccm_node)
 
 	of_clk_add_hw_provider(np, of_clk_hw_onecell_get, clk_hw_data);
 
-	imx_register_uart_clocks(5);
+	imx_register_uart_clocks();
 
 	/* Lower the AHB clock rate before changing the clock source. */
 	clk_set_rate(hws[IMX6SLL_CLK_AHB]->clk, 99000000);

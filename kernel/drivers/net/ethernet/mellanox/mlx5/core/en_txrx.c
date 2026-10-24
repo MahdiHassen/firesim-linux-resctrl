@@ -51,11 +51,11 @@ static void mlx5e_handle_tx_dim(struct mlx5e_txqsq *sq)
 	struct mlx5e_sq_stats *stats = sq->stats;
 	struct dim_sample dim_sample = {};
 
-	if (unlikely(!test_bit(MLX5E_SQ_STATE_AM, &sq->state)))
+	if (unlikely(!test_bit(MLX5E_SQ_STATE_DIM, &sq->state)))
 		return;
 
 	dim_update_sample(sq->cq.event_ctr, stats->packets, stats->bytes, &dim_sample);
-	net_dim(&sq->dim, dim_sample);
+	net_dim(sq->dim, &dim_sample);
 }
 
 static void mlx5e_handle_rx_dim(struct mlx5e_rq *rq)
@@ -63,11 +63,11 @@ static void mlx5e_handle_rx_dim(struct mlx5e_rq *rq)
 	struct mlx5e_rq_stats *stats = rq->stats;
 	struct dim_sample dim_sample = {};
 
-	if (unlikely(!test_bit(MLX5E_RQ_STATE_AM, &rq->state)))
+	if (unlikely(!test_bit(MLX5E_RQ_STATE_DIM, &rq->state)))
 		return;
 
 	dim_update_sample(rq->cq.event_ctr, stats->packets, stats->bytes, &dim_sample);
-	net_dim(&rq->dim, dim_sample);
+	net_dim(rq->dim, &dim_sample);
 }
 
 void mlx5e_trigger_irq(struct mlx5e_icosq *sq)
@@ -125,6 +125,7 @@ int mlx5e_napi_poll(struct napi_struct *napi, int budget)
 {
 	struct mlx5e_channel *c = container_of(napi, struct mlx5e_channel,
 					       napi);
+	struct mlx5e_icosq *aicosq = c->async_icosq;
 	struct mlx5e_ch_stats *ch_stats = c->stats;
 	struct mlx5e_xdpsq *xsksq = &c->xsksq;
 	struct mlx5e_txqsq __rcu **qos_sqs;
@@ -161,42 +162,49 @@ int mlx5e_napi_poll(struct napi_struct *napi, int budget)
 		}
 	}
 
-	busy |= mlx5e_poll_xdpsq_cq(&c->xdpsq.cq);
+	/* budget=0 means we may be in IRQ context, do as little as possible */
+	if (unlikely(!budget))
+		goto out;
 
-	if (c->xdp)
+	if (c->xdp) {
+		if (c->xdpsq)
+			busy |= mlx5e_poll_xdpsq_cq(&c->xdpsq->cq);
 		busy |= mlx5e_poll_xdpsq_cq(&c->rq_xdpsq.cq);
-
-	if (likely(budget)) { /* budget=0 means: don't poll rx rings */
 		if (xsk_open)
-			work_done = mlx5e_poll_rx_cq(&xskrq->cq, budget);
-
-		if (likely(budget - work_done))
-			work_done += mlx5e_poll_rx_cq(&rq->cq, budget - work_done);
-
-		busy |= work_done == budget;
+			work_done += mlx5e_poll_rx_cq(&xskrq->cq, budget);
 	}
 
-	mlx5e_poll_ico_cq(&c->icosq.cq);
-	if (mlx5e_poll_ico_cq(&c->async_icosq.cq))
-		/* Don't clear the flag if nothing was polled to prevent
-		 * queueing more WQEs and overflowing the async ICOSQ.
-		 */
-		clear_bit(MLX5E_SQ_STATE_PENDING_XSK_TX, &c->async_icosq.state);
+	if (likely(budget - work_done))
+		work_done += mlx5e_poll_rx_cq(&rq->cq, budget - work_done);
 
-	/* Keep after async ICOSQ CQ poll */
-	if (unlikely(mlx5e_ktls_rx_pending_resync_list(c, budget)))
-		busy |= mlx5e_ktls_rx_handle_resync_list(c, budget);
+	busy |= work_done == budget;
+
+	mlx5e_poll_ico_cq(&c->icosq.cq);
+	if (aicosq) {
+		if (mlx5e_poll_ico_cq(&aicosq->cq))
+			/* Don't clear the flag if nothing was polled to prevent
+			 * queueing more WQEs and overflowing the async ICOSQ.
+			 */
+			clear_bit(MLX5E_SQ_STATE_PENDING_XSK_TX,
+				  &aicosq->state);
+
+		/* Keep after async ICOSQ CQ poll */
+		if (unlikely(mlx5e_ktls_rx_pending_resync_list(aicosq, budget)))
+			busy |= mlx5e_ktls_rx_handle_resync_list(aicosq,
+								 budget);
+
+		if (xsk_open) {
+			busy |= mlx5e_poll_xdpsq_cq(&xsksq->cq);
+			busy_xsk |= mlx5e_napi_xsk_post(xsksq, xskrq);
+
+			busy |= busy_xsk;
+		}
+	}
 
 	busy |= INDIRECT_CALL_2(rq->post_wqes,
 				mlx5e_post_rx_mpwqes,
 				mlx5e_post_rx_wqes,
 				rq);
-	if (xsk_open) {
-		busy |= mlx5e_poll_xdpsq_cq(&xsksq->cq);
-		busy_xsk |= mlx5e_napi_xsk_post(xsksq, xskrq);
-	}
-
-	busy |= busy_xsk;
 
 	if (busy) {
 		if (likely(mlx5e_channel_no_affinity_change(c))) {
@@ -205,7 +213,7 @@ int mlx5e_napi_poll(struct napi_struct *napi, int budget)
 		}
 		ch_stats->aff_change++;
 		aff_change = true;
-		if (budget && work_done == budget)
+		if (work_done == budget)
 			work_done--;
 	}
 
@@ -233,17 +241,19 @@ int mlx5e_napi_poll(struct napi_struct *napi, int budget)
 
 	mlx5e_cq_arm(&rq->cq);
 	mlx5e_cq_arm(&c->icosq.cq);
-	mlx5e_cq_arm(&c->async_icosq.cq);
-	mlx5e_cq_arm(&c->xdpsq.cq);
-
-	if (xsk_open) {
-		mlx5e_handle_rx_dim(xskrq);
-		mlx5e_cq_arm(&xsksq->cq);
-		mlx5e_cq_arm(&xskrq->cq);
+	if (aicosq) {
+		mlx5e_cq_arm(&aicosq->cq);
+		if (xsk_open) {
+			mlx5e_handle_rx_dim(xskrq);
+			mlx5e_cq_arm(&xsksq->cq);
+			mlx5e_cq_arm(&xskrq->cq);
+		}
+		if (c->xdpsq)
+			mlx5e_cq_arm(&c->xdpsq->cq);
 	}
 
 	if (unlikely(aff_change && busy_xsk)) {
-		mlx5e_trigger_irq(&c->icosq);
+		mlx5e_trigger_napi_async_icosq(c);
 		ch_stats->force_irq++;
 	}
 

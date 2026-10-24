@@ -10,9 +10,9 @@
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/of_graph.h>
-#include <linux/of_device.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
+#include <linux/tegra-mipi-cal.h>
 
 #include <media/v4l2-fwnode.h>
 
@@ -20,17 +20,6 @@
 #include "video.h"
 
 #define MHZ			1000000
-
-static inline struct tegra_csi *
-host1x_client_to_csi(struct host1x_client *client)
-{
-	return container_of(client, struct tegra_csi, client);
-}
-
-static inline struct tegra_csi_channel *to_csi_chan(struct v4l2_subdev *subdev)
-{
-	return container_of(subdev, struct tegra_csi_channel, subdev);
-}
 
 /*
  * CSI is a separate subdevice which has 6 source pads to generate
@@ -223,13 +212,21 @@ static int csi_set_format(struct v4l2_subdev *subdev,
 /*
  * V4L2 Subdevice Video Operations
  */
-static int tegra_csi_g_frame_interval(struct v4l2_subdev *subdev,
-				      struct v4l2_subdev_frame_interval *vfi)
+static int tegra_csi_get_frame_interval(struct v4l2_subdev *subdev,
+					struct v4l2_subdev_state *sd_state,
+					struct v4l2_subdev_frame_interval *vfi)
 {
 	struct tegra_csi_channel *csi_chan = to_csi_chan(subdev);
 
 	if (!IS_ENABLED(CONFIG_VIDEO_TEGRA_TPG))
 		return -ENOIOCTLCMD;
+
+	/*
+	 * FIXME: Implement support for V4L2_SUBDEV_FORMAT_TRY, using the V4L2
+	 * subdev active state API.
+	 */
+	if (vfi->which != V4L2_SUBDEV_FORMAT_ACTIVE)
+		return -EINVAL;
 
 	vfi->interval.numerator = 1;
 	vfi->interval.denominator = csi_chan->framerate;
@@ -328,12 +325,42 @@ static int tegra_csi_enable_stream(struct v4l2_subdev *subdev)
 	}
 
 	csi_chan->pg_mode = chan->pg_mode;
+
+	/*
+	 * Tegra CSI receiver can detect the first LP to HS transition.
+	 * So, start the CSI stream-on prior to sensor stream-on and
+	 * vice-versa for stream-off.
+	 */
 	ret = csi->ops->csi_start_streaming(csi_chan);
 	if (ret < 0)
 		goto finish_calibration;
 
+	if (csi_chan->mipi) {
+		struct v4l2_subdev *src_subdev;
+		/*
+		 * TRM has incorrectly documented to wait for done status from
+		 * calibration logic after CSI interface power on.
+		 * As per the design, calibration results are latched and applied
+		 * to the pads only when the link is in LP11 state which will happen
+		 * during the sensor stream-on.
+		 * CSI subdev stream-on triggers start of MIPI pads calibration.
+		 * Wait for calibration to finish here after sensor subdev stream-on.
+		 */
+		src_subdev = tegra_channel_get_remote_source_subdev(chan);
+		ret = v4l2_subdev_call(src_subdev, video, s_stream, true);
+
+		if (ret < 0 && ret != -ENOIOCTLCMD)
+			goto disable_csi_stream;
+
+		err = tegra_mipi_finish_calibration(csi_chan->mipi);
+		if (err < 0)
+			dev_warn(csi->dev, "MIPI calibration failed: %d\n", err);
+	}
+
 	return 0;
 
+disable_csi_stream:
+	csi->ops->csi_stop_streaming(csi_chan);
 finish_calibration:
 	if (csi_chan->mipi)
 		tegra_mipi_finish_calibration(csi_chan->mipi);
@@ -352,9 +379,23 @@ rpm_put:
 
 static int tegra_csi_disable_stream(struct v4l2_subdev *subdev)
 {
+	struct tegra_vi_channel *chan = v4l2_get_subdev_hostdata(subdev);
 	struct tegra_csi_channel *csi_chan = to_csi_chan(subdev);
 	struct tegra_csi *csi = csi_chan->csi;
 	int err;
+
+	/*
+	 * Stream-off subdevices in reverse order to stream-on.
+	 * Remote source subdev in TPG mode is same as CSI subdev.
+	 */
+	if (csi_chan->mipi) {
+		struct v4l2_subdev *src_subdev;
+
+		src_subdev = tegra_channel_get_remote_source_subdev(chan);
+		err = v4l2_subdev_call(src_subdev, video, s_stream, false);
+		if (err < 0 && err != -ENOIOCTLCMD)
+			dev_err_probe(csi->dev, err, "source subdev stream off failed\n");
+	}
 
 	csi->ops->csi_stop_streaming(csi_chan);
 
@@ -387,8 +428,6 @@ static int tegra_csi_s_stream(struct v4l2_subdev *subdev, int enable)
  */
 static const struct v4l2_subdev_video_ops tegra_csi_video_ops = {
 	.s_stream = tegra_csi_s_stream,
-	.g_frame_interval = tegra_csi_g_frame_interval,
-	.s_frame_interval = tegra_csi_g_frame_interval,
 };
 
 static const struct v4l2_subdev_pad_ops tegra_csi_pad_ops = {
@@ -397,12 +436,30 @@ static const struct v4l2_subdev_pad_ops tegra_csi_pad_ops = {
 	.enum_frame_interval	= csi_enum_frameintervals,
 	.get_fmt		= csi_get_format,
 	.set_fmt		= csi_set_format,
+	.get_frame_interval	= tegra_csi_get_frame_interval,
+	.set_frame_interval	= tegra_csi_get_frame_interval,
 };
 
 static const struct v4l2_subdev_ops tegra_csi_ops = {
 	.video  = &tegra_csi_video_ops,
 	.pad    = &tegra_csi_pad_ops,
 };
+
+struct v4l2_subdev *tegra_channel_get_remote_csi_subdev(struct tegra_vi_channel *chan)
+{
+	struct media_pad *pad;
+	struct v4l2_subdev *subdev;
+
+	pad = media_pad_remote_pad_first(&chan->pad);
+	if (!pad)
+		return NULL;
+
+	subdev = media_entity_to_v4l2_subdev(pad->entity);
+	if (!subdev)
+		return NULL;
+
+	return subdev->ops == &tegra_csi_ops ? subdev : NULL;
+}
 
 static int tegra_csi_channel_alloc(struct tegra_csi *csi,
 				   struct device_node *node,
@@ -412,7 +469,7 @@ static int tegra_csi_channel_alloc(struct tegra_csi *csi,
 	struct tegra_csi_channel *chan;
 	int ret = 0, i;
 
-	chan = kzalloc(sizeof(*chan), GFP_KERNEL);
+	chan = kzalloc_obj(*chan);
 	if (!chan)
 		return -ENOMEM;
 
@@ -564,10 +621,10 @@ static int tegra_csi_channel_init(struct tegra_csi_channel *chan)
 	v4l2_subdev_init(subdev, &tegra_csi_ops);
 	subdev->dev = csi->dev;
 	if (IS_ENABLED(CONFIG_VIDEO_TEGRA_TPG))
-		snprintf(subdev->name, V4L2_SUBDEV_NAME_SIZE, "%s-%d", "tpg",
+		snprintf(subdev->name, sizeof(subdev->name), "%s-%d", "tpg",
 			 chan->csi_port_nums[0]);
 	else
-		snprintf(subdev->name, V4L2_SUBDEV_NAME_SIZE, "%s",
+		snprintf(subdev->name, sizeof(subdev->name), "%s",
 			 kbasename(chan->of_node->full_name));
 
 	v4l2_set_subdevdata(subdev, chan);
@@ -653,6 +710,8 @@ static int __maybe_unused csi_runtime_suspend(struct device *dev)
 
 	clk_bulk_disable_unprepare(csi->soc->num_clks, csi->clks);
 
+	regulator_disable(csi->vdd);
+
 	return 0;
 }
 
@@ -661,13 +720,23 @@ static int __maybe_unused csi_runtime_resume(struct device *dev)
 	struct tegra_csi *csi = dev_get_drvdata(dev);
 	int ret;
 
-	ret = clk_bulk_prepare_enable(csi->soc->num_clks, csi->clks);
-	if (ret < 0) {
-		dev_err(csi->dev, "failed to enable clocks: %d\n", ret);
+	ret = regulator_enable(csi->vdd);
+	if (ret) {
+		dev_err(dev, "failed to enable VDD supply: %d\n", ret);
 		return ret;
 	}
 
+	ret = clk_bulk_prepare_enable(csi->soc->num_clks, csi->clks);
+	if (ret < 0) {
+		dev_err(csi->dev, "failed to enable clocks: %d\n", ret);
+		goto disable_vdd;
+	}
+
 	return 0;
+
+disable_vdd:
+	regulator_disable(csi->vdd);
+	return ret;
 }
 
 static int tegra_csi_init(struct host1x_client *client)
@@ -745,6 +814,11 @@ static int tegra_csi_probe(struct platform_device *pdev)
 		return ret;
 	}
 
+	csi->vdd = devm_regulator_get(&pdev->dev, "avdd-dsi-csi");
+	if (IS_ERR(csi->vdd))
+		return dev_err_probe(&pdev->dev, PTR_ERR(csi->vdd),
+				     "failed to get VDD supply");
+
 	if (!pdev->dev.pm_domain) {
 		ret = -ENOENT;
 		dev_warn(&pdev->dev, "PM domain is not attached: %d\n", ret);
@@ -753,6 +827,17 @@ static int tegra_csi_probe(struct platform_device *pdev)
 
 	csi->dev = &pdev->dev;
 	csi->ops = csi->soc->ops;
+
+	if (csi->soc->mipi_ops) {
+		ret = devm_tegra_mipi_add_provider(&pdev->dev, pdev->dev.of_node,
+						   csi->soc->mipi_ops);
+		if (ret)
+			return dev_err_probe(&pdev->dev, ret,
+					     "failed to add MIPI calibration operations\n");
+	}
+
+	mutex_init(&csi->mipi_lock);
+
 	platform_set_drvdata(pdev, csi);
 	pm_runtime_enable(&pdev->dev);
 
@@ -775,24 +860,22 @@ rpm_disable:
 	return ret;
 }
 
-static int tegra_csi_remove(struct platform_device *pdev)
+static void tegra_csi_remove(struct platform_device *pdev)
 {
 	struct tegra_csi *csi = platform_get_drvdata(pdev);
-	int err;
 
-	err = host1x_client_unregister(&csi->client);
-	if (err < 0) {
-		dev_err(&pdev->dev,
-			"failed to unregister host1x client: %d\n", err);
-		return err;
-	}
+	host1x_client_unregister(&csi->client);
 
 	pm_runtime_disable(&pdev->dev);
-
-	return 0;
 }
 
 static const struct of_device_id tegra_csi_of_id_table[] = {
+#if defined(CONFIG_ARCH_TEGRA_2x_SOC)
+	{ .compatible = "nvidia,tegra20-csi", .data = &tegra20_csi_soc },
+#endif
+#if defined(CONFIG_ARCH_TEGRA_3x_SOC)
+	{ .compatible = "nvidia,tegra30-csi", .data = &tegra30_csi_soc },
+#endif
 #if defined(CONFIG_ARCH_TEGRA_210_SOC)
 	{ .compatible = "nvidia,tegra210-csi", .data = &tegra210_csi_soc },
 #endif

@@ -5,15 +5,17 @@
  */
 
 #include <dirent.h>
+#include <errno.h>
 #include <stdbool.h>
 #include <linux/coresight-pmu.h>
-#include <linux/zalloc.h>
+#include <stdlib.h>
 #include <api/fs/fs.h>
 
 #include "../../../util/auxtrace.h"
 #include "../../../util/debug.h"
 #include "../../../util/evlist.h"
 #include "../../../util/pmu.h"
+#include "../../../util/pmus.h"
 #include "cs-etm.h"
 #include "arm-spe.h"
 #include "hisi-ptt.h"
@@ -25,7 +27,7 @@ static struct perf_pmu **find_all_arm_spe_pmus(int *nr_spes, int *err)
 	/* arm_spe_xxxxxxxxx\0 */
 	char arm_spe_pmu_name[sizeof(ARM_SPE_PMU_NAME) + 10];
 
-	arm_spe_pmus = zalloc(sizeof(struct perf_pmu *) * nr_cpus);
+	arm_spe_pmus = calloc(nr_cpus, sizeof(struct perf_pmu *));
 	if (!arm_spe_pmus) {
 		pr_err("spes alloc failed\n");
 		*err = -ENOMEM;
@@ -40,7 +42,7 @@ static struct perf_pmu **find_all_arm_spe_pmus(int *nr_spes, int *err)
 			return NULL;
 		}
 
-		arm_spe_pmus[*nr_spes] = perf_pmu__find(arm_spe_pmu_name);
+		arm_spe_pmus[*nr_spes] = perf_pmus__find(arm_spe_pmu_name);
 		if (arm_spe_pmus[*nr_spes]) {
 			pr_debug2("%s %d: arm_spe_pmu %d type %d name %s\n",
 				 __func__, __LINE__, *nr_spes,
@@ -55,17 +57,16 @@ static struct perf_pmu **find_all_arm_spe_pmus(int *nr_spes, int *err)
 
 static struct perf_pmu **find_all_hisi_ptt_pmus(int *nr_ptts, int *err)
 {
-	const char *sysfs = sysfs__mountpoint();
 	struct perf_pmu **hisi_ptt_pmus = NULL;
 	struct dirent *dent;
 	char path[PATH_MAX];
 	DIR *dir = NULL;
 	int idx = 0;
 
-	snprintf(path, PATH_MAX, "%s" EVENT_SOURCE_DEVICE_PATH, sysfs);
+	perf_pmu__event_source_devices_scnprintf(path, sizeof(path));
 	dir = opendir(path);
 	if (!dir) {
-		pr_err("can't read directory '%s'\n", EVENT_SOURCE_DEVICE_PATH);
+		pr_err("can't read directory '%s'\n", path);
 		*err = -EINVAL;
 		return NULL;
 	}
@@ -78,7 +79,7 @@ static struct perf_pmu **find_all_hisi_ptt_pmus(int *nr_ptts, int *err)
 	if (!(*nr_ptts))
 		goto out;
 
-	hisi_ptt_pmus = zalloc(sizeof(struct perf_pmu *) * (*nr_ptts));
+	hisi_ptt_pmus = calloc((*nr_ptts), sizeof(struct perf_pmu *));
 	if (!hisi_ptt_pmus) {
 		pr_err("hisi_ptt alloc failed\n");
 		*err = -ENOMEM;
@@ -88,7 +89,7 @@ static struct perf_pmu **find_all_hisi_ptt_pmus(int *nr_ptts, int *err)
 	rewinddir(dir);
 	while ((dent = readdir(dir))) {
 		if (strstr(dent->d_name, HISI_PTT_PMU_NAME) && idx < *nr_ptts) {
-			hisi_ptt_pmus[idx] = perf_pmu__find(dent->d_name);
+			hisi_ptt_pmus[idx] = perf_pmus__find(dent->d_name);
 			if (hisi_ptt_pmus[idx])
 				idx++;
 		}
@@ -132,7 +133,7 @@ struct auxtrace_record
 	if (!evlist)
 		return NULL;
 
-	cs_etm_pmu = perf_pmu__find(CORESIGHT_ETM_PMU_NAME);
+	cs_etm_pmu = perf_pmus__find(CORESIGHT_ETM_PMU_NAME);
 	arm_spe_pmus = find_all_arm_spe_pmus(&nr_spes, err);
 	hisi_ptt_pmus = find_all_hisi_ptt_pmus(&nr_ptts, err);
 

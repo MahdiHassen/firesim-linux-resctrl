@@ -30,7 +30,7 @@
 #include <subdev/timer.h>
 #include <subdev/top.h>
 
-struct nvkm_cgrp *
+static struct nvkm_cgrp *
 nvkm_engn_cgrp_get(struct nvkm_engn *engn, unsigned long *pirqflags)
 {
 	struct nvkm_cgrp *cgrp = NULL;
@@ -349,7 +349,7 @@ nvkm_runl_add(struct nvkm_runl *runl, int engi, const struct nvkm_engn_func *fun
 		return NULL;
 	}
 
-	if (!(engn = kzalloc(sizeof(*engn), GFP_KERNEL)))
+	if (!(engn = kzalloc_obj(*engn)))
 		return NULL;
 
 	engn->func = func;
@@ -398,8 +398,8 @@ nvkm_runl_new(struct nvkm_fifo *fifo, int runi, u32 addr, int id_nr)
 	struct nvkm_runl *runl;
 	int ret;
 
-	if (!(runl = kzalloc(sizeof(*runl), GFP_KERNEL)))
-		return NULL;
+	if (!(runl = kzalloc_obj(*runl)))
+		return ERR_PTR(-ENOMEM);
 
 	runl->func = fifo->func->runl;
 	runl->fifo = fifo;
@@ -419,7 +419,7 @@ nvkm_runl_new(struct nvkm_fifo *fifo, int runi, u32 addr, int id_nr)
 		    (ret = nvkm_chid_new(&nvkm_chan_event, subdev, id_nr, 0, id_nr, &runl->chid))) {
 			RUNL_ERROR(runl, "cgid/chid: %d", ret);
 			nvkm_runl_del(runl);
-			return NULL;
+			return ERR_PTR(ret);
 		}
 	} else {
 		runl->cgid = nvkm_chid_ref(fifo->cgid);

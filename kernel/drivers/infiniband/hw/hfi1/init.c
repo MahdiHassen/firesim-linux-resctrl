@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0 or BSD-3-Clause
+// SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 /*
  * Copyright(c) 2015 - 2020 Intel Corporation.
  * Copyright(c) 2021 Cornelis Networks.
@@ -26,7 +26,6 @@
 #include "verbs.h"
 #include "aspm.h"
 #include "affinity.h"
-#include "vnic.h"
 #include "exp_rcv.h"
 #include "netdev.h"
 
@@ -342,14 +341,14 @@ int hfi1_create_ctxtdata(struct hfi1_pportdata *ppd, int numa,
 		INIT_LIST_HEAD(&rcd->flow_queue.queue_head);
 		INIT_LIST_HEAD(&rcd->rarr_queue.queue_head);
 
-		hfi1_cdbg(PROC, "setting up context %u\n", rcd->ctxt);
+		hfi1_cdbg(PROC, "setting up context %u", rcd->ctxt);
 
 		/*
 		 * Calculate the context's RcvArray entry starting point.
 		 * We do this here because we have to take into account all
 		 * the RcvArray entries that previous context would have
 		 * taken and we have to account for any extra groups assigned
-		 * to the static (kernel) or dynamic (vnic/user) contexts.
+		 * to the static (kernel) or dynamic (user) contexts.
 		 */
 		if (ctxt < dd->first_dyn_alloc_ctxt) {
 			if (ctxt < kctxt_ngroups) {
@@ -400,7 +399,7 @@ int hfi1_create_ctxtdata(struct hfi1_pportdata *ppd, int numa,
 			rcd->egrbufs.count = MAX_EAGER_ENTRIES;
 		}
 		hfi1_cdbg(PROC,
-			  "ctxt%u: max Eager buffer RcvArray entries: %u\n",
+			  "ctxt%u: max Eager buffer RcvArray entries: %u",
 			  rcd->ctxt, rcd->egrbufs.count);
 
 		/*
@@ -432,7 +431,7 @@ int hfi1_create_ctxtdata(struct hfi1_pportdata *ppd, int numa,
 		if (rcd->egrbufs.size < hfi1_max_mtu) {
 			rcd->egrbufs.size = __roundup_pow_of_two(hfi1_max_mtu);
 			hfi1_cdbg(PROC,
-				  "ctxt%u: eager bufs size too small. Adjusting to %u\n",
+				  "ctxt%u: eager bufs size too small. Adjusting to %u",
 				    rcd->ctxt, rcd->egrbufs.size);
 		}
 		rcd->egrbufs.rcvtid_size = HFI1_MAX_EAGER_BUFFER_SIZE;
@@ -464,7 +463,7 @@ bail:
  *
  * This wrapper is the free function that matches hfi1_create_ctxtdata().
  * When a context is done being used (kernel or user), this function is called
- * for the "final" put to match the kref init from hf1i_create_ctxtdata().
+ * for the "final" put to match the kref init from hfi1_create_ctxtdata().
  * Other users of the context do a get/put sequence to make sure that the
  * structure isn't removed while in use.
  */
@@ -635,19 +634,18 @@ void hfi1_init_pportdata(struct pci_dev *pdev, struct hfi1_pportdata *ppd,
 	spin_lock_init(&ppd->cca_timer_lock);
 
 	for (i = 0; i < OPA_MAX_SLS; i++) {
-		hrtimer_init(&ppd->cca_timer[i].hrtimer, CLOCK_MONOTONIC,
-			     HRTIMER_MODE_REL);
 		ppd->cca_timer[i].ppd = ppd;
 		ppd->cca_timer[i].sl = i;
 		ppd->cca_timer[i].ccti = 0;
-		ppd->cca_timer[i].hrtimer.function = cca_timer_fn;
+		hrtimer_setup(&ppd->cca_timer[i].hrtimer, cca_timer_fn, CLOCK_MONOTONIC,
+			      HRTIMER_MODE_REL);
 	}
 
 	ppd->cc_max_table_entries = IB_CC_TABLE_CAP_DEFAULT;
 
 	spin_lock_init(&ppd->cc_state_lock);
 	spin_lock_init(&ppd->cc_log_lock);
-	cc_state = kzalloc(sizeof(*cc_state), GFP_KERNEL);
+	cc_state = kzalloc_obj(*cc_state);
 	RCU_INIT_POINTER(ppd->cc_state, cc_state);
 	if (!cc_state)
 		goto bail;
@@ -746,8 +744,8 @@ static int create_workqueues(struct hfi1_devdata *dd)
 			ppd->hfi1_wq =
 				alloc_workqueue(
 				    "hfi%d_%d",
-				    WQ_SYSFS | WQ_HIGHPRI | WQ_CPU_INTENSIVE |
-				    WQ_MEM_RECLAIM,
+				    WQ_SYSFS | WQ_HIGHPRI | WQ_CPU_INTENSIVE | WQ_MEM_RECLAIM |
+				    WQ_PERCPU,
 				    HFI1_MAX_ACTIVE_WORKQUEUE_ENTRIES,
 				    dd->unit, pidx);
 			if (!ppd->hfi1_wq)
@@ -852,7 +850,6 @@ int hfi1_init(struct hfi1_devdata *dd, int reinit)
 	dd->process_pio_send = hfi1_verbs_send_pio;
 	dd->process_dma_send = hfi1_verbs_send_dma;
 	dd->pio_inline_send = pio_copy;
-	dd->process_vnic_dma_send = hfi1_vnic_send_dma;
 
 	if (is_ax(dd)) {
 		atomic_set(&dd->drop_packet, DROP_PACKET_ON);
@@ -986,7 +983,7 @@ static void stop_timers(struct hfi1_devdata *dd)
 	for (pidx = 0; pidx < dd->num_pports; ++pidx) {
 		ppd = dd->pport + pidx;
 		if (ppd->led_override_timer.function) {
-			del_timer_sync(&ppd->led_override_timer);
+			timer_delete_sync(&ppd->led_override_timer);
 			atomic_set(&ppd->led_override_timer_active, 0);
 		}
 	}
@@ -1027,7 +1024,6 @@ static void shutdown_device(struct hfi1_devdata *dd)
 	msix_clean_up_interrupts(dd);
 
 	for (pidx = 0; pidx < dd->num_pports; ++pidx) {
-		ppd = dd->pport + pidx;
 		for (i = 0; i < dd->num_rcv_contexts; i++) {
 			rcd = hfi1_rcd_get_by_index(dd, i);
 			hfi1_rcvctrl(dd, HFI1_RCVCTRL_TAILUPD_DIS |
@@ -1210,6 +1206,7 @@ static struct hfi1_devdata *hfi1_alloc_devdata(struct pci_dev *pdev,
 					       size_t extra)
 {
 	struct hfi1_devdata *dd;
+	struct ib_device *ibdev;
 	int ret, nports;
 
 	/* extra is * number of ports */
@@ -1231,7 +1228,17 @@ static struct hfi1_devdata *hfi1_alloc_devdata(struct pci_dev *pdev,
 			"Could not allocate unit ID: error %d\n", -ret);
 		goto bail;
 	}
-	rvt_set_ibdev_name(&dd->verbs_dev.rdi, "%s_%d", class_name(), dd->unit);
+
+	/*
+	 * FIXME: rvt and its users want to touch the ibdev before
+	 * registration and have things like the name work. We don't have the
+	 * infrastructure in the core to support this directly today, hack it
+	 * to work by setting the name manually here.
+	 */
+	ibdev = &dd->verbs_dev.rdi.ibdev;
+	dev_set_name(&ibdev->dev, "%s_%d", class_name(), dd->unit);
+	strscpy(ibdev->name, dev_name(&ibdev->dev), IB_DEVICE_NAME_MAX);
+
 	/*
 	 * If the BIOS does not have the NUMA node information set, select
 	 * NUMA 0 so we get consistent performance.
@@ -1284,7 +1291,7 @@ static struct hfi1_devdata *hfi1_alloc_devdata(struct pci_dev *pdev,
 		goto bail;
 	}
 
-	dd->comp_vect = kzalloc(sizeof(*dd->comp_vect), GFP_KERNEL);
+	dd->comp_vect = kzalloc_obj(*dd->comp_vect);
 	if (!dd->comp_vect) {
 		ret = -ENOMEM;
 		goto bail;
@@ -1920,7 +1927,7 @@ int hfi1_setup_eagerbufs(struct hfi1_ctxtdata *rcd)
 	rcd->egrbufs.size = alloced_bytes;
 
 	hfi1_cdbg(PROC,
-		  "ctxt%u: Alloced %u rcv tid entries @ %uKB, total %uKB\n",
+		  "ctxt%u: Alloced %u rcv tid entries @ %uKB, total %uKB",
 		  rcd->ctxt, rcd->egrbufs.alloced,
 		  rcd->egrbufs.rcvtid_size / 1024, rcd->egrbufs.size / 1024);
 
@@ -1943,13 +1950,13 @@ int hfi1_setup_eagerbufs(struct hfi1_ctxtdata *rcd)
 		rcd->expected_count = MAX_TID_PAIR_ENTRIES * 2;
 
 	rcd->expected_base = rcd->eager_base + egrtop;
-	hfi1_cdbg(PROC, "ctxt%u: eager:%u, exp:%u, egrbase:%u, expbase:%u\n",
+	hfi1_cdbg(PROC, "ctxt%u: eager:%u, exp:%u, egrbase:%u, expbase:%u",
 		  rcd->ctxt, rcd->egrbufs.alloced, rcd->expected_count,
 		  rcd->eager_base, rcd->expected_base);
 
 	if (!hfi1_rcvbuf_validate(rcd->egrbufs.rcvtid_size, PT_EAGER, &order)) {
 		hfi1_cdbg(PROC,
-			  "ctxt%u: current Eager buffer size is invalid %u\n",
+			  "ctxt%u: current Eager buffer size is invalid %u",
 			  rcd->ctxt, rcd->egrbufs.rcvtid_size);
 		ret = -EINVAL;
 		goto bail_rcvegrbuf_phys;

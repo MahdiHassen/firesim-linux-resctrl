@@ -6,9 +6,12 @@
 #ifndef __QCOM_TSENS_H__
 #define __QCOM_TSENS_H__
 
+#define NO_PT_CALIB		0x0
 #define ONE_PT_CALIB		0x1
 #define ONE_PT_CALIB2		0x2
 #define TWO_PT_CALIB		0x3
+#define ONE_PT_CALIB2_NO_OFFSET	0x6
+#define TWO_PT_CALIB_NO_OFFSET	0x7
 #define CAL_DEGC_PT1		30
 #define CAL_DEGC_PT2		120
 #define SLOPE_FACTOR		1000
@@ -16,6 +19,9 @@
 #define TIMEOUT_US		100
 #define THRESHOLD_MAX_ADC_CODE	0x3ff
 #define THRESHOLD_MIN_ADC_CODE	0x0
+
+#define MAX_SENSORS 16
+#define MAX_READ_RETRY 3
 
 #include <linux/interrupt.h>
 #include <linux/thermal.h>
@@ -29,7 +35,9 @@ enum tsens_ver {
 	VER_0 = 0,
 	VER_0_1,
 	VER_1_X,
+	VER_1_X_NO_RPM,
 	VER_2_X,
+	VER_2_X_NO_RPM,
 };
 
 enum tsens_irq_type {
@@ -54,6 +62,8 @@ struct tsens_sensor {
 	unsigned int			hw_id;
 	int				slope;
 	u32				status;
+	int				p1_calib_offset;
+	int				p2_calib_offset;
 };
 
 /**
@@ -161,6 +171,7 @@ enum regfield_ids {
 	TSENS_SW_RST,
 	SENSOR_EN,
 	CODE_OR_TEMP,
+	MAIN_MEASURE_PERIOD,
 
 	/* ----- TM ------ */
 	/* TRDY */
@@ -521,6 +532,7 @@ struct tsens_features {
  * @hw_ids: Subset of sensors ids supported by platform, if not the first n
  * @feat: features of the IP
  * @fields: bitfield locations
+ * @no_irq_wake: if set, TSENS interrupts will not be configured as wakeup sources
  */
 struct tsens_plat_data {
 	const u32		num_sensors;
@@ -528,6 +540,7 @@ struct tsens_plat_data {
 	unsigned int		*hw_ids;
 	struct tsens_features	*feat;
 	const struct reg_field		*fields;
+	bool		no_irq_wake;
 };
 
 /**
@@ -557,6 +570,9 @@ struct tsens_context {
  * @ops: pointer to list of callbacks supported by this device
  * @debug_root: pointer to debugfs dentry for all tsens
  * @debug: pointer to debugfs dentry for tsens controller
+ * @uplow_irq: IRQ number for uplow (upper/lower) threshold interrupts
+ * @crit_irq: IRQ number for critical threshold interrupts
+ * @combined_irq: IRQ number for combined threshold interrupts
  * @sensor: list of sensors attached to this device
  */
 struct tsens_priv {
@@ -578,25 +594,91 @@ struct tsens_priv {
 	struct dentry			*debug_root;
 	struct dentry			*debug;
 
-	struct tsens_sensor		sensor[];
+	int				uplow_irq;
+	int				crit_irq;
+	int				combined_irq;
+
+	struct tsens_sensor		sensor[] __counted_by(num_sensors);
+};
+
+/**
+ * struct tsens_single_value - internal representation of a single field inside nvmem calibration data
+ * @idx: index into the u32 data array
+ * @shift: the shift of the first bit in the value
+ * @blob: index of the data blob to use for this cell
+ */
+struct tsens_single_value {
+	u8 idx;
+	u8 shift;
+	u8 blob;
+};
+
+/**
+ * struct tsens_legacy_calibration_format - description of calibration data used when parsing the legacy nvmem blob
+ * @base_len: the length of the base fields inside calibration data
+ * @base_shift: the shift to be applied to base data
+ * @sp_len: the length of the sN_pM fields inside calibration data
+ * @mode: descriptor of the calibration mode field
+ * @invalid: descriptor of the calibration mode invalid field
+ * @base: descriptors of the base0 and base1 fields
+ * @sp: descriptors of the sN_pM fields
+ */
+struct tsens_legacy_calibration_format {
+	unsigned int base_len;
+	unsigned int base_shift;
+	unsigned int sp_len;
+	/* just two bits */
+	struct tsens_single_value mode;
+	/* on all platforms except 8974 invalid is the third bit of what downstream calls 'mode' */
+	struct tsens_single_value invalid;
+	struct tsens_single_value base[2];
+	struct tsens_single_value sp[][2];
 };
 
 char *qfprom_read(struct device *dev, const char *cname);
+int tsens_read_calibration_legacy(struct tsens_priv *priv,
+				  const struct tsens_legacy_calibration_format *format,
+				  u32 *p1, u32 *p2,
+				  u32 *cdata, u32 *csel);
+int tsens_read_calibration(struct tsens_priv *priv, int shift, u32 *p1, u32 *p2, bool backup);
+int tsens_calibrate_nvmem(struct tsens_priv *priv, int shift);
+int tsens_calibrate_common(struct tsens_priv *priv);
 void compute_intercept_slope(struct tsens_priv *priv, u32 *pt1, u32 *pt2, u32 mode);
 int init_common(struct tsens_priv *priv);
 int get_temp_tsens_valid(const struct tsens_sensor *s, int *temp);
 int get_temp_common(const struct tsens_sensor *s, int *temp);
+#ifdef CONFIG_SUSPEND
+int tsens_resume_common(struct tsens_priv *priv);
+int tsens_suspend_common(struct tsens_priv *priv);
+#else
+static inline int tsens_resume_common(struct tsens_priv *priv)
+{
+	return 0;
+}
+
+static inline int tsens_suspend_common(struct tsens_priv *priv)
+{
+	return 0;
+}
+#endif
 
 /* TSENS target */
 extern struct tsens_plat_data data_8960;
 
 /* TSENS v0.1 targets */
-extern struct tsens_plat_data data_8916, data_8939, data_8974, data_9607;
+extern struct tsens_plat_data data_8226, data_8909, data_8916, data_8939, data_8974, data_9607;
 
 /* TSENS v1 targets */
-extern struct tsens_plat_data data_tsens_v1, data_8976;
+extern struct tsens_plat_data data_tsens_v1, data_8937, data_8976, data_8956;
+
+/* TSENS v1 with no RPM targets */
+extern const struct tsens_plat_data data_ipq5018;
 
 /* TSENS v2 targets */
 extern struct tsens_plat_data data_8996, data_ipq8074, data_tsens_v2;
+extern const struct tsens_plat_data data_ipq5332, data_ipq5424;
+
+/* TSENS automotive targets */
+extern struct tsens_plat_data data_automotive_v2;
 
 #endif /* __QCOM_TSENS_H__ */

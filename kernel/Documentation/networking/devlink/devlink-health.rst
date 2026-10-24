@@ -33,7 +33,9 @@ Device driver can provide specific callbacks for each "health reporter", e.g.:
   * Recovery procedures
   * Diagnostics procedures
   * Object dump procedures
-  * OOB initial parameters
+
+Drivers also provide default values for generic reporter parameters when
+creating a health reporter.
 
 Different parts of the driver can register different types of health reporters
 with different handlers.
@@ -45,18 +47,39 @@ Once an error is reported, devlink health will perform the following actions:
 
   * A log is being send to the kernel trace events buffer
   * Health status and statistics are being updated for the reporter instance
-  * Object dump is being taken and saved at the reporter instance (as long as
-    there is no other dump which is already stored)
+  * Object dump is being taken and saved at the reporter instance. This is
+    best effort and skipped when recovery is aborted, auto-dump is disabled,
+    no dump callback is registered, or a dump is already stored.
   * Auto recovery attempt is being done. Depends on:
 
     - Auto-recovery configuration
-    - Grace period vs. time passed since last recover
+    - Grace period (and burst period)  vs. time passed since last recover
+
+Devlink formatted message
+=========================
+
+To handle devlink health diagnose and health dump requests, devlink creates a
+formatted message structure ``devlink_fmsg`` and send it to the driver's callback
+to fill the data in using the devlink fmsg API.
+
+Devlink fmsg is a mechanism to pass descriptors between drivers and devlink, in
+json-like format. The API allows the driver to add nested attributes such as
+object, object pair and value array, in addition to attributes such as name and
+value.
+
+Driver should use this API to fill the fmsg context in a format which will be
+translated by the devlink to the netlink message later. When it needs to send
+the data using SKBs to the netlink layer, it fragments the data between
+different SKBs. In order to do this fragmentation, it uses virtual nests
+attributes, to avoid actual nesting use which cannot be divided between
+different SKBs.
 
 User Interface
 ==============
 
 User can access/change each reporter's parameters and driver specific callbacks
-via ``devlink``, e.g per error type (per health reporter):
+via ``devlink``, e.g. per error type (per health reporter). Reporters may be
+registered for the whole devlink instance or for a specific devlink port.
 
   * Configure reporter's generic parameters (like: disable/enable auto recovery)
   * Invoke recovery procedure

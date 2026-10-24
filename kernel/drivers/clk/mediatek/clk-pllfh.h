@@ -18,6 +18,7 @@ struct fh_pll_state {
 struct fh_pll_data {
 	int pll_id;
 	int fh_id;
+	int fh_ver;
 	u32 fhx_offset;
 	u32 dds_mask;
 	u32 slope0_value;
@@ -67,7 +68,7 @@ struct fh_operation {
 	int (*ssc_enable)(struct mtk_fh *fh, u32 rate);
 };
 
-int mtk_clk_register_pllfhs(struct device_node *node,
+int mtk_clk_register_pllfhs(struct device *dev,
 			    const struct mtk_pll_data *plls, int num_plls,
 			    struct mtk_pllfh_data *pllfhs, int num_pllfhs,
 			    struct clk_hw_onecell_data *clk_data);

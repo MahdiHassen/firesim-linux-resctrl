@@ -52,6 +52,7 @@
 #include <linux/if_arp.h>
 #include <linux/proc_fs.h>
 #include <linux/rcupdate.h>
+#include <linux/rcupdate_wait.h>
 #include <linux/skbuff.h>
 #include <linux/netlink.h>
 #include <linux/init.h>
@@ -291,15 +292,9 @@ static const int inflate_threshold = 50;
 static const int halve_threshold_root = 15;
 static const int inflate_threshold_root = 30;
 
-static void __alias_free_mem(struct rcu_head *head)
-{
-	struct fib_alias *fa = container_of(head, struct fib_alias, rcu);
-	kmem_cache_free(fn_alias_kmem, fa);
-}
-
 static inline void alias_free_mem_rcu(struct fib_alias *fa)
 {
-	call_rcu(&fa->rcu, __alias_free_mem);
+	kfree_rcu(fa, rcu);
 }
 
 #define TNODE_VMALLOC_MAX \
@@ -500,7 +495,7 @@ static void tnode_free(struct key_vector *tn)
 
 	if (tnode_free_size >= READ_ONCE(sysctl_fib_sync_mem)) {
 		tnode_free_size = 0;
-		synchronize_rcu();
+		synchronize_net();
 	}
 }
 
@@ -1192,22 +1187,6 @@ static int fib_insert_alias(struct trie *t, struct key_vector *tp,
 	return 0;
 }
 
-static bool fib_valid_key_len(u32 key, u8 plen, struct netlink_ext_ack *extack)
-{
-	if (plen > KEYLENGTH) {
-		NL_SET_ERR_MSG(extack, "Invalid prefix length");
-		return false;
-	}
-
-	if ((plen < KEYLENGTH) && (key << plen)) {
-		NL_SET_ERR_MSG(extack,
-			       "Invalid prefix for given prefix length");
-		return false;
-	}
-
-	return true;
-}
-
 static void fib_remove_alias(struct trie *t, struct key_vector *tp,
 			     struct key_vector *l, struct fib_alias *old);
 
@@ -1227,9 +1206,6 @@ int fib_table_insert(struct net *net, struct fib_table *tb,
 	int err;
 
 	key = ntohl(cfg->fc_dst);
-
-	if (!fib_valid_key_len(key, plen, extack))
-		return -EINVAL;
 
 	pr_debug("Insert table=%u %08x/%d\n", tb->tb_id, key, plen);
 
@@ -1304,7 +1280,7 @@ int fib_table_insert(struct net *net, struct fib_table *tb,
 			new_fa->fa_dscp = fa->fa_dscp;
 			new_fa->fa_info = fi;
 			new_fa->fa_type = cfg->fc_type;
-			state = fa->fa_state;
+			state = READ_ONCE(fa->fa_state);
 			new_fa->fa_state = state & ~FA_S_ACCESSED;
 			new_fa->fa_slen = fa->fa_slen;
 			new_fa->tb_id = tb->tb_id;
@@ -1409,7 +1385,7 @@ succeeded:
 out_remove_new_fa:
 	fib_remove_alias(t, tp, l, new_fa);
 out_free_new_fa:
-	kmem_cache_free(fn_alias_kmem, new_fa);
+	alias_free_mem_rcu(new_fa);
 out:
 	fib_release_info(fi);
 err:
@@ -1579,10 +1555,10 @@ found:
 			if (index >= (1ul << fa->fa_slen))
 				continue;
 		}
-		if (fa->fa_dscp &&
-		    inet_dscp_to_dsfield(fa->fa_dscp) != flp->flowi4_tos)
+		if (fa->fa_dscp && !fib_dscp_masked_match(fa->fa_dscp, flp))
 			continue;
-		if (fi->fib_dead)
+		/* Paired with WRITE_ONCE() in fib_release_info() */
+		if (READ_ONCE(fi->fib_dead))
 			continue;
 		if (fa->fa_info->fib_scope < flp->flowi4_scope)
 			continue;
@@ -1627,6 +1603,7 @@ set_result:
 			res->nhc = nhc;
 			res->type = fa->fa_type;
 			res->scope = fi->fib_scope;
+			res->dscp = fa->fa_dscp;
 			res->fi = fi;
 			res->table = tb;
 			res->fa_head = &n->leaf;
@@ -1721,9 +1698,6 @@ int fib_table_delete(struct net *net, struct fib_table *tb,
 
 	key = ntohl(cfg->fc_dst);
 
-	if (!fib_valid_key_len(key, plen, extack))
-		return -EINVAL;
-
 	l = fib_find_node(t, &tp, key);
 	if (!l)
 		return -ESRCH;
@@ -1771,7 +1745,7 @@ int fib_table_delete(struct net *net, struct fib_table *tb,
 
 	fib_remove_alias(t, tp, l, fa_to_delete);
 
-	if (fa_to_delete->fa_state & FA_S_ACCESSED)
+	if (READ_ONCE(fa_to_delete->fa_state) & FA_S_ACCESSED)
 		rt_cache_flush(cfg->fc_nlinfo.nl_net);
 
 	fib_release_info(fa_to_delete->fa_info);
@@ -2026,6 +2000,7 @@ void fib_table_flush_external(struct fib_table *tb)
 int fib_table_flush(struct net *net, struct fib_table *tb, bool flush_all)
 {
 	struct trie *t = (struct trie *)tb->tb_data;
+	struct nl_info info = { .nl_net = net };
 	struct key_vector *pn = t->kv;
 	unsigned long cindex = 1;
 	struct hlist_node *tmp;
@@ -2071,23 +2046,21 @@ int fib_table_flush(struct net *net, struct fib_table *tb, bool flush_all)
 		hlist_for_each_entry_safe(fa, tmp, &n->leaf, fa_list) {
 			struct fib_info *fi = fa->fa_info;
 
-			if (!fi || tb->tb_id != fa->tb_id ||
-			    (!(fi->fib_flags & RTNH_F_DEAD) &&
-			     !fib_props[fa->fa_type].error)) {
+			if (!fi || tb->tb_id != fa->tb_id) {
 				slen = fa->fa_slen;
 				continue;
 			}
 
-			/* Do not flush error routes if network namespace is
-			 * not being dismantled
-			 */
-			if (!flush_all && fib_props[fa->fa_type].error) {
+			if (!flush_all && !(fi->fib_flags & RTNH_F_DEAD)) {
 				slen = fa->fa_slen;
 				continue;
 			}
 
 			fib_notify_alias_delete(net, n->key, &n->leaf, fa,
 						NULL);
+			if (fi->pfsrc_removed)
+				rtmsg_fib(RTM_DELROUTE, htonl(n->key), fa,
+					  KEYLENGTH - fa->fa_slen, tb->tb_id, &info, 0);
 			hlist_del_rcu(&fa->fa_list);
 			fib_release_info(fa->fa_info);
 			alias_free_mem_rcu(fa);
@@ -2193,10 +2166,14 @@ static int fib_leaf_notify(struct key_vector *l, struct fib_table *tb,
 		if (fa->fa_slen == last_slen)
 			continue;
 
+		if (!fib_info_hold_safe(fa->fa_info))
+			continue;
+
 		last_slen = fa->fa_slen;
 		err = call_fib_entry_notifier(nb, FIB_EVENT_ENTRY_REPLACE,
 					      l->key, KEYLENGTH - fa->fa_slen,
 					      fa, extack);
+		fib_info_put(fa->fa_info);
 		if (err)
 			return err;
 	}
@@ -2362,7 +2339,7 @@ int fib_table_dump(struct fib_table *tb, struct sk_buff *skb,
 	 * and key == 0 means the dump has wrapped around and we are done.
 	 */
 	if (count && !key)
-		return skb->len;
+		return 0;
 
 	while ((l = leaf_walk_rcu(&tp, key)) != NULL) {
 		int err;
@@ -2388,7 +2365,7 @@ int fib_table_dump(struct fib_table *tb, struct sk_buff *skb,
 	cb->args[3] = key;
 	cb->args[2] = count;
 
-	return skb->len;
+	return 0;
 }
 
 void __init fib_trie_init(void)
@@ -2999,7 +2976,7 @@ static int fib_route_seq_show(struct seq_file *seq, void *v)
 
 			seq_printf(seq,
 				   "%s\t%08X\t%08X\t%04X\t%d\t%u\t"
-				   "%d\t%08X\t%d\t%u\t%u",
+				   "%u\t%08X\t%d\t%u\t%u",
 				   nhc->nhc_dev ? nhc->nhc_dev->name : "*",
 				   prefix, gw, flags, 0, 0,
 				   fi->fib_priority,
@@ -3011,7 +2988,7 @@ static int fib_route_seq_show(struct seq_file *seq, void *v)
 		} else {
 			seq_printf(seq,
 				   "*\t%08X\t%08X\t%04X\t%d\t%u\t"
-				   "%d\t%08X\t%d\t%u\t%u",
+				   "%u\t%08X\t%d\t%u\t%u",
 				   prefix, 0, flags, 0, 0, 0,
 				   mask, 0, 0, 0);
 		}

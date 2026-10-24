@@ -22,9 +22,10 @@
 #include <linux/io.h>
 #include <linux/usb.h>
 #include <linux/usb/hcd.h>
+#include <linux/of.h>
 #include <linux/of_address.h>
 #include <linux/of_irq.h>
-#include <linux/of_platform.h>
+#include <linux/platform_device.h>
 #include <linux/slab.h>
 #include <linux/gpio/consumer.h>
 #include <soc/fsl/qe/qe.h>
@@ -192,7 +193,7 @@ static int fhci_mem_init(struct fhci_hcd *fhci)
 {
 	int i;
 
-	fhci->hc_list = kzalloc(sizeof(*fhci->hc_list), GFP_KERNEL);
+	fhci->hc_list = kzalloc_obj(*fhci->hc_list);
 	if (!fhci->hc_list)
 		goto err;
 
@@ -202,7 +203,7 @@ static int fhci_mem_init(struct fhci_hcd *fhci)
 	INIT_LIST_HEAD(&fhci->hc_list->intr_list);
 	INIT_LIST_HEAD(&fhci->hc_list->done_list);
 
-	fhci->vroot_hub = kzalloc(sizeof(*fhci->vroot_hub), GFP_KERNEL);
+	fhci->vroot_hub = kzalloc_obj(*fhci->vroot_hub);
 	if (!fhci->vroot_hub)
 		goto err;
 
@@ -216,7 +217,7 @@ static int fhci_mem_init(struct fhci_hcd *fhci)
 	for (i = 0; i < MAX_TDS; i++) {
 		struct td *td;
 
-		td = kmalloc(sizeof(*td), GFP_KERNEL);
+		td = kmalloc_obj(*td);
 		if (!td)
 			goto err;
 		fhci_recycle_empty_td(fhci, td);
@@ -224,7 +225,7 @@ static int fhci_mem_init(struct fhci_hcd *fhci)
 	for (i = 0; i < MAX_EDS; i++) {
 		struct ed *ed;
 
-		ed = kmalloc(sizeof(*ed), GFP_KERNEL);
+		ed = kmalloc_obj(*ed);
 		if (!ed)
 			goto err;
 		fhci_recycle_empty_ed(fhci, ed);
@@ -263,7 +264,7 @@ static int fhci_usb_init(struct fhci_hcd *fhci)
 	usb->max_frame_usage = FRAME_TIME_USAGE;
 	usb->sw_transaction_time = SW_FIX_TIME_BETWEEN_TRANSACTION;
 
-	usb->actual_frame = kzalloc(sizeof(*usb->actual_frame), GFP_KERNEL);
+	usb->actual_frame = kzalloc_obj(*usb->actual_frame);
 	if (!usb->actual_frame) {
 		fhci_usb_free(usb);
 		return -ENOMEM;
@@ -305,7 +306,7 @@ static struct fhci_usb *fhci_create_lld(struct fhci_hcd *fhci)
 	struct fhci_usb *usb;
 
 	/* allocate memory for SCC data structure */
-	usb = kzalloc(sizeof(*usb), GFP_KERNEL);
+	usb = kzalloc_obj(*usb);
 	if (!usb)
 		return NULL;
 
@@ -425,16 +426,11 @@ static int fhci_urb_enqueue(struct usb_hcd *hcd, struct urb *urb,
 	}
 
 	/* allocate the private part of the URB */
-	urb_priv = kzalloc(sizeof(*urb_priv), mem_flags);
+	urb_priv = kzalloc_flex(*urb_priv, tds, size, mem_flags);
 	if (!urb_priv)
 		return -ENOMEM;
 
-	/* allocate the private part of the URB */
-	urb_priv->tds = kcalloc(size, sizeof(*urb_priv->tds), mem_flags);
-	if (!urb_priv->tds) {
-		kfree(urb_priv);
-		return -ENOMEM;
-	}
+	urb_priv->num_of_tds = size;
 
 	spin_lock_irqsave(&fhci->lock, flags);
 
@@ -443,8 +439,6 @@ static int fhci_urb_enqueue(struct usb_hcd *hcd, struct urb *urb,
 		goto err;
 
 	/* fill the private part of the URB */
-	urb_priv->num_of_tds = size;
-
 	urb->status = -EINPROGRESS;
 	urb->actual_length = 0;
 	urb->error_count = 0;
@@ -452,10 +446,8 @@ static int fhci_urb_enqueue(struct usb_hcd *hcd, struct urb *urb,
 
 	fhci_queue_urb(fhci, urb);
 err:
-	if (ret) {
-		kfree(urb_priv->tds);
+	if (ret)
 		kfree(urb_priv);
-	}
 	spin_unlock_irqrestore(&fhci->lock, flags);
 	return ret;
 }
@@ -757,7 +749,7 @@ err_regs:
 	return ret;
 }
 
-static int fhci_remove(struct device *dev)
+static void fhci_remove(struct device *dev)
 {
 	struct usb_hcd *hcd = dev_get_drvdata(dev);
 	struct fhci_hcd *fhci = hcd_to_fhci(hcd);
@@ -771,12 +763,11 @@ static int fhci_remove(struct device *dev)
 		qe_pin_free(fhci->pins[j]);
 	fhci_dfs_destroy(fhci);
 	usb_put_hcd(hcd);
-	return 0;
 }
 
-static int of_fhci_remove(struct platform_device *ofdev)
+static void of_fhci_remove(struct platform_device *ofdev)
 {
-	return fhci_remove(&ofdev->dev);
+	fhci_remove(&ofdev->dev);
 }
 
 static const struct of_device_id of_fhci_match[] = {

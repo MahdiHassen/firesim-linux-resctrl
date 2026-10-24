@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * hal.c - DIM2 HAL implementation
+ * DIM2 HAL implementation
  * (MediaLB, Device Interface Macro IP, OS62420)
  *
  * Copyright (C) 2015-2016, Microchip Technology Germany II GmbH & Co. KG
@@ -11,9 +11,8 @@
 #include "hal.h"
 #include "errors.h"
 #include "reg.h"
-#include <linux/stddef.h>
-#include <linux/kernel.h>
 #include <linux/io.h>
+#include <linux/kernel.h>
 
 /*
  * Size factor for isochronous DBR buffer.
@@ -44,8 +43,6 @@
 
 #define DBR_SIZE  (16 * 1024) /* specified by IP */
 #define DBR_BLOCK_SIZE  (DBR_SIZE / 32 / DBR_MAP_SIZE)
-
-#define ROUND_UP_TO(x, d)  (DIV_ROUND_UP(x, (d)) * (d))
 
 /* -------------------------------------------------------------------------- */
 /* generic helper functions and macros */
@@ -346,9 +343,8 @@ static void dim2_clear_ctram(void)
 		dim2_clear_ctr(ctr_addr);
 }
 
-static void dim2_configure_channel(
-	u8 ch_addr, u8 type, u8 is_tx, u16 dbr_address, u16 hw_buffer_size,
-	u16 packet_length)
+static void dim2_configure_channel(u8 ch_addr, u8 type, u8 is_tx, u16 dbr_address,
+				   u16 hw_buffer_size, u16 packet_length)
 {
 	dim2_configure_cdt(ch_addr, dbr_address, hw_buffer_size, packet_length);
 	dim2_configure_cat(MLB_CAT, ch_addr, type, is_tx ? 1 : 0);
@@ -759,7 +755,7 @@ static u8 init_ctrl_async(struct dim_channel *ch, u8 type, u8 is_tx,
 		return DIM_INIT_ERR_CHANNEL_ADDRESS;
 
 	if (!ch->dbr_size)
-		ch->dbr_size = ROUND_UP_TO(hw_buffer_size, DBR_BLOCK_SIZE);
+		ch->dbr_size = round_up(hw_buffer_size, DBR_BLOCK_SIZE);
 	ch->dbr_addr = alloc_dbr(ch->dbr_size);
 	if (ch->dbr_addr >= DBR_SIZE)
 		return DIM_INIT_ERR_OUT_OF_MEMORY;

@@ -9,7 +9,7 @@
 #include <linux/gpio/consumer.h>
 #include <linux/module.h>
 #include <linux/i2c.h>
-#include <linux/of_device.h>
+#include <linux/of.h>
 #include <linux/regmap.h>
 #include <linux/regulator/driver.h>
 #include <linux/regulator/of_regulator.h>
@@ -140,7 +140,8 @@ static int sy8827n_i2c_probe(struct i2c_client *client)
 		return -EINVAL;
 	}
 
-	di->en_gpio = devm_gpiod_get_optional(dev, "enable", GPIOD_OUT_HIGH);
+	di->en_gpio = devm_gpiod_get_optional(dev, "enable",
+			GPIOD_OUT_HIGH | GPIOD_FLAGS_BIT_NONEXCLUSIVE);
 	if (IS_ERR(di->en_gpio))
 		return PTR_ERR(di->en_gpio);
 
@@ -187,9 +188,10 @@ MODULE_DEVICE_TABLE(i2c, sy8827n_id);
 static struct i2c_driver sy8827n_regulator_driver = {
 	.driver = {
 		.name = "sy8827n-regulator",
+		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
 		.of_match_table = sy8827n_dt_ids,
 	},
-	.probe_new = sy8827n_i2c_probe,
+	.probe = sy8827n_i2c_probe,
 	.id_table = sy8827n_id,
 };
 module_i2c_driver(sy8827n_regulator_driver);

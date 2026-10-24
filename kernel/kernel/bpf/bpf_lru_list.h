@@ -6,11 +6,11 @@
 
 #include <linux/cache.h>
 #include <linux/list.h>
-#include <linux/spinlock_types.h>
+#include <linux/llist.h>
+#include <asm/rqspinlock.h>
 
 #define NR_BPF_LRU_LIST_T	(3)
 #define NR_BPF_LRU_LIST_COUNT	(2)
-#define NR_BPF_LRU_LOCAL_LIST_T (2)
 #define BPF_LOCAL_LIST_T_OFFSET NR_BPF_LRU_LIST_T
 
 enum bpf_lru_list_type {
@@ -22,10 +22,22 @@ enum bpf_lru_list_type {
 };
 
 struct bpf_lru_node {
-	struct list_head list;
+	/*
+	 * A node is in at most one list at a time. The free path on the
+	 * per-CPU locallist uses an llist, so share storage via a union.
+	 */
+	union {
+		struct list_head list;
+		struct llist_node llist;
+	};
 	u16 cpu;
 	u8 type;
 	u8 ref;
+	/*
+	 * Marks nodes whose *_push_free() lock acquire failed; reclaimed
+	 * by flush/shrink which honor the flag instead of del_from_htab().
+	 */
+	u8 pending_free;
 };
 
 struct bpf_lru_list {
@@ -34,13 +46,14 @@ struct bpf_lru_list {
 	/* The next inactive list rotation starts from here */
 	struct list_head *next_inactive_rotation;
 
-	raw_spinlock_t lock ____cacheline_aligned_in_smp;
+	rqspinlock_t lock ____cacheline_aligned_in_smp;
 };
 
 struct bpf_lru_locallist {
-	struct list_head lists[NR_BPF_LRU_LOCAL_LIST_T];
+	struct list_head pending_list;
+	struct llist_head free_llist;
 	u16 next_steal;
-	raw_spinlock_t lock;
+	rqspinlock_t lock;
 };
 
 struct bpf_common_lru {
@@ -58,17 +71,15 @@ struct bpf_lru {
 	del_from_htab_func del_from_htab;
 	void *del_arg;
 	unsigned int hash_offset;
+	unsigned int target_free;
 	unsigned int nr_scans;
 	bool percpu;
 };
 
 static inline void bpf_lru_node_set_ref(struct bpf_lru_node *node)
 {
-	/* ref is an approximation on access frequency.  It does not
-	 * have to be very accurate.  Hence, no protection is used.
-	 */
-	if (!node->ref)
-		node->ref = 1;
+	if (!READ_ONCE(node->ref))
+		WRITE_ONCE(node->ref, 1);
 }
 
 int bpf_lru_init(struct bpf_lru *lru, bool percpu, u32 hash_offset,
@@ -78,6 +89,5 @@ void bpf_lru_populate(struct bpf_lru *lru, void *buf, u32 node_offset,
 void bpf_lru_destroy(struct bpf_lru *lru);
 struct bpf_lru_node *bpf_lru_pop_free(struct bpf_lru *lru, u32 hash);
 void bpf_lru_push_free(struct bpf_lru *lru, struct bpf_lru_node *node);
-void bpf_lru_promote(struct bpf_lru *lru, struct bpf_lru_node *node);
 
 #endif

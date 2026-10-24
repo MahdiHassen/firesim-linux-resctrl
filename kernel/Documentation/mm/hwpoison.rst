@@ -1,5 +1,3 @@
-.. hwpoison:
-
 ========
 hwpoison
 ========
@@ -40,7 +38,7 @@ To quote the overview comment::
 	for the mapping from a vma to a process. Since this case is expected
 	to be rare we hope we can get away with this.
 
-The code consists of a the high level handler in mm/memory-failure.c,
+The code consists of the high level handler in mm/memory-failure.c,
 a new page poison bit and various checks in the VM to handle poisoned
 pages.
 
@@ -50,7 +48,7 @@ of applications. KVM support requires a recent qemu-kvm release.
 For the KVM use there was need for a new signal type so that
 KVM can inject the machine check into the guest with the proper
 address. This in theory allows other applications to handle
-memory failures too. The expection is that near all applications
+memory failures too. The expectation is that most applications
 won't do that, but some very specialized ones might.
 
 Failure recovery modes

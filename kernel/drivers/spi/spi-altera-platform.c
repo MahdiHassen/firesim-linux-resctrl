@@ -30,7 +30,6 @@ static const struct regmap_config spi_altera_config = {
 	.reg_bits = 32,
 	.reg_stride = 4,
 	.val_bits = 32,
-	.fast_io = true,
 };
 
 static int altera_spi_probe(struct platform_device *pdev)
@@ -39,38 +38,35 @@ static int altera_spi_probe(struct platform_device *pdev)
 	struct altera_spi_platform_data *pdata = dev_get_platdata(&pdev->dev);
 	enum altera_spi_type type = ALTERA_SPI_TYPE_UNKNOWN;
 	struct altera_spi *hw;
-	struct spi_master *master;
-	int err = -ENODEV;
+	struct spi_controller *host;
+	int err;
 	u16 i;
 
-	master = spi_alloc_master(&pdev->dev, sizeof(struct altera_spi));
-	if (!master)
-		return err;
+	host = devm_spi_alloc_host(&pdev->dev, sizeof(struct altera_spi));
+	if (!host)
+		return -ENOMEM;
 
-	/* setup the master state. */
-	master->bus_num = -1;
+	/* setup the host state. */
+	host->bus_num = -1;
 
 	if (pdata) {
 		if (pdata->num_chipselect > ALTERA_SPI_MAX_CS) {
 			dev_err(&pdev->dev,
 				"Invalid number of chipselect: %u\n",
 				pdata->num_chipselect);
-			err = -EINVAL;
-			goto exit;
+			return -EINVAL;
 		}
 
-		master->num_chipselect = pdata->num_chipselect;
-		master->mode_bits = pdata->mode_bits;
-		master->bits_per_word_mask = pdata->bits_per_word_mask;
+		host->num_chipselect = pdata->num_chipselect;
+		host->mode_bits = pdata->mode_bits;
+		host->bits_per_word_mask = pdata->bits_per_word_mask;
 	} else {
-		master->num_chipselect = 16;
-		master->mode_bits = SPI_CS_HIGH;
-		master->bits_per_word_mask = SPI_BPW_RANGE_MASK(1, 16);
+		host->num_chipselect = 16;
+		host->mode_bits = SPI_CS_HIGH;
+		host->bits_per_word_mask = SPI_BPW_RANGE_MASK(1, 16);
 	}
 
-	master->dev.of_node = pdev->dev.of_node;
-
-	hw = spi_master_get_devdata(master);
+	hw = spi_controller_get_devdata(host);
 	hw->dev = &pdev->dev;
 
 	if (platid)
@@ -83,7 +79,7 @@ static int altera_spi_probe(struct platform_device *pdev)
 		hw->regmap = dev_get_regmap(pdev->dev.parent, NULL);
 		if (!hw->regmap) {
 			dev_err(&pdev->dev, "get regmap failed\n");
-			goto exit;
+			return -ENODEV;
 		}
 
 		regoff = platform_get_resource(pdev, IORESOURCE_REG, 0);
@@ -93,38 +89,35 @@ static int altera_spi_probe(struct platform_device *pdev)
 		void __iomem *res;
 
 		res = devm_platform_ioremap_resource(pdev, 0);
-		if (IS_ERR(res)) {
-			err = PTR_ERR(res);
-			goto exit;
-		}
+		if (IS_ERR(res))
+			return PTR_ERR(res);
 
 		hw->regmap = devm_regmap_init_mmio(&pdev->dev, res,
 						   &spi_altera_config);
 		if (IS_ERR(hw->regmap)) {
 			dev_err(&pdev->dev, "regmap mmio init failed\n");
-			err = PTR_ERR(hw->regmap);
-			goto exit;
+			return PTR_ERR(hw->regmap);
 		}
 	}
 
-	altera_spi_init_master(master);
+	altera_spi_init_host(host);
 
 	/* irq is optional */
 	hw->irq = platform_get_irq(pdev, 0);
 	if (hw->irq >= 0) {
 		err = devm_request_irq(&pdev->dev, hw->irq, altera_spi_irq, 0,
-				       pdev->name, master);
+				       pdev->name, host);
 		if (err)
-			goto exit;
+			return err;
 	}
 
-	err = devm_spi_register_master(&pdev->dev, master);
+	err = devm_spi_register_controller(&pdev->dev, host);
 	if (err)
-		goto exit;
+		return err;
 
 	if (pdata) {
 		for (i = 0; i < pdata->num_devices; i++) {
-			if (!spi_new_device(master, pdata->devices + i))
+			if (!spi_new_device(host, pdata->devices + i))
 				dev_warn(&pdev->dev,
 					 "unable to create SPI device: %s\n",
 					 pdata->devices[i].modalias);
@@ -134,9 +127,6 @@ static int altera_spi_probe(struct platform_device *pdev)
 	dev_info(&pdev->dev, "regoff %u, irq %d\n", hw->regoff, hw->irq);
 
 	return 0;
-exit:
-	spi_master_put(master);
-	return err;
 }
 
 #ifdef CONFIG_OF
@@ -149,8 +139,8 @@ MODULE_DEVICE_TABLE(of, altera_spi_match);
 #endif /* CONFIG_OF */
 
 static const struct platform_device_id altera_spi_ids[] = {
-	{ DRV_NAME,		ALTERA_SPI_TYPE_UNKNOWN },
-	{ "subdev_spi_altera",	ALTERA_SPI_TYPE_SUBDEV },
+	{ .name = DRV_NAME,		.driver_data = ALTERA_SPI_TYPE_UNKNOWN },
+	{ .name = "subdev_spi_altera",	.driver_data = ALTERA_SPI_TYPE_SUBDEV },
 	{ }
 };
 MODULE_DEVICE_TABLE(platform, altera_spi_ids);
@@ -169,4 +159,3 @@ module_platform_driver(altera_spi_driver);
 MODULE_DESCRIPTION("Altera SPI driver");
 MODULE_AUTHOR("Thomas Chou <thomas@wytron.com.tw>");
 MODULE_LICENSE("GPL");
-MODULE_ALIAS("platform:" DRV_NAME);

@@ -10,16 +10,18 @@
  *  Derived from drivers/gpio/pca953x.c
  */
 
-#include <linux/module.h>
+#include <linux/cleanup.h>
+#include <linux/err.h>
+#include <linux/device.h>
+#include <linux/gpio/driver.h>
+#include <linux/i2c.h>
 #include <linux/init.h>
+#include <linux/interrupt.h>
+#include <linux/module.h>
+#include <linux/mutex.h>
+#include <linux/platform_data/max732x.h>
 #include <linux/slab.h>
 #include <linux/string.h>
-#include <linux/gpio/driver.h>
-#include <linux/interrupt.h>
-#include <linux/i2c.h>
-#include <linux/platform_data/max732x.h>
-#include <linux/of.h>
-
 
 /*
  * Each port of MAX732x (including MAX7319) falls into one of the
@@ -101,20 +103,19 @@ static uint64_t max732x_features[] = {
 };
 
 static const struct i2c_device_id max732x_id[] = {
-	{ "max7319", MAX7319 },
-	{ "max7320", MAX7320 },
-	{ "max7321", MAX7321 },
-	{ "max7322", MAX7322 },
-	{ "max7323", MAX7323 },
-	{ "max7324", MAX7324 },
-	{ "max7325", MAX7325 },
-	{ "max7326", MAX7326 },
-	{ "max7327", MAX7327 },
-	{ },
+	{ .name = "max7319", .driver_data = MAX7319 },
+	{ .name = "max7320", .driver_data = MAX7320 },
+	{ .name = "max7321", .driver_data = MAX7321 },
+	{ .name = "max7322", .driver_data = MAX7322 },
+	{ .name = "max7323", .driver_data = MAX7323 },
+	{ .name = "max7324", .driver_data = MAX7324 },
+	{ .name = "max7325", .driver_data = MAX7325 },
+	{ .name = "max7326", .driver_data = MAX7326 },
+	{ .name = "max7327", .driver_data = MAX7327 },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, max732x_id);
 
-#ifdef CONFIG_OF
 static const struct of_device_id max732x_of_table[] = {
 	{ .compatible = "maxim,max7319" },
 	{ .compatible = "maxim,max7320" },
@@ -128,7 +129,6 @@ static const struct of_device_id max732x_of_table[] = {
 	{ }
 };
 MODULE_DEVICE_TABLE(of, max732x_of_table);
-#endif
 
 struct max732x_chip {
 	struct gpio_chip gpio_chip;
@@ -211,34 +211,35 @@ static void max732x_gpio_set_mask(struct gpio_chip *gc, unsigned off, int mask,
 	uint8_t reg_out;
 	int ret;
 
-	mutex_lock(&chip->lock);
+	guard(mutex)(&chip->lock);
 
 	reg_out = (off > 7) ? chip->reg_out[1] : chip->reg_out[0];
 	reg_out = (reg_out & ~mask) | (val & mask);
 
 	ret = max732x_writeb(chip, is_group_a(chip, off), reg_out);
 	if (ret < 0)
-		goto out;
+		return;
 
 	/* update the shadow register then */
 	if (off > 7)
 		chip->reg_out[1] = reg_out;
 	else
 		chip->reg_out[0] = reg_out;
-out:
-	mutex_unlock(&chip->lock);
 }
 
-static void max732x_gpio_set_value(struct gpio_chip *gc, unsigned off, int val)
+static int max732x_gpio_set_value(struct gpio_chip *gc, unsigned int off,
+				  int val)
 {
 	unsigned base = off & ~0x7;
 	uint8_t mask = 1u << (off & 0x7);
 
 	max732x_gpio_set_mask(gc, base, mask, val << (off & 0x7));
+
+	return 0;
 }
 
-static void max732x_gpio_set_multiple(struct gpio_chip *gc,
-				      unsigned long *mask, unsigned long *bits)
+static int max732x_gpio_set_multiple(struct gpio_chip *gc,
+				     unsigned long *mask, unsigned long *bits)
 {
 	unsigned mask_lo = mask[0] & 0xff;
 	unsigned mask_hi = (mask[0] >> 8) & 0xff;
@@ -247,6 +248,8 @@ static void max732x_gpio_set_multiple(struct gpio_chip *gc,
 		max732x_gpio_set_mask(gc, 0, mask_lo, bits[0] & 0xff);
 	if (mask_hi)
 		max732x_gpio_set_mask(gc, 8, mask_hi, (bits[0] >> 8) & 0xff);
+
+	return 0;
 }
 
 static int max732x_gpio_direction_input(struct gpio_chip *gc, unsigned off)
@@ -328,7 +331,7 @@ static void max732x_irq_update_mask(struct max732x_chip *chip)
 	if (chip->irq_features == INT_NO_MASK)
 		return;
 
-	mutex_lock(&chip->lock);
+	guard(mutex)(&chip->lock);
 
 	switch (chip->irq_features) {
 	case INT_INDEP_MASK:
@@ -341,8 +344,6 @@ static void max732x_irq_update_mask(struct max732x_chip *chip)
 		max732x_writeb(chip, 1, (uint8_t)msg);
 		break;
 	}
-
-	mutex_unlock(&chip->lock);
 }
 
 static void max732x_irq_mask(struct irq_data *d)
@@ -351,6 +352,7 @@ static void max732x_irq_mask(struct irq_data *d)
 	struct max732x_chip *chip = gpiochip_get_data(gc);
 
 	chip->irq_mask_cur &= ~(1 << d->hwirq);
+	gpiochip_disable_irq(gc, irqd_to_hwirq(d));
 }
 
 static void max732x_irq_unmask(struct irq_data *d)
@@ -358,6 +360,7 @@ static void max732x_irq_unmask(struct irq_data *d)
 	struct gpio_chip *gc = irq_data_get_irq_chip_data(d);
 	struct max732x_chip *chip = gpiochip_get_data(gc);
 
+	gpiochip_enable_irq(gc, irqd_to_hwirq(d));
 	chip->irq_mask_cur |= 1 << d->hwirq;
 }
 
@@ -429,7 +432,7 @@ static int max732x_irq_set_wake(struct irq_data *data, unsigned int on)
 	return 0;
 }
 
-static struct irq_chip max732x_irq_chip = {
+static const struct irq_chip max732x_irq_chip = {
 	.name			= "max732x",
 	.irq_mask		= max732x_irq_mask,
 	.irq_unmask		= max732x_irq_unmask,
@@ -437,6 +440,8 @@ static struct irq_chip max732x_irq_chip = {
 	.irq_bus_sync_unlock	= max732x_irq_bus_sync_unlock,
 	.irq_set_type		= max732x_irq_set_type,
 	.irq_set_wake		= max732x_irq_set_wake,
+	.flags			= IRQCHIP_IMMUTABLE,
+	 GPIOCHIP_IRQ_RESOURCE_HELPERS,
 };
 
 static uint8_t max732x_irq_pending(struct max732x_chip *chip)
@@ -517,7 +522,7 @@ static int max732x_irq_setup(struct max732x_chip *chip,
 		}
 
 		girq = &chip->gpio_chip.irq;
-		girq->chip = &max732x_irq_chip;
+		gpio_irq_chip_set_chip(girq, &max732x_irq_chip);
 		/* This will let us handle the parent IRQ in the driver */
 		girq->parent_handler = NULL;
 		girq->num_parents = 0;
@@ -705,9 +710,9 @@ static int max732x_probe(struct i2c_client *client)
 static struct i2c_driver max732x_driver = {
 	.driver = {
 		.name		= "max732x",
-		.of_match_table	= of_match_ptr(max732x_of_table),
+		.of_match_table	= max732x_of_table,
 	},
-	.probe_new	= max732x_probe,
+	.probe		= max732x_probe,
 	.id_table	= max732x_id,
 };
 

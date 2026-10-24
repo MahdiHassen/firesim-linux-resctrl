@@ -33,8 +33,8 @@ struct iw_cm_event {
 };
 
 /**
- * iw_cm_handler - Function to be called by the IW CM when delivering events
- * to the client.
+ * typedef iw_cm_handler - Function to be called by the IW CM when delivering
+ * events to the client.
  *
  * @cm_id: The IW CM identifier associated with the event.
  * @event: Pointer to the event structure.
@@ -43,9 +43,9 @@ typedef int (*iw_cm_handler)(struct iw_cm_id *cm_id,
 			     struct iw_cm_event *event);
 
 /**
- * iw_event_handler - Function called by the provider when delivering provider
- * events to the IW CM.  Returns either 0 indicating the event was processed
- * or -errno if the event could not be processed.
+ * typedef iw_event_handler - Function called by the provider when delivering
+ * provider events to the IW CM.  Returns either 0 indicating the event was
+ * processed or -errno if the event could not be processed.
  *
  * @cm_id: The IW CM identifier associated with the event.
  * @event: Pointer to the event structure.
@@ -97,7 +97,7 @@ enum iw_flags {
  * iw_create_cm_id - Create an IW CM identifier.
  *
  * @device: The IB device on which to create the IW CM identier.
- * @event_handler: User callback invoked to report events associated with the
+ * @cm_handler: User callback invoked to report events associated with the
  *   returned IW CM identifier.
  * @context: User specified context associated with the id.
  */
@@ -113,27 +113,6 @@ struct iw_cm_id *iw_create_cm_id(struct ib_device *device,
  * this function returns.
  */
 void iw_destroy_cm_id(struct iw_cm_id *cm_id);
-
-/**
- * iw_cm_bind_qp - Unbind the specified IW CM identifier and QP
- *
- * @cm_id: The IW CM idenfier to unbind from the QP.
- * @qp: The QP
- *
- * This is called by the provider when destroying the QP to ensure
- * that any references held by the IWCM are released. It may also
- * be called by the IWCM when destroying a CM_ID to that any
- * references held by the provider are released.
- */
-void iw_cm_unbind_qp(struct iw_cm_id *cm_id, struct ib_qp *qp);
-
-/**
- * iw_cm_get_qp - Return the ib_qp associated with a QPN
- *
- * @ib_device: The IB device
- * @qpn: The queue pair number
- */
-struct ib_qp *iw_cm_get_qp(struct ib_device *device, int qpn);
 
 /**
  * iw_cm_listen - Listen for incoming connection requests on the
@@ -168,7 +147,7 @@ int iw_cm_accept(struct iw_cm_id *cm_id, struct iw_cm_conn_param *iw_param);
  * iw_cm_reject - Reject an incoming connection request.
  *
  * @cm_id: Connection identifier associated with the request.
- * @private_daa: Pointer to data to deliver to the remote peer as part of the
+ * @private_data: Pointer to data to deliver to the remote peer as part of the
  *   reject message.
  * @private_data_len: The number of bytes in the private_data parameter.
  *

@@ -1,3 +1,6 @@
+
+.. _drm-kms:
+
 =========================
 Kernel Mode Setting (KMS)
 =========================
@@ -14,6 +17,8 @@ be setup by initializing the following fields.
 
 -  struct drm_mode_config_funcs \*funcs;
    Mode setting functions.
+
+.. contents::
 
 Overview
 ========
@@ -66,11 +71,11 @@ Composition Properties`_ and related chapters.
 For the output routing the first step is encoders (represented by
 :c:type:`struct drm_encoder <drm_encoder>`, see `Encoder Abstraction`_). Those
 are really just internal artifacts of the helper libraries used to implement KMS
-drivers. Besides that they make it unecessarily more complicated for userspace
+drivers. Besides that they make it unnecessarily more complicated for userspace
 to figure out which connections between a CRTC and a connector are possible, and
 what kind of cloning is supported, they serve no purpose in the userspace API.
 Unfortunately encoders have been exposed to userspace, hence can't remove them
-at this point.  Futhermore the exposed restrictions are often wrongly set by
+at this point.  Furthermore the exposed restrictions are often wrongly set by
 drivers, and in many cases not powerful enough to express the real restrictions.
 A CRTC can be connected to multiple encoders, and for an active CRTC there must
 be at least one encoder.
@@ -206,11 +211,11 @@ Atomic Mode Setting
           style=dashed
           label="Free-standing state"
 
-          "drm_atomic_state" -> "duplicated drm_plane_state A"
-          "drm_atomic_state" -> "duplicated drm_plane_state B"
-          "drm_atomic_state" -> "duplicated drm_crtc_state"
-          "drm_atomic_state" -> "duplicated drm_connector_state"
-          "drm_atomic_state" -> "duplicated driver private state"
+          "drm_atomic_commit" -> "duplicated drm_plane_state A"
+          "drm_atomic_commit" -> "duplicated drm_plane_state B"
+          "drm_atomic_commit" -> "duplicated drm_crtc_state"
+          "drm_atomic_commit" -> "duplicated drm_connector_state"
+          "drm_atomic_commit" -> "duplicated driver private state"
       }
 
       subgraph cluster_current {
@@ -230,7 +235,7 @@ Atomic Mode Setting
           "driver private object" -> "driver private state"
       }
 
-      "drm_atomic_state" -> "drm_device" [label="atomic_commit"]
+      "drm_atomic_commit" -> "drm_device" [label="atomic_commit"]
       "duplicated drm_plane_state A" -> "drm_device"[style=invis]
    }
 
@@ -260,12 +265,12 @@ Taken all together there's two consequences for the atomic design:
   drm_crtc_state <drm_crtc_state>` for CRTCs and :c:type:`struct
   drm_connector_state <drm_connector_state>` for connectors. These are the only
   objects with userspace-visible and settable state. For internal state drivers
-  can subclass these structures through embeddeding, or add entirely new state
+  can subclass these structures through embedding, or add entirely new state
   structures for their globally shared hardware functions, see :c:type:`struct
   drm_private_state<drm_private_state>`.
 
 - An atomic update is assembled and validated as an entirely free-standing pile
-  of structures within the :c:type:`drm_atomic_state <drm_atomic_state>`
+  of structures within the :c:type:`drm_atomic_commit <drm_atomic_commit>`
   container. Driver private state structures are also tracked in the same
   structure; see the next chapter.  Only when a state is committed is it applied
   to the driver and modeset objects. This way rolling back an update boils down
@@ -360,6 +365,8 @@ Format Functions Reference
 .. kernel-doc:: drivers/gpu/drm/drm_fourcc.c
    :export:
 
+.. _kms_dumb_buffer_objects:
+
 Dumb Buffer Objects
 ===================
 
@@ -395,6 +402,36 @@ Plane Damage Tracking Functions Reference
 
 .. kernel-doc:: include/drm/drm_damage_helper.h
    :internal:
+
+Plane Panic Feature
+-------------------
+
+.. kernel-doc:: drivers/gpu/drm/drm_panic.c
+   :doc: overview
+
+Plane Panic Functions Reference
+-------------------------------
+
+.. kernel-doc:: include/drm/drm_panic.h
+   :internal:
+
+.. kernel-doc:: drivers/gpu/drm/drm_panic.c
+   :export:
+
+Colorop Abstraction
+===================
+
+.. kernel-doc:: drivers/gpu/drm/drm_colorop.c
+   :doc: overview
+
+Colorop Functions Reference
+---------------------------
+
+.. kernel-doc:: include/drm/drm_colorop.h
+   :internal:
+
+.. kernel-doc:: drivers/gpu/drm/drm_colorop.c
+   :export:
 
 Display Modes Function Reference
 ================================
@@ -494,6 +531,13 @@ addition to the one mentioned above:
 
 * An IGT test must be submitted where reasonable.
 
+For historical reasons, non-standard, driver-specific properties exist. If a KMS
+driver wants to add support for one of those properties, the requirements for
+new properties apply where possible. Additionally, the documented behavior must
+match the de facto semantics of the existing property to ensure compatibility.
+Developers of the driver that first added the property should help with those
+tasks and must ACK the documented behavior if possible.
+
 Property Types and Blob Property Support
 ----------------------------------------
 
@@ -520,6 +564,12 @@ HDMI Specific Connector Properties
 .. kernel-doc:: drivers/gpu/drm/drm_connector.c
    :doc: HDMI connector properties
 
+Analog TV Specific Connector Properties
+---------------------------------------
+
+.. kernel-doc:: drivers/gpu/drm/drm_connector.c
+   :doc: Analog TV Connector Properties
+
 Standard CRTC Properties
 ------------------------
 
@@ -539,6 +589,8 @@ Plane Composition Properties
 
 .. kernel-doc:: drivers/gpu/drm/drm_blend.c
    :doc: overview
+
+.. _damage_tracking_properties:
 
 Damage Tracking Properties
 --------------------------
@@ -570,6 +622,12 @@ Variable Refresh Properties
 
 .. kernel-doc:: drivers/gpu/drm/drm_connector.c
    :doc: Variable refresh properties
+
+Cursor Hotspot Properties
+---------------------------
+
+.. kernel-doc:: drivers/gpu/drm/drm_plane.c
+   :doc: hotspot properties
 
 Existing KMS Properties
 -----------------------

@@ -7,7 +7,6 @@
 #include <linux/err.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/property.h>
 #include <linux/slab.h>
@@ -28,22 +27,20 @@
 struct hx711_gain_to_scale {
 	int			gain;
 	int			gain_pulse;
-	int			scale;
 	int			channel;
 };
 
 /*
  * .scale depends on AVDD which in turn is known as soon as the regulator
- * is available
- * therefore we set .scale in hx711_probe()
+ * is available; it is stored per device in hx711_data.gain_scale[]
  *
  * channel A in documentation is channel 0 in source code
  * channel B in documentation is channel 1 in source code
  */
-static struct hx711_gain_to_scale hx711_gain_to_scale[HX711_GAIN_MAX] = {
-	{ 128, 1, 0, 0 },
-	{  32, 2, 0, 1 },
-	{  64, 3, 0, 0 }
+static const struct hx711_gain_to_scale hx711_gain_to_scale[HX711_GAIN_MAX] = {
+	{ 128, 1, 0 },
+	{  32, 2, 1 },
+	{  64, 3, 0 },
 };
 
 static int hx711_get_gain_to_pulse(int gain)
@@ -56,22 +53,22 @@ static int hx711_get_gain_to_pulse(int gain)
 	return 1;
 }
 
-static int hx711_get_gain_to_scale(int gain)
+static int hx711_get_gain_to_scale(const int *gain_scale, int gain)
 {
 	int i;
 
 	for (i = 0; i < HX711_GAIN_MAX; i++)
 		if (hx711_gain_to_scale[i].gain == gain)
-			return hx711_gain_to_scale[i].scale;
+			return gain_scale[i];
 	return 0;
 }
 
-static int hx711_get_scale_to_gain(int scale)
+static int hx711_get_scale_to_gain(const int *gain_scale, int scale)
 {
 	int i;
 
 	for (i = 0; i < HX711_GAIN_MAX; i++)
-		if (hx711_gain_to_scale[i].scale == scale)
+		if (gain_scale[i] == scale)
 			return hx711_gain_to_scale[i].gain;
 	return -EINVAL;
 }
@@ -80,15 +77,18 @@ struct hx711_data {
 	struct device		*dev;
 	struct gpio_desc	*gpiod_pd_sck;
 	struct gpio_desc	*gpiod_dout;
-	struct regulator	*reg_avdd;
 	int			gain_set;	/* gain set on device */
 	int			gain_chan_a;	/* gain for channel A */
+	int			gain_scale[HX711_GAIN_MAX];
 	struct mutex		lock;
 	/*
 	 * triggered buffer
 	 * 2x32-bit channel + 64-bit naturally aligned timestamp
 	 */
-	u32			buffer[4] __aligned(8);
+	struct {
+		u32 channel[2];
+		aligned_s64 timestamp;
+	} buffer;
 	/*
 	 * delay after a rising edge on SCK until the data is ready DOUT
 	 * this is dependent on the hx711 where the datasheet tells a
@@ -288,7 +288,8 @@ static int hx711_read_raw(struct iio_dev *indio_dev,
 		*val = 0;
 		mutex_lock(&hx711_data->lock);
 
-		*val2 = hx711_get_gain_to_scale(hx711_data->gain_set);
+		*val2 = hx711_get_gain_to_scale(hx711_data->gain_scale,
+						hx711_data->gain_set);
 
 		mutex_unlock(&hx711_data->lock);
 
@@ -319,7 +320,7 @@ static int hx711_write_raw(struct iio_dev *indio_dev,
 
 		mutex_lock(&hx711_data->lock);
 
-		gain = hx711_get_scale_to_gain(val2);
+		gain = hx711_get_scale_to_gain(hx711_data->gain_scale, val2);
 		if (gain < 0) {
 			mutex_unlock(&hx711_data->lock);
 			return gain;
@@ -362,18 +363,15 @@ static irqreturn_t hx711_trigger(int irq, void *p)
 
 	mutex_lock(&hx711_data->lock);
 
-	memset(hx711_data->buffer, 0, sizeof(hx711_data->buffer));
+	memset(&hx711_data->buffer, 0, sizeof(hx711_data->buffer));
 
-	for (i = 0; i < indio_dev->masklength; i++) {
-		if (!test_bit(i, indio_dev->active_scan_mask))
-			continue;
-
-		hx711_data->buffer[j] = hx711_reset_read(hx711_data,
+	iio_for_each_active_channel(indio_dev, i) {
+		hx711_data->buffer.channel[j] = hx711_reset_read(hx711_data,
 					indio_dev->channels[i].channel);
 		j++;
 	}
 
-	iio_push_to_buffers_with_timestamp(indio_dev, hx711_data->buffer,
+	iio_push_to_buffers_with_timestamp(indio_dev, &hx711_data->buffer,
 							pf->timestamp);
 
 	mutex_unlock(&hx711_data->lock);
@@ -387,6 +385,7 @@ static ssize_t hx711_scale_available_show(struct device *dev,
 				struct device_attribute *attr,
 				char *buf)
 {
+	struct hx711_data *hx711_data = iio_priv(dev_to_iio_dev(dev));
 	struct iio_dev_attr *iio_attr = to_iio_dev_attr(attr);
 	int channel = iio_attr->address;
 	int i, len = 0;
@@ -394,7 +393,7 @@ static ssize_t hx711_scale_available_show(struct device *dev,
 	for (i = 0; i < HX711_GAIN_MAX; i++)
 		if (hx711_gain_to_scale[i].channel == channel)
 			len += sprintf(buf + len, "0.%09d ",
-					hx711_gain_to_scale[i].scale);
+				       hx711_data->gain_scale[i]);
 
 	len += sprintf(buf + len, "\n");
 
@@ -459,17 +458,14 @@ static const struct iio_chan_spec hx711_chan_spec[] = {
 static int hx711_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
-	struct device_node *np = dev->of_node;
 	struct hx711_data *hx711_data;
 	struct iio_dev *indio_dev;
 	int ret;
 	int i;
 
 	indio_dev = devm_iio_device_alloc(dev, sizeof(struct hx711_data));
-	if (!indio_dev) {
-		dev_err(dev, "failed to allocate IIO device\n");
+	if (!indio_dev)
 		return -ENOMEM;
-	}
 
 	hx711_data = iio_priv(indio_dev);
 	hx711_data->dev = dev;
@@ -481,28 +477,20 @@ static int hx711_probe(struct platform_device *pdev)
 	 * in the driver it is an output
 	 */
 	hx711_data->gpiod_pd_sck = devm_gpiod_get(dev, "sck", GPIOD_OUT_LOW);
-	if (IS_ERR(hx711_data->gpiod_pd_sck)) {
-		dev_err(dev, "failed to get sck-gpiod: err=%ld\n",
-					PTR_ERR(hx711_data->gpiod_pd_sck));
-		return PTR_ERR(hx711_data->gpiod_pd_sck);
-	}
+	if (IS_ERR(hx711_data->gpiod_pd_sck))
+		return dev_err_probe(dev, PTR_ERR(hx711_data->gpiod_pd_sck),
+				     "failed to get sck-gpiod\n");
 
 	/*
 	 * DOUT stands for serial data output of HX711
 	 * for the driver it is an input
 	 */
 	hx711_data->gpiod_dout = devm_gpiod_get(dev, "dout", GPIOD_IN);
-	if (IS_ERR(hx711_data->gpiod_dout)) {
-		dev_err(dev, "failed to get dout-gpiod: err=%ld\n",
-					PTR_ERR(hx711_data->gpiod_dout));
-		return PTR_ERR(hx711_data->gpiod_dout);
-	}
+	if (IS_ERR(hx711_data->gpiod_dout))
+		return dev_err_probe(dev, PTR_ERR(hx711_data->gpiod_dout),
+				     "failed to get dout-gpiod\n");
 
-	hx711_data->reg_avdd = devm_regulator_get(dev, "avdd");
-	if (IS_ERR(hx711_data->reg_avdd))
-		return PTR_ERR(hx711_data->reg_avdd);
-
-	ret = regulator_enable(hx711_data->reg_avdd);
+	ret = devm_regulator_get_enable_read_voltage(dev, "avdd");
 	if (ret < 0)
 		return ret;
 
@@ -518,22 +506,19 @@ static int hx711_probe(struct platform_device *pdev)
 	 * approximately to fit into a 32 bit number:
 	 * 1 LSB = (AVDD * 100) / GAIN / 1678 [10^-9 mV]
 	 */
-	ret = regulator_get_voltage(hx711_data->reg_avdd);
-	if (ret < 0)
-		goto error_regulator;
 
 	/* we need 10^-9 mV */
 	ret *= 100;
 
 	for (i = 0; i < HX711_GAIN_MAX; i++)
-		hx711_gain_to_scale[i].scale =
+		hx711_data->gain_scale[i] =
 			ret / hx711_gain_to_scale[i].gain / 1678;
 
 	hx711_data->gain_set = 128;
 	hx711_data->gain_chan_a = 128;
 
 	hx711_data->clock_frequency = 400000;
-	ret = of_property_read_u32(np, "clock-frequency",
+	ret = device_property_read_u32(&pdev->dev, "clock-frequency",
 					&hx711_data->clock_frequency);
 
 	/*
@@ -548,65 +533,35 @@ static int hx711_probe(struct platform_device *pdev)
 	hx711_data->data_ready_delay_ns =
 				1000000000 / hx711_data->clock_frequency;
 
-	platform_set_drvdata(pdev, indio_dev);
-
 	indio_dev->name = "hx711";
 	indio_dev->info = &hx711_iio_info;
 	indio_dev->modes = INDIO_DIRECT_MODE;
 	indio_dev->channels = hx711_chan_spec;
 	indio_dev->num_channels = ARRAY_SIZE(hx711_chan_spec);
 
-	ret = iio_triggered_buffer_setup(indio_dev, iio_pollfunc_store_time,
-							hx711_trigger, NULL);
-	if (ret < 0) {
-		dev_err(dev, "setup of iio triggered buffer failed\n");
-		goto error_regulator;
-	}
+	ret = devm_iio_triggered_buffer_setup(dev, indio_dev,
+					      iio_pollfunc_store_time,
+					      hx711_trigger, NULL);
+	if (ret < 0)
+		return dev_err_probe(dev, ret,
+				     "setup of iio triggered buffer failed\n");
 
-	ret = iio_device_register(indio_dev);
-	if (ret < 0) {
-		dev_err(dev, "Couldn't register the device\n");
-		goto error_buffer;
-	}
-
-	return 0;
-
-error_buffer:
-	iio_triggered_buffer_cleanup(indio_dev);
-
-error_regulator:
-	regulator_disable(hx711_data->reg_avdd);
-
-	return ret;
-}
-
-static int hx711_remove(struct platform_device *pdev)
-{
-	struct hx711_data *hx711_data;
-	struct iio_dev *indio_dev;
-
-	indio_dev = platform_get_drvdata(pdev);
-	hx711_data = iio_priv(indio_dev);
-
-	iio_device_unregister(indio_dev);
-
-	iio_triggered_buffer_cleanup(indio_dev);
-
-	regulator_disable(hx711_data->reg_avdd);
+	ret = devm_iio_device_register(dev, indio_dev);
+	if (ret < 0)
+		return dev_err_probe(dev, ret, "Couldn't register the device\n");
 
 	return 0;
 }
 
 static const struct of_device_id of_hx711_match[] = {
 	{ .compatible = "avia,hx711", },
-	{},
+	{ }
 };
 
 MODULE_DEVICE_TABLE(of, of_hx711_match);
 
 static struct platform_driver hx711_driver = {
 	.probe		= hx711_probe,
-	.remove		= hx711_remove,
 	.driver		= {
 		.name		= "hx711-gpio",
 		.of_match_table	= of_hx711_match,

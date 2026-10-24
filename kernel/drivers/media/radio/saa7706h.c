@@ -344,7 +344,7 @@ static int saa7706h_probe(struct i2c_client *client)
 	v4l_info(client, "chip found @ 0x%02x (%s)\n",
 			client->addr << 1, client->adapter->name);
 
-	state = kzalloc(sizeof(struct saa7706h_state), GFP_KERNEL);
+	state = kzalloc_obj(struct saa7706h_state);
 	if (state == NULL)
 		return -ENOMEM;
 	sd = &state->sd;
@@ -395,8 +395,8 @@ static void saa7706h_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id saa7706h_id[] = {
-	{DRIVER_NAME, 0},
-	{},
+	{ .name = DRIVER_NAME },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(i2c, saa7706h_id);
@@ -405,7 +405,7 @@ static struct i2c_driver saa7706h_driver = {
 	.driver = {
 		.name	= DRIVER_NAME,
 	},
-	.probe_new	= saa7706h_probe,
+	.probe		= saa7706h_probe,
 	.remove		= saa7706h_remove,
 	.id_table	= saa7706h_id,
 };

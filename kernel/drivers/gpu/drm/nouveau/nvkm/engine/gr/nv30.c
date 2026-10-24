@@ -19,14 +19,14 @@ nv30_gr_chan = {
 };
 
 static int
-nv30_gr_chan_new(struct nvkm_gr *base, struct nvkm_fifo_chan *fifoch,
+nv30_gr_chan_new(struct nvkm_gr *base, struct nvkm_chan *fifoch,
 		 const struct nvkm_oclass *oclass, struct nvkm_object **pobject)
 {
 	struct nv20_gr *gr = nv20_gr(base);
 	struct nv20_gr_chan *chan;
 	int ret, i;
 
-	if (!(chan = kzalloc(sizeof(*chan), GFP_KERNEL)))
+	if (!(chan = kzalloc_obj(*chan)))
 		return -ENOMEM;
 	nvkm_object_ctor(&nv30_gr_chan, oclass, &chan->object);
 	chan->gr = gr;

@@ -15,8 +15,9 @@
 #ifndef _ASM_ARM64_FIXMAP_H
 #define _ASM_ARM64_FIXMAP_H
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 #include <linux/kernel.h>
+#include <linux/math.h>
 #include <linux/sizes.h>
 #include <asm/boot.h>
 #include <asm/page.h>
@@ -36,20 +37,22 @@ enum fixed_addresses {
 	FIX_HOLE,
 
 	/*
-	 * Reserve a virtual window for the FDT that is 2 MB larger than the
-	 * maximum supported size, and put it at the top of the fixmap region.
-	 * The additional space ensures that any FDT that does not exceed
-	 * MAX_FDT_SIZE can be mapped regardless of whether it crosses any
-	 * 2 MB alignment boundaries.
-	 *
-	 * Keep this at the top so it remains 2 MB aligned.
+	 * Reserve a virtual window for the FDT that is a page bigger than the
+	 * maximum supported size. The additional space ensures that any FDT
+	 * that does not exceed MAX_FDT_SIZE can be mapped regardless of
+	 * whether it crosses any page boundary.
 	 */
-#define FIX_FDT_SIZE		(MAX_FDT_SIZE + SZ_2M)
 	FIX_FDT_END,
-	FIX_FDT = FIX_FDT_END + FIX_FDT_SIZE / PAGE_SIZE - 1,
+	FIX_FDT = FIX_FDT_END + DIV_ROUND_UP(MAX_FDT_SIZE, PAGE_SIZE) + 1,
 
 	FIX_EARLYCON_MEM_BASE,
 	FIX_TEXT_POKE0,
+
+#ifdef CONFIG_KVM
+	/* One slot per CPU, mapping the guest's VNCR page at EL2. */
+	FIX_VNCR_END,
+	FIX_VNCR = FIX_VNCR_END + NR_CPUS,
+#endif
 
 #ifdef CONFIG_ACPI_APEI_GHES
 	/* Used for GHES mapping from assorted contexts */
@@ -75,8 +78,12 @@ enum fixed_addresses {
 	/*
 	 * Temporary boot-time mappings, used by early_ioremap(),
 	 * before ioremap() is functional.
+	 *
+	 * Reserve one extra page so a 256K mapping may start at any
+	 * offset within a page. early_ioremap() maps the page-aligned
+	 * physical range, so the initial offset can consume an extra page.
 	 */
-#define NR_FIX_BTMAPS		(SZ_256K / PAGE_SIZE)
+#define NR_FIX_BTMAPS		((SZ_256K / PAGE_SIZE) + 1)
 #define FIX_BTMAPS_SLOTS	7
 #define TOTAL_FIX_BTMAPS	(NR_FIX_BTMAPS * FIX_BTMAPS_SLOTS)
 
@@ -90,13 +97,16 @@ enum fixed_addresses {
 	FIX_PTE,
 	FIX_PMD,
 	FIX_PUD,
+	FIX_P4D,
 	FIX_PGD,
 
 	__end_of_fixed_addresses
 };
 
-#define FIXADDR_SIZE	(__end_of_permanent_fixed_addresses << PAGE_SHIFT)
-#define FIXADDR_START	(FIXADDR_TOP - FIXADDR_SIZE)
+#define FIXADDR_SIZE		(__end_of_permanent_fixed_addresses << PAGE_SHIFT)
+#define FIXADDR_START		(FIXADDR_TOP - FIXADDR_SIZE)
+#define FIXADDR_TOT_SIZE	(__end_of_fixed_addresses << PAGE_SHIFT)
+#define FIXADDR_TOT_START	(FIXADDR_TOP - FIXADDR_TOT_SIZE)
 
 #define FIXMAP_PAGE_IO     __pgprot(PROT_DEVICE_nGnRE)
 
@@ -111,5 +121,5 @@ extern void __set_fixmap(enum fixed_addresses idx, phys_addr_t phys, pgprot_t pr
 
 #include <asm-generic/fixmap.h>
 
-#endif /* !__ASSEMBLY__ */
+#endif /* !__ASSEMBLER__ */
 #endif /* _ASM_ARM64_FIXMAP_H */

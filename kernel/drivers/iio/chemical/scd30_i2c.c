@@ -10,17 +10,16 @@
 #include <linux/device.h>
 #include <linux/errno.h>
 #include <linux/i2c.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/types.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 #include "scd30.h"
 
 #define SCD30_I2C_MAX_BUF_SIZE 18
 #define SCD30_I2C_CRC8_POLYNOMIAL 0x31
 
-static u16 scd30_i2c_cmd_lookup_tbl[] = {
+static const u16 scd30_i2c_cmd_lookup_tbl[] = {
 	[CMD_START_MEAS] = 0x0010,
 	[CMD_STOP_MEAS] = 0x0104,
 	[CMD_MEAS_INTERVAL] = 0x4600,
@@ -70,6 +69,9 @@ static int scd30_i2c_command(struct scd30_state *state, enum scd30_cmd cmd, u16 
 	char *rsp = response;
 	int i, ret;
 	char crc;
+
+	if (!response && size != 0)
+		return -EINVAL;
 
 	put_unaligned_be16(scd30_i2c_cmd_lookup_tbl[cmd], buf);
 	i = 2;
@@ -130,11 +132,11 @@ static struct i2c_driver scd30_i2c_driver = {
 		.of_match_table = scd30_i2c_of_match,
 		.pm = pm_sleep_ptr(&scd30_pm_ops),
 	},
-	.probe_new = scd30_i2c_probe,
+	.probe = scd30_i2c_probe,
 };
 module_i2c_driver(scd30_i2c_driver);
 
 MODULE_AUTHOR("Tomasz Duszynski <tomasz.duszynski@octakon.com>");
 MODULE_DESCRIPTION("Sensirion SCD30 carbon dioxide sensor i2c driver");
 MODULE_LICENSE("GPL v2");
-MODULE_IMPORT_NS(IIO_SCD30);
+MODULE_IMPORT_NS("IIO_SCD30");

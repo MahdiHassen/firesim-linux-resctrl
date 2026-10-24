@@ -22,14 +22,15 @@
  *
  */
 
-#include <linux/prime_numbers.h>
 #include <linux/pm_qos.h>
+#include <linux/prime_numbers.h>
 #include <linux/sort.h>
+
+#include <drm/drm_print.h>
 
 #include "gem/i915_gem_internal.h"
 #include "gem/i915_gem_pm.h"
 #include "gem/selftests/mock_context.h"
-
 #include "gt/intel_engine_heartbeat.h"
 #include "gt/intel_engine_pm.h"
 #include "gt/intel_engine_user.h"
@@ -40,11 +41,11 @@
 
 #include "i915_random.h"
 #include "i915_selftest.h"
+#include "i915_wait_util.h"
 #include "igt_flush_test.h"
 #include "igt_live_test.h"
 #include "igt_spinner.h"
 #include "lib_sw_fence.h"
-
 #include "mock_drm.h"
 #include "mock_gem_device.h"
 
@@ -73,8 +74,8 @@ static int igt_add_request(void *arg)
 	/* Basic preliminary test to create a request and let it loose! */
 
 	request = mock_request(rcs0(i915)->kernel_context, HZ / 10);
-	if (!request)
-		return -ENOMEM;
+	if (IS_ERR(request))
+		return PTR_ERR(request);
 
 	i915_request_add(request);
 
@@ -91,8 +92,8 @@ static int igt_wait_request(void *arg)
 	/* Submit a request, then wait upon it */
 
 	request = mock_request(rcs0(i915)->kernel_context, T);
-	if (!request)
-		return -ENOMEM;
+	if (IS_ERR(request))
+		return PTR_ERR(request);
 
 	i915_request_get(request);
 
@@ -160,8 +161,8 @@ static int igt_fence_wait(void *arg)
 	/* Submit a request, treat it as a fence and wait upon it */
 
 	request = mock_request(rcs0(i915)->kernel_context, T);
-	if (!request)
-		return -ENOMEM;
+	if (IS_ERR(request))
+		return PTR_ERR(request);
 
 	if (dma_fence_wait_timeout(&request->fence, false, T) != -ETIME) {
 		pr_err("fence wait success before submit (expected timeout)!\n");
@@ -219,8 +220,8 @@ static int igt_request_rewind(void *arg)
 	GEM_BUG_ON(IS_ERR(ce));
 	request = mock_request(ce, 2 * HZ);
 	intel_context_put(ce);
-	if (!request) {
-		err = -ENOMEM;
+	if (IS_ERR(request)) {
+		err = PTR_ERR(request);
 		goto err_context_0;
 	}
 
@@ -237,8 +238,8 @@ static int igt_request_rewind(void *arg)
 	GEM_BUG_ON(IS_ERR(ce));
 	vip = mock_request(ce, 0);
 	intel_context_put(ce);
-	if (!vip) {
-		err = -ENOMEM;
+	if (IS_ERR(vip)) {
+		err = PTR_ERR(vip);
 		goto err_context_1;
 	}
 
@@ -328,7 +329,7 @@ static void __igt_breadcrumbs_smoketest(struct kthread_work *work)
 	 * that the fences were marked as signaled.
 	 */
 
-	requests = kcalloc(total, sizeof(*requests), GFP_KERNEL);
+	requests = kzalloc_objs(*requests, total);
 	if (!requests) {
 		thread->result = -ENOMEM;
 		return;
@@ -471,11 +472,11 @@ static int mock_breadcrumbs_smoketest(void *arg)
 	 * See __igt_breadcrumbs_smoketest();
 	 */
 
-	threads = kcalloc(ncpus, sizeof(*threads), GFP_KERNEL);
+	threads = kzalloc_objs(*threads, ncpus);
 	if (!threads)
 		return -ENOMEM;
 
-	t.contexts = kcalloc(t.ncontexts, sizeof(*t.contexts), GFP_KERNEL);
+	t.contexts = kzalloc_objs(*t.contexts, t.ncontexts);
 	if (!t.contexts) {
 		ret = -ENOMEM;
 		goto out_threads;
@@ -492,7 +493,7 @@ static int mock_breadcrumbs_smoketest(void *arg)
 	for (n = 0; n < ncpus; n++) {
 		struct kthread_worker *worker;
 
-		worker = kthread_create_worker(0, "igt/%d", n);
+		worker = kthread_run_worker(0, "igt/%d", n);
 		if (IS_ERR(worker)) {
 			ret = PTR_ERR(worker);
 			ncpus = n;
@@ -957,18 +958,18 @@ static int live_cancel_request(void *arg)
 	return 0;
 }
 
-static struct i915_vma *empty_batch(struct drm_i915_private *i915)
+static struct i915_vma *empty_batch(struct intel_gt *gt)
 {
 	struct drm_i915_gem_object *obj;
 	struct i915_vma *vma;
 	u32 *cmd;
 	int err;
 
-	obj = i915_gem_object_create_internal(i915, PAGE_SIZE);
+	obj = i915_gem_object_create_internal(gt->i915, PAGE_SIZE);
 	if (IS_ERR(obj))
 		return ERR_CAST(obj);
 
-	cmd = i915_gem_object_pin_map_unlocked(obj, I915_MAP_WB);
+	cmd = i915_gem_object_pin_map_unlocked(obj, I915_MAP_WC);
 	if (IS_ERR(cmd)) {
 		err = PTR_ERR(cmd);
 		goto err;
@@ -979,15 +980,15 @@ static struct i915_vma *empty_batch(struct drm_i915_private *i915)
 	__i915_gem_object_flush_map(obj, 0, 64);
 	i915_gem_object_unpin_map(obj);
 
-	intel_gt_chipset_flush(to_gt(i915));
+	intel_gt_chipset_flush(gt);
 
-	vma = i915_vma_instance(obj, &to_gt(i915)->ggtt->vm, NULL);
+	vma = i915_vma_instance(obj, gt->vm, NULL);
 	if (IS_ERR(vma)) {
 		err = PTR_ERR(vma);
 		goto err;
 	}
 
-	err = i915_vma_pin(vma, 0, 0, PIN_USER | PIN_GLOBAL);
+	err = i915_vma_pin(vma, 0, 0, PIN_USER);
 	if (err)
 		goto err;
 
@@ -1005,6 +1006,14 @@ err:
 	return ERR_PTR(err);
 }
 
+static int emit_bb_start(struct i915_request *rq, struct i915_vma *batch)
+{
+	return rq->engine->emit_bb_start(rq,
+					 i915_vma_offset(batch),
+					 i915_vma_size(batch),
+					 0);
+}
+
 static struct i915_request *
 empty_request(struct intel_engine_cs *engine,
 	      struct i915_vma *batch)
@@ -1016,10 +1025,7 @@ empty_request(struct intel_engine_cs *engine,
 	if (IS_ERR(request))
 		return request;
 
-	err = engine->emit_bb_start(request,
-				    batch->node.start,
-				    batch->node.size,
-				    I915_DISPATCH_SECURE);
+	err = emit_bb_start(request, batch);
 	if (err)
 		goto out_request;
 
@@ -1034,8 +1040,7 @@ static int live_empty_request(void *arg)
 	struct drm_i915_private *i915 = arg;
 	struct intel_engine_cs *engine;
 	struct igt_live_test t;
-	struct i915_vma *batch;
-	int err = 0;
+	int err;
 
 	/*
 	 * Submit various sized batches of empty requests, to each engine
@@ -1043,15 +1048,16 @@ static int live_empty_request(void *arg)
 	 * the overhead of submitting requests to the hardware.
 	 */
 
-	batch = empty_batch(i915);
-	if (IS_ERR(batch))
-		return PTR_ERR(batch);
-
 	for_each_uabi_engine(engine, i915) {
 		IGT_TIMEOUT(end_time);
 		struct i915_request *request;
+		struct i915_vma *batch;
 		unsigned long n, prime;
 		ktime_t times[2] = {};
+
+		batch = empty_batch(engine->gt);
+		if (IS_ERR(batch))
+			return PTR_ERR(batch);
 
 		err = igt_live_test_begin(&t, i915, __func__, engine->name);
 		if (err)
@@ -1100,27 +1106,29 @@ static int live_empty_request(void *arg)
 			engine->name,
 			ktime_to_ns(times[0]),
 			prime, div64_u64(ktime_to_ns(times[1]), prime));
+out_batch:
+		i915_vma_unpin(batch);
+		i915_vma_put(batch);
+		if (err)
+			break;
 	}
 
-out_batch:
-	i915_vma_unpin(batch);
-	i915_vma_put(batch);
 	return err;
 }
 
-static struct i915_vma *recursive_batch(struct drm_i915_private *i915)
+static struct i915_vma *recursive_batch(struct intel_gt *gt)
 {
 	struct drm_i915_gem_object *obj;
-	const int ver = GRAPHICS_VER(i915);
+	const int ver = GRAPHICS_VER(gt->i915);
 	struct i915_vma *vma;
 	u32 *cmd;
 	int err;
 
-	obj = i915_gem_object_create_internal(i915, PAGE_SIZE);
+	obj = i915_gem_object_create_internal(gt->i915, PAGE_SIZE);
 	if (IS_ERR(obj))
 		return ERR_CAST(obj);
 
-	vma = i915_vma_instance(obj, to_gt(i915)->vm, NULL);
+	vma = i915_vma_instance(obj, gt->vm, NULL);
 	if (IS_ERR(vma)) {
 		err = PTR_ERR(vma);
 		goto err;
@@ -1138,21 +1146,21 @@ static struct i915_vma *recursive_batch(struct drm_i915_private *i915)
 
 	if (ver >= 8) {
 		*cmd++ = MI_BATCH_BUFFER_START | 1 << 8 | 1;
-		*cmd++ = lower_32_bits(vma->node.start);
-		*cmd++ = upper_32_bits(vma->node.start);
+		*cmd++ = lower_32_bits(i915_vma_offset(vma));
+		*cmd++ = upper_32_bits(i915_vma_offset(vma));
 	} else if (ver >= 6) {
 		*cmd++ = MI_BATCH_BUFFER_START | 1 << 8;
-		*cmd++ = lower_32_bits(vma->node.start);
+		*cmd++ = lower_32_bits(i915_vma_offset(vma));
 	} else {
 		*cmd++ = MI_BATCH_BUFFER_START | MI_BATCH_GTT;
-		*cmd++ = lower_32_bits(vma->node.start);
+		*cmd++ = lower_32_bits(i915_vma_offset(vma));
 	}
 	*cmd++ = MI_BATCH_BUFFER_END; /* terminate early in case of error */
 
 	__i915_gem_object_flush_map(obj, 0, 64);
 	i915_gem_object_unpin_map(obj);
 
-	intel_gt_chipset_flush(to_gt(i915));
+	intel_gt_chipset_flush(gt);
 
 	return vma;
 
@@ -1186,7 +1194,6 @@ static int live_all_engines(void *arg)
 	struct intel_engine_cs *engine;
 	struct i915_request **request;
 	struct igt_live_test t;
-	struct i915_vma *batch;
 	unsigned int idx;
 	int err;
 
@@ -1196,7 +1203,7 @@ static int live_all_engines(void *arg)
 	 * block doing so, and that they don't complete too soon.
 	 */
 
-	request = kcalloc(nengines, sizeof(*request), GFP_KERNEL);
+	request = kzalloc_objs(*request, nengines);
 	if (!request)
 		return -ENOMEM;
 
@@ -1204,41 +1211,43 @@ static int live_all_engines(void *arg)
 	if (err)
 		goto out_free;
 
-	batch = recursive_batch(i915);
-	if (IS_ERR(batch)) {
-		err = PTR_ERR(batch);
-		pr_err("%s: Unable to create batch, err=%d\n", __func__, err);
-		goto out_free;
-	}
-
-	i915_vma_lock(batch);
-
 	idx = 0;
 	for_each_uabi_engine(engine, i915) {
+		struct i915_vma *batch;
+
+		batch = recursive_batch(engine->gt);
+		if (IS_ERR(batch)) {
+			err = PTR_ERR(batch);
+			pr_err("%s: Unable to create batch, err=%d\n",
+			       __func__, err);
+			goto out_free;
+		}
+
+		i915_vma_lock(batch);
 		request[idx] = intel_engine_create_kernel_request(engine);
 		if (IS_ERR(request[idx])) {
 			err = PTR_ERR(request[idx]);
 			pr_err("%s: Request allocation failed with err=%d\n",
 			       __func__, err);
-			goto out_request;
+			goto out_unlock;
 		}
+		GEM_BUG_ON(request[idx]->context->vm != batch->vm);
 
 		err = i915_vma_move_to_active(batch, request[idx], 0);
 		GEM_BUG_ON(err);
 
-		err = engine->emit_bb_start(request[idx],
-					    batch->node.start,
-					    batch->node.size,
-					    0);
+		err = emit_bb_start(request[idx], batch);
 		GEM_BUG_ON(err);
 		request[idx]->batch = batch;
 
 		i915_request_get(request[idx]);
 		i915_request_add(request[idx]);
 		idx++;
+out_unlock:
+		i915_vma_unlock(batch);
+		if (err)
+			goto out_request;
 	}
-
-	i915_vma_unlock(batch);
 
 	idx = 0;
 	for_each_uabi_engine(engine, i915) {
@@ -1251,17 +1260,23 @@ static int live_all_engines(void *arg)
 		idx++;
 	}
 
-	err = recursive_batch_resolve(batch);
-	if (err) {
-		pr_err("%s: failed to resolve batch, err=%d\n", __func__, err);
-		goto out_request;
+	idx = 0;
+	for_each_uabi_engine(engine, i915) {
+		err = recursive_batch_resolve(request[idx]->batch);
+		if (err) {
+			pr_err("%s: failed to resolve batch, err=%d\n",
+			       __func__, err);
+			goto out_request;
+		}
+		idx++;
 	}
 
 	idx = 0;
 	for_each_uabi_engine(engine, i915) {
+		struct i915_request *rq = request[idx];
 		long timeout;
 
-		timeout = i915_request_wait(request[idx], 0,
+		timeout = i915_request_wait(rq, 0,
 					    MAX_SCHEDULE_TIMEOUT);
 		if (timeout < 0) {
 			err = timeout;
@@ -1270,8 +1285,10 @@ static int live_all_engines(void *arg)
 			goto out_request;
 		}
 
-		GEM_BUG_ON(!i915_request_completed(request[idx]));
-		i915_request_put(request[idx]);
+		GEM_BUG_ON(!i915_request_completed(rq));
+		i915_vma_unpin(rq->batch);
+		i915_vma_put(rq->batch);
+		i915_request_put(rq);
 		request[idx] = NULL;
 		idx++;
 	}
@@ -1281,12 +1298,18 @@ static int live_all_engines(void *arg)
 out_request:
 	idx = 0;
 	for_each_uabi_engine(engine, i915) {
-		if (request[idx])
-			i915_request_put(request[idx]);
+		struct i915_request *rq = request[idx];
+
+		if (!rq)
+			continue;
+
+		if (rq->batch) {
+			i915_vma_unpin(rq->batch);
+			i915_vma_put(rq->batch);
+		}
+		i915_request_put(rq);
 		idx++;
 	}
-	i915_vma_unpin(batch);
-	i915_vma_put(batch);
 out_free:
 	kfree(request);
 	return err;
@@ -1310,7 +1333,7 @@ static int live_sequential_engines(void *arg)
 	 * they are running on independent engines.
 	 */
 
-	request = kcalloc(nengines, sizeof(*request), GFP_KERNEL);
+	request = kzalloc_objs(*request, nengines);
 	if (!request)
 		return -ENOMEM;
 
@@ -1322,7 +1345,7 @@ static int live_sequential_engines(void *arg)
 	for_each_uabi_engine(engine, i915) {
 		struct i915_vma *batch;
 
-		batch = recursive_batch(i915);
+		batch = recursive_batch(engine->gt);
 		if (IS_ERR(batch)) {
 			err = PTR_ERR(batch);
 			pr_err("%s: Unable to create batch for %s, err=%d\n",
@@ -1338,6 +1361,7 @@ static int live_sequential_engines(void *arg)
 			       __func__, engine->name, err);
 			goto out_unlock;
 		}
+		GEM_BUG_ON(request[idx]->context->vm != batch->vm);
 
 		if (prev) {
 			err = i915_request_await_dma_fence(request[idx],
@@ -1353,10 +1377,7 @@ static int live_sequential_engines(void *arg)
 		err = i915_vma_move_to_active(batch, request[idx], 0);
 		GEM_BUG_ON(err);
 
-		err = engine->emit_bb_start(request[idx],
-					    batch->node.start,
-					    batch->node.size,
-					    0);
+		err = emit_bb_start(request[idx], batch);
 		GEM_BUG_ON(err);
 		request[idx]->batch = batch;
 
@@ -1605,7 +1626,7 @@ static int live_parallel_engines(void *arg)
 	 * tests that we load up the system maximally.
 	 */
 
-	threads = kcalloc(nengines, sizeof(*threads), GFP_KERNEL);
+	threads = kzalloc_objs(*threads, nengines);
 	if (!threads)
 		return -ENOMEM;
 
@@ -1625,7 +1646,7 @@ static int live_parallel_engines(void *arg)
 		for_each_uabi_engine(engine, i915) {
 			struct kthread_worker *worker;
 
-			worker = kthread_create_worker(0, "igt/parallel:%s",
+			worker = kthread_run_worker(0, "igt/parallel:%s",
 						       engine->name);
 			if (IS_ERR(worker)) {
 				err = PTR_ERR(worker);
@@ -1733,13 +1754,13 @@ static int live_breadcrumbs_smoketest(void *arg)
 		goto out_rpm;
 	}
 
-	smoke = kcalloc(nengines, sizeof(*smoke), GFP_KERNEL);
+	smoke = kzalloc_objs(*smoke, nengines);
 	if (!smoke) {
 		ret = -ENOMEM;
 		goto out_file;
 	}
 
-	threads = kcalloc(ncpus * nengines, sizeof(*threads), GFP_KERNEL);
+	threads = kzalloc_objs(*threads, ncpus * nengines);
 	if (!threads) {
 		ret = -ENOMEM;
 		goto out_smoke;
@@ -1747,9 +1768,7 @@ static int live_breadcrumbs_smoketest(void *arg)
 
 	smoke[0].request_alloc = __live_request_alloc;
 	smoke[0].ncontexts = 64;
-	smoke[0].contexts = kcalloc(smoke[0].ncontexts,
-				    sizeof(*smoke[0].contexts),
-				    GFP_KERNEL);
+	smoke[0].contexts = kzalloc_objs(*smoke[0].contexts, smoke[0].ncontexts);
 	if (!smoke[0].contexts) {
 		ret = -ENOMEM;
 		goto out_threads;
@@ -1786,7 +1805,7 @@ static int live_breadcrumbs_smoketest(void *arg)
 			unsigned int i = idx * ncpus + n;
 			struct kthread_worker *worker;
 
-			worker = kthread_create_worker(0, "igt/%d.%d", idx, n);
+			worker = kthread_run_worker(0, "igt/%d.%d", idx, n);
 			if (IS_ERR(worker)) {
 				ret = PTR_ERR(worker);
 				goto out_flush;
@@ -1904,7 +1923,7 @@ struct perf_stats {
 struct perf_series {
 	struct drm_i915_private *i915;
 	unsigned int nengines;
-	struct intel_context *ce[];
+	struct intel_context *ce[] __counted_by(nengines);
 };
 
 static int cmp_u32(const void *A, const void *B)
@@ -2817,11 +2836,11 @@ static int perf_series_engines(void *arg)
 	unsigned int idx;
 	int err = 0;
 
-	stats = kcalloc(nengines, sizeof(*stats), GFP_KERNEL);
+	stats = kzalloc_objs(*stats, nengines);
 	if (!stats)
 		return -ENOMEM;
 
-	ps = kzalloc(struct_size(ps, ce, nengines), GFP_KERNEL);
+	ps = kzalloc_flex(*ps, ce, nengines);
 	if (!ps) {
 		kfree(stats);
 		return -ENOMEM;
@@ -3173,7 +3192,7 @@ static int perf_parallel_engines(void *arg)
 	struct p_thread *engines;
 	int err = 0;
 
-	engines = kcalloc(nengines, sizeof(*engines), GFP_KERNEL);
+	engines = kzalloc_objs(*engines, nengines);
 	if (!engines)
 		return -ENOMEM;
 
@@ -3199,7 +3218,7 @@ static int perf_parallel_engines(void *arg)
 
 			memset(&engines[idx].p, 0, sizeof(engines[idx].p));
 
-			worker = kthread_create_worker(0, "igt:%s",
+			worker = kthread_run_worker(0, "igt:%s",
 						       engine->name);
 			if (IS_ERR(worker)) {
 				err = PTR_ERR(worker);

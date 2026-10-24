@@ -11,7 +11,6 @@
 #include <linux/mfd/atmel-hlcdc.h>
 #include <linux/mfd/core.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
 
@@ -83,7 +82,6 @@ static int atmel_hlcdc_probe(struct platform_device *pdev)
 	struct atmel_hlcdc_regmap *hregmap;
 	struct device *dev = &pdev->dev;
 	struct atmel_hlcdc *hlcdc;
-	struct resource *res;
 
 	hregmap = devm_kzalloc(dev, sizeof(*hregmap), GFP_KERNEL);
 	if (!hregmap)
@@ -93,8 +91,7 @@ static int atmel_hlcdc_probe(struct platform_device *pdev)
 	if (!hlcdc)
 		return -ENOMEM;
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	hregmap->regs = devm_ioremap_resource(dev, res);
+	hregmap->regs = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(hregmap->regs))
 		return PTR_ERR(hregmap->regs);
 
@@ -110,10 +107,19 @@ static int atmel_hlcdc_probe(struct platform_device *pdev)
 		return PTR_ERR(hlcdc->periph_clk);
 	}
 
+	/*
+	 * Retrieve one of the primary clocks required for LCD operation:
+	 * prefer sys_clk (for RGB/MIPI), and fall back to lvds_pll_clk
+	 * (for LVDS) if needed.
+	 */
 	hlcdc->sys_clk = devm_clk_get(dev, "sys_clk");
 	if (IS_ERR(hlcdc->sys_clk)) {
-		dev_err(dev, "failed to get system clock\n");
-		return PTR_ERR(hlcdc->sys_clk);
+		hlcdc->sys_clk = NULL;
+		hlcdc->lvds_pll_clk = devm_clk_get(dev, "lvds_pll_clk");
+		if (IS_ERR(hlcdc->lvds_pll_clk)) {
+			dev_err(dev, "Failed to obtain both the LCDC (generic) and LVDS PLL clocks\n");
+			return PTR_ERR(hlcdc->lvds_pll_clk);
+		}
 	}
 
 	hlcdc->slow_clk = devm_clk_get(dev, "slow_clk");
@@ -141,6 +147,8 @@ static const struct of_device_id atmel_hlcdc_match[] = {
 	{ .compatible = "atmel,sama5d3-hlcdc" },
 	{ .compatible = "atmel,sama5d4-hlcdc" },
 	{ .compatible = "microchip,sam9x60-hlcdc" },
+	{ .compatible = "microchip,sam9x75-xlcdc" },
+	{ .compatible = "microchip,sama7d65-xlcdc" },
 	{ /* sentinel */ },
 };
 MODULE_DEVICE_TABLE(of, atmel_hlcdc_match);

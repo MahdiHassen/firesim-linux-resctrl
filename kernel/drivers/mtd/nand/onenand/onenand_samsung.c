@@ -554,6 +554,9 @@ static int s5pc110_dma_poll(dma_addr_t dst, dma_addr_t src, size_t count, int di
 	} while (!(status & S5PC110_DMA_TRANS_STATUS_TD) &&
 		time_before(jiffies, timeout));
 
+	if (!(status & S5PC110_DMA_TRANS_STATUS_TD))
+		return -ETIMEDOUT;
+
 	writel(S5PC110_DMA_TRANS_CMD_TDC, base + S5PC110_DMA_TRANS_CMD);
 
 	return 0;
@@ -608,7 +611,9 @@ static int s5pc110_dma_irq(dma_addr_t dst, dma_addr_t src, size_t count, int dir
 
 	writel(S5PC110_DMA_TRANS_CMD_TR, base + S5PC110_DMA_TRANS_CMD);
 
-	wait_for_completion_timeout(&onenand->complete, msecs_to_jiffies(20));
+	if (!wait_for_completion_timeout(&onenand->complete,
+					 msecs_to_jiffies(20)))
+		return -ETIMEDOUT;
 
 	return 0;
 }
@@ -860,8 +865,7 @@ static int s3c_onenand_probe(struct platform_device *pdev)
 
 	s3c_onenand_setup(mtd);
 
-	r = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	onenand->base = devm_ioremap_resource(&pdev->dev, r);
+	onenand->base = devm_platform_get_and_ioremap_resource(pdev, 0, &r);
 	if (IS_ERR(onenand->base))
 		return PTR_ERR(onenand->base);
 
@@ -874,8 +878,7 @@ static int s3c_onenand_probe(struct platform_device *pdev)
 	this->options |= ONENAND_SKIP_UNLOCK_CHECK;
 
 	if (onenand->type != TYPE_S5PC110) {
-		r = platform_get_resource(pdev, IORESOURCE_MEM, 1);
-		onenand->ahb_addr = devm_ioremap_resource(&pdev->dev, r);
+		onenand->ahb_addr = devm_platform_ioremap_resource(pdev, 1);
 		if (IS_ERR(onenand->ahb_addr))
 			return PTR_ERR(onenand->ahb_addr);
 
@@ -895,8 +898,7 @@ static int s3c_onenand_probe(struct platform_device *pdev)
 		this->subpagesize = mtd->writesize;
 
 	} else { /* S5PC110 */
-		r = platform_get_resource(pdev, IORESOURCE_MEM, 1);
-		onenand->dma_addr = devm_ioremap_resource(&pdev->dev, r);
+		onenand->dma_addr = devm_platform_ioremap_resource(pdev, 1);
 		if (IS_ERR(onenand->dma_addr))
 			return PTR_ERR(onenand->dma_addr);
 
@@ -909,7 +911,7 @@ static int s3c_onenand_probe(struct platform_device *pdev)
 			err = devm_request_irq(&pdev->dev, r->start,
 					       s5pc110_onenand_irq,
 					       IRQF_SHARED, "onenand",
-					       &onenand);
+					       onenand);
 			if (err) {
 				dev_err(&pdev->dev, "failed to get irq\n");
 				return err;
@@ -943,13 +945,11 @@ static int s3c_onenand_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int s3c_onenand_remove(struct platform_device *pdev)
+static void s3c_onenand_remove(struct platform_device *pdev)
 {
 	struct mtd_info *mtd = platform_get_drvdata(pdev);
 
 	onenand_release(mtd);
-
-	return 0;
 }
 
 static int s3c_pm_ops_suspend(struct device *dev)

@@ -518,7 +518,7 @@ static int fc2580_probe(struct i2c_client *client)
 		.val_bits = 8,
 	};
 
-	dev = kzalloc(sizeof(*dev), GFP_KERNEL);
+	dev = kzalloc_obj(*dev);
 	if (!dev) {
 		ret = -ENOMEM;
 		goto err;
@@ -600,8 +600,8 @@ static void fc2580_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id fc2580_id_table[] = {
-	{"fc2580", 0},
-	{}
+	{ .name = "fc2580" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, fc2580_id_table);
 
@@ -610,7 +610,7 @@ static struct i2c_driver fc2580_driver = {
 		.name	= "fc2580",
 		.suppress_bind_attrs = true,
 	},
-	.probe_new	= fc2580_probe,
+	.probe		= fc2580_probe,
 	.remove		= fc2580_remove,
 	.id_table	= fc2580_id_table,
 };

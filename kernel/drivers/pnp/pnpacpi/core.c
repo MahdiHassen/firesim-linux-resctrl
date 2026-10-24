@@ -10,7 +10,6 @@
 #include <linux/acpi.h>
 #include <linux/pnp.h>
 #include <linux/slab.h>
-#include <linux/mod_devicetable.h>
 
 #include "../base.h"
 #include "pnpacpi.h"
@@ -250,9 +249,9 @@ static int __init pnpacpi_add_device(struct acpi_device *device)
 		dev->capabilities |= PNP_DISABLE;
 
 	if (strlen(acpi_device_name(device)))
-		strncpy(dev->name, acpi_device_name(device), sizeof(dev->name));
+		strscpy(dev->name, acpi_device_name(device), sizeof(dev->name));
 	else
-		strncpy(dev->name, acpi_device_bid(device), sizeof(dev->name));
+		strscpy(dev->name, acpi_device_bid(device), sizeof(dev->name));
 
 	if (dev->active)
 		pnpacpi_parse_allocated_resource(dev);

@@ -18,9 +18,7 @@
 #include <linux/module.h>
 #include <linux/device.h>
 #include <linux/dmaengine.h>
-#include <linux/of_address.h>
-#include <linux/of_irq.h>
-#include <linux/of_platform.h>
+#include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/phy/phy.h>
 #include <linux/libata.h>
@@ -227,7 +225,6 @@ static int sata_dwc_dma_init_old(struct platform_device *pdev,
 				 struct sata_dwc_device *hsdev)
 {
 	struct device *dev = &pdev->dev;
-	struct device_node *np = dev->of_node;
 
 	hsdev->dma = devm_kzalloc(dev, sizeof(*hsdev->dma), GFP_KERNEL);
 	if (!hsdev->dma)
@@ -237,11 +234,9 @@ static int sata_dwc_dma_init_old(struct platform_device *pdev,
 	hsdev->dma->id = pdev->id;
 
 	/* Get SATA DMA interrupt number */
-	hsdev->dma->irq = irq_of_parse_and_map(np, 1);
-	if (!hsdev->dma->irq) {
-		dev_err(dev, "no SATA DMA irq\n");
-		return -ENODEV;
-	}
+	hsdev->dma->irq = platform_get_irq(pdev, 1);
+	if (hsdev->dma->irq < 0)
+		return hsdev->dma->irq;
 
 	/* Get physical SATA DMA register base address */
 	hsdev->dma->regs = devm_platform_ioremap_resource(pdev, 1);
@@ -399,8 +394,7 @@ static void clear_serror(struct ata_port *ap)
 
 static void clear_interrupt_bit(struct sata_dwc_device *hsdev, u32 bit)
 {
-	sata_dwc_writel(&hsdev->sata_dwc_regs->intpr,
-			sata_dwc_readl(&hsdev->sata_dwc_regs->intpr));
+	sata_dwc_writel(&hsdev->sata_dwc_regs->intpr, bit);
 }
 
 static u32 qcmd_tag_to_mask(u8 tag)
@@ -613,14 +607,9 @@ DRVSTILLBUSY:
 	status = ap->ops->sff_check_status(ap);
 	dev_dbg(ap->dev, "%s ATA status register=0x%x\n", __func__, status);
 
-	tag = 0;
 	while (tag_mask) {
-		while (!(tag_mask & 0x00000001)) {
-			tag++;
-			tag_mask <<= 1;
-		}
-
-		tag_mask &= (~0x00000001);
+		tag = __ffs(tag_mask);
+		tag_mask &= ~(1U << tag);
 		qc = ata_qc_from_tag(ap, tag);
 		if (unlikely(!qc)) {
 			dev_err(ap->dev, "failed to get qc");
@@ -810,7 +799,7 @@ static int sata_dwc_dma_get_channel(struct sata_dwc_device_port *hsdevp)
 	struct device *dev = hsdev->dev;
 
 #ifdef CONFIG_SATA_DWC_OLD_DMA
-	if (!of_find_property(dev->of_node, "dmas", NULL))
+	if (!of_property_present(dev->of_node, "dmas"))
 		return sata_dwc_dma_get_channel_old(hsdevp);
 #endif
 
@@ -851,7 +840,7 @@ static int sata_dwc_port_start(struct ata_port *ap)
 	}
 
 	/* Allocate Port Struct */
-	hsdevp = kzalloc(sizeof(*hsdevp), GFP_KERNEL);
+	hsdevp = kzalloc_obj(*hsdevp);
 	if (!hsdevp) {
 		err = -ENOMEM;
 		goto CLEANUP;
@@ -1042,6 +1031,7 @@ static unsigned int sata_dwc_qc_issue(struct ata_queued_cmd *qc)
 }
 
 static void sata_dwc_error_handler(struct ata_port *ap)
+	__must_hold(&ap->host->eh_mutex)
 {
 	ata_sff_error_handler(ap);
 }
@@ -1076,7 +1066,7 @@ static void sata_dwc_dev_select(struct ata_port *ap, unsigned int device)
 /*
  * scsi mid-layer and libata interface structures
  */
-static struct scsi_host_template sata_dwc_sht = {
+static const struct scsi_host_template sata_dwc_sht = {
 	ATA_NCQ_SHT(DRV_NAME),
 	/*
 	 * test-only: Currently this driver doesn't handle NCQ
@@ -1098,7 +1088,7 @@ static struct ata_port_operations sata_dwc_ops = {
 	.inherits		= &ata_sff_port_ops,
 
 	.error_handler		= sata_dwc_error_handler,
-	.hardreset		= sata_dwc_hardreset,
+	.reset.hardreset	= sata_dwc_hardreset,
 
 	.qc_issue		= sata_dwc_qc_issue,
 
@@ -1126,7 +1116,6 @@ static const struct ata_port_info sata_dwc_port_info[] = {
 static int sata_dwc_probe(struct platform_device *ofdev)
 {
 	struct device *dev = &ofdev->dev;
-	struct device_node *np = dev->of_node;
 	struct sata_dwc_device *hsdev;
 	u32 idr, versionr;
 	char *ver = (char *)&versionr;
@@ -1169,18 +1158,13 @@ static int sata_dwc_probe(struct platform_device *ofdev)
 	/* Save dev for later use in dev_xxx() routines */
 	hsdev->dev = dev;
 
-	/* Enable SATA Interrupts */
-	sata_dwc_enable_interrupts(hsdev);
-
 	/* Get SATA interrupt number */
-	irq = irq_of_parse_and_map(np, 0);
-	if (!irq) {
-		dev_err(dev, "no SATA DMA irq\n");
-		return -ENODEV;
-	}
+	irq = platform_get_irq(ofdev, 0);
+	if (irq < 0)
+		return irq;
 
 #ifdef CONFIG_SATA_DWC_OLD_DMA
-	if (!of_find_property(np, "dmas", NULL)) {
+	if (!of_property_present(dev->of_node, "dmas")) {
 		err = sata_dwc_dma_init_old(ofdev, hsdev);
 		if (err)
 			return err;
@@ -1204,6 +1188,8 @@ static int sata_dwc_probe(struct platform_device *ofdev)
 	if (err)
 		dev_err(dev, "failed to activate host");
 
+	/* Enable SATA Interrupts */
+	sata_dwc_enable_interrupts(hsdev);
 	return 0;
 
 error_out:
@@ -1211,7 +1197,7 @@ error_out:
 	return err;
 }
 
-static int sata_dwc_remove(struct platform_device *ofdev)
+static void sata_dwc_remove(struct platform_device *ofdev)
 {
 	struct device *dev = &ofdev->dev;
 	struct ata_host *host = dev_get_drvdata(dev);
@@ -1227,7 +1213,6 @@ static int sata_dwc_remove(struct platform_device *ofdev)
 #endif
 
 	dev_dbg(dev, "done\n");
-	return 0;
 }
 
 static const struct of_device_id sata_dwc_match[] = {

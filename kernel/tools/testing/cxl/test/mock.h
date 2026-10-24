@@ -2,6 +2,7 @@
 
 #include <linux/list.h>
 #include <linux/acpi.h>
+#include <linux/dax.h>
 #include <cxl.h>
 
 struct cxl_mock_ops {
@@ -15,19 +16,27 @@ struct cxl_mock_ops {
 					     acpi_string pathname,
 					     struct acpi_object_list *arguments,
 					     unsigned long long *data);
-	resource_size_t (*cxl_rcrb_to_component)(struct device *dev,
-						 resource_size_t rcrb,
-						 enum cxl_rcrb which);
 	struct acpi_pci_root *(*acpi_pci_find_root)(acpi_handle handle);
 	bool (*is_mock_bus)(struct pci_bus *bus);
 	bool (*is_mock_port)(struct device *dev);
 	bool (*is_mock_dev)(struct device *dev);
-	int (*devm_cxl_port_enumerate_dports)(struct cxl_port *port);
-	struct cxl_hdm *(*devm_cxl_setup_hdm)(struct cxl_port *port);
-	int (*devm_cxl_add_passthrough_decoder)(struct cxl_port *port);
-	int (*devm_cxl_enumerate_decoders)(struct cxl_hdm *hdm);
+	int (*devm_cxl_switch_port_decoders_setup)(struct cxl_port *port);
+	int (*devm_cxl_endpoint_decoders_setup)(struct cxl_port *port);
+	void (*cxl_endpoint_parse_cdat)(struct cxl_port *port);
+	struct cxl_dport *(*devm_cxl_add_dport_by_dev)(struct cxl_port *port,
+						       struct device *dport_dev);
+	int (*hmat_get_extended_linear_cache_size)(struct resource *backing_res,
+						   int nid,
+						   resource_size_t *cache_size);
+	int (*walk_hmem_resources)(struct device *host, walk_hmem_fn fn);
+	int (*region_intersects)(resource_size_t start, size_t size,
+				 unsigned long flags, unsigned long desc);
+	int (*region_intersects_soft_reserve)(resource_size_t start,
+					      size_t size);
 };
 
+int hmem_test_init(void);
+void hmem_test_exit(void);
 void register_cxl_mock_ops(struct cxl_mock_ops *ops);
 void unregister_cxl_mock_ops(struct cxl_mock_ops *ops);
 struct cxl_mock_ops *get_cxl_mock_ops(int *index);

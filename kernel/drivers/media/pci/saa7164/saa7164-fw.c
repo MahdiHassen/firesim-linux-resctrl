@@ -10,8 +10,8 @@
 
 #include "saa7164.h"
 
-#define SAA7164_REV2_FIRMWARE		"NXP7164-2010-03-10.1.fw"
-#define SAA7164_REV2_FIRMWARE_SIZE	4019072
+#define SAA7164_REV2_FIRMWARE		"v4l-saa7164-1.0.2-3.fw"
+#define SAA7164_REV2_FIRMWARE_SIZE	4038864
 
 #define SAA7164_REV3_FIRMWARE		"NXP7164-2010-03-10.1.fw"
 #define SAA7164_REV3_FIRMWARE_SIZE	4019072
@@ -271,7 +271,6 @@ int saa7164_downloadfirmware(struct saa7164_dev *dev)
 			dprintk(DBGLVL_FW, "%s() Loader 1 has loaded.\n",
 				__func__);
 			first_timeout = SAA_DEVICE_TIMEOUT;
-			second_timeout = 60 * SAA_DEVICE_TIMEOUT;
 			second_timeout = 100;
 
 			err_flags = saa7164_readl(SAA_SECONDSTAGEERROR_FLAGS);

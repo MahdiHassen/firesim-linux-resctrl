@@ -2,7 +2,8 @@
 #include <test_progs.h>
 #include "cgroup_helpers.h"
 
-#include <linux/tcp.h>
+#include <netinet/tcp.h>
+#include <linux/netlink.h>
 #include "sockopt_sk.skel.h"
 
 #ifndef SOL_TCP
@@ -141,7 +142,7 @@ static int getsetsockopt(void)
 
 	/* TCP_CONGESTION can extend the string */
 
-	strcpy(buf.cc, "nv");
+	strscpy(buf.cc, "nv");
 	err = setsockopt(fd, SOL_TCP, TCP_CONGESTION, &buf, strlen("nv"));
 	if (err) {
 		log_err("Failed to call setsockopt(TCP_CONGESTION)");
@@ -182,6 +183,48 @@ static int getsetsockopt(void)
 			err, errno);
 		goto err;
 	}
+
+	/* optval=NULL case is handled correctly */
+
+	close(fd);
+	fd = socket(AF_NETLINK, SOCK_RAW, 0);
+	if (fd < 0) {
+		log_err("Failed to create AF_NETLINK socket");
+		goto err;
+	}
+
+	buf.u32 = 1;
+	optlen = sizeof(__u32);
+	err = setsockopt(fd, SOL_NETLINK, NETLINK_ADD_MEMBERSHIP, &buf, optlen);
+	if (err) {
+		log_err("Unexpected getsockopt(NETLINK_ADD_MEMBERSHIP) err=%d errno=%d",
+			err, errno);
+		goto err;
+	}
+
+	optlen = 0;
+	err = getsockopt(fd, SOL_NETLINK, NETLINK_LIST_MEMBERSHIPS, NULL, &optlen);
+	if (err) {
+		log_err("Unexpected getsockopt(NETLINK_LIST_MEMBERSHIPS) err=%d errno=%d",
+			err, errno);
+		goto err;
+	}
+	ASSERT_EQ(optlen, 8, "Unexpected NETLINK_LIST_MEMBERSHIPS value");
+
+	/* Trick bpf_tcp_sock() with IPPROTO_TCP */
+	close(fd);
+	fd = socket(AF_INET, SOCK_RAW, IPPROTO_TCP);
+	if (!ASSERT_OK_FD(fd, "socket"))
+		goto err;
+
+	/* The BPF prog intercepts this before the kernel sees it, any
+	 * optlen works. Go with 4 bytes for simplicity.
+	 */
+	buf.u32 = 1;
+	optlen = sizeof(buf.u32);
+	err = setsockopt(fd, SOL_TCP, TCP_SAVED_SYN, &buf, optlen);
+	if (!ASSERT_ERR(err, "setsockopt(TCP_SAVED_SYN)"))
+		goto err;
 
 	free(big_buf);
 	close(fd);

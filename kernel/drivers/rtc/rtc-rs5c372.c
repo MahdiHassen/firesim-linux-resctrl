@@ -12,7 +12,7 @@
 #include <linux/bcd.h>
 #include <linux/slab.h>
 #include <linux/module.h>
-#include <linux/of_device.h>
+#include <linux/of.h>
 
 /*
  * Ricoh has a family of I2C based RTCs, which differ only slightly from
@@ -75,12 +75,12 @@ enum rtc_type {
 };
 
 static const struct i2c_device_id rs5c372_id[] = {
-	{ "r2025sd", rtc_r2025sd },
-	{ "r2221tl", rtc_r2221tl },
-	{ "rs5c372a", rtc_rs5c372a },
-	{ "rs5c372b", rtc_rs5c372b },
-	{ "rv5c386", rtc_rv5c386 },
-	{ "rv5c387a", rtc_rv5c387a },
+	{ .name = "r2025sd", .driver_data = rtc_r2025sd },
+	{ .name = "r2221tl", .driver_data = rtc_r2221tl },
+	{ .name = "rs5c372a", .driver_data = rtc_rs5c372a },
+	{ .name = "rs5c372b", .driver_data = rtc_rs5c372b },
+	{ .name = "rv5c386", .driver_data = rtc_rv5c386 },
+	{ .name = "rv5c387a", .driver_data = rtc_rv5c387a },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, rs5c372_id);
@@ -825,13 +825,7 @@ static int rs5c372_probe(struct i2c_client *client)
 
 	rs5c372->client = client;
 	i2c_set_clientdata(client, rs5c372);
-	if (client->dev.of_node) {
-		rs5c372->type = (enum rtc_type)
-			of_device_get_match_data(&client->dev);
-	} else {
-		const struct i2c_device_id *id = i2c_match_id(rs5c372_id, client);
-		rs5c372->type = id->driver_data;
-	}
+	rs5c372->type = (uintptr_t)i2c_get_match_data(client);
 
 	/* we read registers 0x0f then 0x00-0x0f; skip the first one */
 	rs5c372->regs = &rs5c372->buf[1];
@@ -921,7 +915,7 @@ static struct i2c_driver rs5c372_driver = {
 		.name	= "rtc-rs5c372",
 		.of_match_table = of_match_ptr(rs5c372_of_match),
 	},
-	.probe_new	= rs5c372_probe,
+	.probe		= rs5c372_probe,
 	.remove		= rs5c372_remove,
 	.id_table	= rs5c372_id,
 };

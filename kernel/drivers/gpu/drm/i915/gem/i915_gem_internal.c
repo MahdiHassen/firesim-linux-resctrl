@@ -1,6 +1,5 @@
+// SPDX-License-Identifier: MIT
 /*
- * SPDX-License-Identifier: MIT
- *
  * Copyright © 2014-2016 Intel Corporation
  */
 
@@ -35,11 +34,15 @@ static int i915_gem_object_get_pages_internal(struct drm_i915_gem_object *obj)
 	struct drm_i915_private *i915 = to_i915(obj->base.dev);
 	struct sg_table *st;
 	struct scatterlist *sg;
-	unsigned int npages;
-	int max_order = MAX_ORDER;
+	unsigned int npages; /* restricted by sg_alloc_table */
+	int max_order = MAX_PAGE_ORDER;
 	unsigned int max_segment;
 	gfp_t gfp;
 
+	if (overflows_type(obj->base.size >> PAGE_SHIFT, npages))
+		return -E2BIG;
+
+	npages = obj->base.size >> PAGE_SHIFT;
 	max_segment = i915_sg_segment_size(i915->drm.dev) >> PAGE_SHIFT;
 	max_order = min(max_order, get_order(max_segment));
 
@@ -51,11 +54,10 @@ static int i915_gem_object_get_pages_internal(struct drm_i915_gem_object *obj)
 	}
 
 create_st:
-	st = kmalloc(sizeof(*st), GFP_KERNEL);
+	st = kmalloc_obj(*st);
 	if (!st)
 		return -ENOMEM;
 
-	npages = obj->base.size / PAGE_SIZE;
 	if (sg_alloc_table(st, npages, GFP_KERNEL)) {
 		kfree(st);
 		return -ENOMEM;

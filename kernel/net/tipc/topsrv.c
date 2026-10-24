@@ -43,6 +43,7 @@
 #include "bearer.h"
 #include <net/sock.h>
 #include <linux/module.h>
+#include <trace/events/sock.h>
 
 /* Number of messages to send before rescheduling */
 #define MAX_SEND_MSG_COUNT	25
@@ -56,7 +57,7 @@
  * @conn_idr: identifier set of connection
  * @idr_lock: protect the connection identifier set
  * @idr_in_use: amount of allocated identifier entry
- * @net: network namspace instance
+ * @net: network namespace instance
  * @awork: accept work item
  * @rcv_wq: receive workqueue
  * @send_wq: send workqueue
@@ -82,7 +83,7 @@ struct tipc_topsrv {
  * @sock: socket handler associated with connection
  * @flags: indicates connection state
  * @server: pointer to connected server
- * @sub_list: lsit to all pertaing subscriptions
+ * @sub_list: list to all pertaining subscriptions
  * @sub_lock: lock protecting the subscription list
  * @rwork: receive work item
  * @outqueue: pointer to first outbound message in queue
@@ -181,7 +182,7 @@ static struct tipc_conn *tipc_conn_alloc(struct tipc_topsrv *s, struct socket *s
 	struct tipc_conn *con;
 	int ret;
 
-	con = kzalloc(sizeof(*con), GFP_ATOMIC);
+	con = kzalloc_obj(*con, GFP_ATOMIC);
 	if (!con)
 		return ERR_PTR(-ENOMEM);
 
@@ -324,7 +325,7 @@ void tipc_topsrv_queue_evt(struct net *net, int conid,
 	if (!connected(con))
 		goto err;
 
-	e = kmalloc(sizeof(*e), GFP_ATOMIC);
+	e = kmalloc_obj(*e, GFP_ATOMIC);
 	if (!e)
 		goto err;
 	e->inactive = (event == TIPC_SUBSCR_TIMEOUT);
@@ -439,6 +440,8 @@ static void tipc_conn_data_ready(struct sock *sk)
 {
 	struct tipc_conn *con;
 
+	trace_sk_data_ready(sk);
+
 	read_lock_bh(&sk->sk_callback_lock);
 	con = sk->sk_user_data;
 	if (connected(con)) {
@@ -495,6 +498,8 @@ static void tipc_topsrv_accept(struct work_struct *work)
 static void tipc_topsrv_listener_data_ready(struct sock *sk)
 {
 	struct tipc_topsrv *srv;
+
+	trace_sk_data_ready(sk);
 
 	read_lock_bh(&sk->sk_callback_lock);
 	srv = sk->sk_user_data;
@@ -656,7 +661,7 @@ static int tipc_topsrv_start(struct net *net)
 	struct tipc_topsrv *srv;
 	int ret;
 
-	srv = kzalloc(sizeof(*srv), GFP_ATOMIC);
+	srv = kzalloc_obj(*srv, GFP_ATOMIC);
 	if (!srv)
 		return -ENOMEM;
 
@@ -699,8 +704,10 @@ static void tipc_topsrv_stop(struct net *net)
 	for (id = 0; srv->idr_in_use; id++) {
 		con = idr_find(&srv->conn_idr, id);
 		if (con) {
+			conn_get(con);
 			spin_unlock_bh(&srv->idr_lock);
 			tipc_conn_close(con);
+			conn_put(con);
 			spin_lock_bh(&srv->idr_lock);
 		}
 	}

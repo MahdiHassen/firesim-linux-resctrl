@@ -79,6 +79,12 @@ void nf_ct_l4proto_log_invalid(const struct sk_buff *skb,
 	struct net *net;
 	va_list args;
 
+	/* nfnetlink_log may re-enter conntrack attribute dumping and try to
+	 * take ct->lock again via helpers such as tcp_to_nlattr(), so invalid
+	 * conntrack logs must only be emitted after dropping ct->lock.
+	 */
+	lockdep_assert_not_held(&ct->lock);
+
 	net = nf_ct_net(ct);
 	if (likely(net->ct.sysctl_log_invalid == 0))
 		return;
@@ -100,14 +106,8 @@ const struct nf_conntrack_l4proto *nf_ct_l4proto_find(u8 l4proto)
 	case IPPROTO_UDP: return &nf_conntrack_l4proto_udp;
 	case IPPROTO_TCP: return &nf_conntrack_l4proto_tcp;
 	case IPPROTO_ICMP: return &nf_conntrack_l4proto_icmp;
-#ifdef CONFIG_NF_CT_PROTO_DCCP
-	case IPPROTO_DCCP: return &nf_conntrack_l4proto_dccp;
-#endif
 #ifdef CONFIG_NF_CT_PROTO_SCTP
 	case IPPROTO_SCTP: return &nf_conntrack_l4proto_sctp;
-#endif
-#ifdef CONFIG_NF_CT_PROTO_UDPLITE
-	case IPPROTO_UDPLITE: return &nf_conntrack_l4proto_udplite;
 #endif
 #ifdef CONFIG_NF_CT_PROTO_GRE
 	case IPPROTO_GRE: return &nf_conntrack_l4proto_gre;
@@ -135,6 +135,9 @@ unsigned int nf_confirm(void *priv,
 			struct sk_buff *skb,
 			const struct nf_hook_state *state)
 {
+	int (*helper_cb)(struct sk_buff *skb, unsigned int protoff,
+			 struct nf_conn *ct,
+			 enum ip_conntrack_info conntrackinfo);
 	const struct nf_conn_help *help;
 	enum ip_conntrack_info ctinfo;
 	unsigned int protoff;
@@ -181,11 +184,13 @@ unsigned int nf_confirm(void *priv,
 		/* rcu_read_lock()ed by nf_hook */
 		helper = rcu_dereference(help->helper);
 		if (helper) {
-			ret = helper->help(skb,
-					   protoff,
-					   ct, ctinfo);
-			if (ret != NF_ACCEPT)
-				return ret;
+			helper_cb = rcu_dereference(helper->help);
+			if (helper_cb) {
+				ret = helper_cb(skb, protoff,
+						ct, ctinfo);
+				if (ret != NF_ACCEPT)
+					return ret;
+			}
 		}
 	}
 
@@ -284,16 +289,11 @@ getorigdst(struct sock *sk, int optval, void __user *user, int *len)
 
 	/* We only do TCP and SCTP at the moment: is there a better way? */
 	if (tuple.dst.protonum != IPPROTO_TCP &&
-	    tuple.dst.protonum != IPPROTO_SCTP) {
-		pr_debug("SO_ORIGINAL_DST: Not a TCP/SCTP socket\n");
+	    tuple.dst.protonum != IPPROTO_SCTP)
 		return -ENOPROTOOPT;
-	}
 
-	if ((unsigned int)*len < sizeof(struct sockaddr_in)) {
-		pr_debug("SO_ORIGINAL_DST: len %d not %zu\n",
-			 *len, sizeof(struct sockaddr_in));
+	if ((unsigned int)*len < sizeof(struct sockaddr_in))
 		return -EINVAL;
-	}
 
 	h = nf_conntrack_find_get(sock_net(sk), &nf_ct_zone_dflt, &tuple);
 	if (h) {
@@ -307,17 +307,12 @@ getorigdst(struct sock *sk, int optval, void __user *user, int *len)
 			.tuple.dst.u3.ip;
 		memset(sin.sin_zero, 0, sizeof(sin.sin_zero));
 
-		pr_debug("SO_ORIGINAL_DST: %pI4 %u\n",
-			 &sin.sin_addr.s_addr, ntohs(sin.sin_port));
 		nf_ct_put(ct);
 		if (copy_to_user(user, &sin, sizeof(sin)) != 0)
 			return -EFAULT;
 		else
 			return 0;
 	}
-	pr_debug("SO_ORIGINAL_DST: Can't find %pI4/%u-%pI4/%u.\n",
-		 &tuple.src.u3.ip, ntohs(tuple.src.u.tcp.port),
-		 &tuple.dst.u3.ip, ntohs(tuple.dst.u.tcp.port));
 	return -ENOENT;
 }
 
@@ -360,12 +355,8 @@ ipv6_getorigdst(struct sock *sk, int optval, void __user *user, int *len)
 		return -EINVAL;
 
 	h = nf_conntrack_find_get(sock_net(sk), &nf_ct_zone_dflt, &tuple);
-	if (!h) {
-		pr_debug("IP6T_SO_ORIGINAL_DST: Can't find %pI6c/%u-%pI6c/%u.\n",
-			 &tuple.src.u3.ip6, ntohs(tuple.src.u.tcp.port),
-			 &tuple.dst.u3.ip6, ntohs(tuple.dst.u.tcp.port));
+	if (!h)
 		return -ENOENT;
-	}
 
 	ct = nf_ct_tuplehash_to_ctrack(h);
 
@@ -695,9 +686,6 @@ void nf_conntrack_proto_pernet_init(struct net *net)
 #if IS_ENABLED(CONFIG_IPV6)
 	nf_conntrack_icmpv6_init_net(net);
 #endif
-#ifdef CONFIG_NF_CT_PROTO_DCCP
-	nf_conntrack_dccp_init_net(net);
-#endif
 #ifdef CONFIG_NF_CT_PROTO_SCTP
 	nf_conntrack_sctp_init_net(net);
 #endif
@@ -713,3 +701,4 @@ MODULE_ALIAS("ip_conntrack");
 MODULE_ALIAS("nf_conntrack-" __stringify(AF_INET));
 MODULE_ALIAS("nf_conntrack-" __stringify(AF_INET6));
 MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("IPv4 and IPv6 connection tracking");

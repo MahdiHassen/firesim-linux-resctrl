@@ -1,10 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
    BlueZ - Bluetooth protocol stack for Linux
    Copyright (C) 2011 Nokia Corporation and/or its subsidiary(-ies).
-
-   This program is free software; you can redistribute it and/or modify
-   it under the terms of the GNU General Public License version 2 as
-   published by the Free Software Foundation;
 
    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
    OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
@@ -22,11 +19,10 @@
 
 #include <linux/debugfs.h>
 #include <linux/scatterlist.h>
-#include <linux/crypto.h>
+#include <crypto/aes-cbc-macs.h>
 #include <crypto/aes.h>
-#include <crypto/algapi.h>
-#include <crypto/hash.h>
 #include <crypto/kpp.h>
+#include <crypto/utils.h>
 
 #include <net/bluetooth/bluetooth.h>
 #include <net/bluetooth/hci_core.h>
@@ -56,13 +52,15 @@
 /* Keys which are not distributed with Secure Connections */
 #define SMP_SC_NO_DIST (SMP_DIST_ENC_KEY | SMP_DIST_LINK_KEY)
 
-#define SMP_TIMEOUT	msecs_to_jiffies(30000)
+#define SMP_TIMEOUT	secs_to_jiffies(30)
+
+#define ID_ADDR_TIMEOUT	msecs_to_jiffies(200)
 
 #define AUTH_REQ_MASK(dev)	(hci_dev_test_flag(dev, HCI_SC_ENABLED) ? \
 				 0x3f : 0x07)
 #define KEY_DIST_MASK		0x07
 
-/* Maximum message length that can be passed to aes_cmac */
+/* Maximum message length that can be passed to smp_aes_cmac */
 #define CMAC_MSG_MAX	80
 
 enum {
@@ -88,7 +86,6 @@ struct smp_dev {
 	u8			local_rand[16];
 	bool			debug_key;
 
-	struct crypto_shash	*tfm_cmac;
 	struct crypto_kpp	*tfm_ecdh;
 };
 
@@ -126,7 +123,6 @@ struct smp_chan {
 	u8			dhkey[32];
 	u8			mackey[16];
 
-	struct crypto_shash	*tfm_cmac;
 	struct crypto_kpp	*tfm_ecdh;
 };
 
@@ -165,19 +161,14 @@ static inline void swap_buf(const u8 *src, u8 *dst, size_t len)
  * AES-CMAC, f4, f5, f6, g2 and h6.
  */
 
-static int aes_cmac(struct crypto_shash *tfm, const u8 k[16], const u8 *m,
-		    size_t len, u8 mac[16])
+static int smp_aes_cmac(const u8 k[16], const u8 *m, size_t len, u8 mac[16])
 {
 	uint8_t tmp[16], mac_msb[16], msg_msb[CMAC_MSG_MAX];
+	struct aes_cmac_key key;
 	int err;
 
 	if (len > CMAC_MSG_MAX)
 		return -EFBIG;
-
-	if (!tfm) {
-		BT_ERR("tfm %p", tfm);
-		return -EINVAL;
-	}
 
 	/* Swap key and message from LSB to MSB */
 	swap_buf(k, tmp, 16);
@@ -186,17 +177,10 @@ static int aes_cmac(struct crypto_shash *tfm, const u8 k[16], const u8 *m,
 	SMP_DBG("msg (len %zu) %*phN", len, (int) len, m);
 	SMP_DBG("key %16phN", k);
 
-	err = crypto_shash_setkey(tfm, tmp, 16);
-	if (err) {
-		BT_ERR("cipher setkey failed: %d", err);
+	err = aes_cmac_preparekey(&key, tmp, 16);
+	if (WARN_ON_ONCE(err)) /* Should never happen, as 16 is valid keylen */
 		return err;
-	}
-
-	err = crypto_shash_tfm_digest(tfm, msg_msb, len, mac_msb);
-	if (err) {
-		BT_ERR("Hash computation error %d", err);
-		return err;
-	}
+	aes_cmac(&key, msg_msb, len, mac_msb);
 
 	swap_buf(mac_msb, mac, 16);
 
@@ -205,8 +189,8 @@ static int aes_cmac(struct crypto_shash *tfm, const u8 k[16], const u8 *m,
 	return 0;
 }
 
-static int smp_f4(struct crypto_shash *tfm_cmac, const u8 u[32],
-		  const u8 v[32], const u8 x[16], u8 z, u8 res[16])
+static int smp_f4(const u8 u[32], const u8 v[32], const u8 x[16], u8 z,
+		  u8 res[16])
 {
 	u8 m[65];
 	int err;
@@ -219,7 +203,7 @@ static int smp_f4(struct crypto_shash *tfm_cmac, const u8 u[32],
 	memcpy(m + 1, v, 32);
 	memcpy(m + 33, u, 32);
 
-	err = aes_cmac(tfm_cmac, x, m, sizeof(m), res);
+	err = smp_aes_cmac(x, m, sizeof(m), res);
 	if (err)
 		return err;
 
@@ -228,9 +212,8 @@ static int smp_f4(struct crypto_shash *tfm_cmac, const u8 u[32],
 	return err;
 }
 
-static int smp_f5(struct crypto_shash *tfm_cmac, const u8 w[32],
-		  const u8 n1[16], const u8 n2[16], const u8 a1[7],
-		  const u8 a2[7], u8 mackey[16], u8 ltk[16])
+static int smp_f5(const u8 w[32], const u8 n1[16], const u8 n2[16],
+		  const u8 a1[7], const u8 a2[7], u8 mackey[16], u8 ltk[16])
 {
 	/* The btle, salt and length "magic" values are as defined in
 	 * the SMP section of the Bluetooth core specification. In ASCII
@@ -249,7 +232,7 @@ static int smp_f5(struct crypto_shash *tfm_cmac, const u8 w[32],
 	SMP_DBG("n1 %16phN n2 %16phN", n1, n2);
 	SMP_DBG("a1 %7phN a2 %7phN", a1, a2);
 
-	err = aes_cmac(tfm_cmac, salt, w, 32, t);
+	err = smp_aes_cmac(salt, w, 32, t);
 	if (err)
 		return err;
 
@@ -264,7 +247,7 @@ static int smp_f5(struct crypto_shash *tfm_cmac, const u8 w[32],
 
 	m[52] = 0; /* Counter */
 
-	err = aes_cmac(tfm_cmac, t, m, sizeof(m), mackey);
+	err = smp_aes_cmac(t, m, sizeof(m), mackey);
 	if (err)
 		return err;
 
@@ -272,7 +255,7 @@ static int smp_f5(struct crypto_shash *tfm_cmac, const u8 w[32],
 
 	m[52] = 1; /* Counter */
 
-	err = aes_cmac(tfm_cmac, t, m, sizeof(m), ltk);
+	err = smp_aes_cmac(t, m, sizeof(m), ltk);
 	if (err)
 		return err;
 
@@ -281,10 +264,9 @@ static int smp_f5(struct crypto_shash *tfm_cmac, const u8 w[32],
 	return 0;
 }
 
-static int smp_f6(struct crypto_shash *tfm_cmac, const u8 w[16],
-		  const u8 n1[16], const u8 n2[16], const u8 r[16],
-		  const u8 io_cap[3], const u8 a1[7], const u8 a2[7],
-		  u8 res[16])
+static int smp_f6(const u8 w[16], const u8 n1[16], const u8 n2[16],
+		  const u8 r[16], const u8 io_cap[3], const u8 a1[7],
+		  const u8 a2[7], u8 res[16])
 {
 	u8 m[65];
 	int err;
@@ -300,7 +282,7 @@ static int smp_f6(struct crypto_shash *tfm_cmac, const u8 w[16],
 	memcpy(m + 33, n2, 16);
 	memcpy(m + 49, n1, 16);
 
-	err = aes_cmac(tfm_cmac, w, m, sizeof(m), res);
+	err = smp_aes_cmac(w, m, sizeof(m), res);
 	if (err)
 		return err;
 
@@ -309,8 +291,8 @@ static int smp_f6(struct crypto_shash *tfm_cmac, const u8 w[16],
 	return err;
 }
 
-static int smp_g2(struct crypto_shash *tfm_cmac, const u8 u[32], const u8 v[32],
-		  const u8 x[16], const u8 y[16], u32 *val)
+static int smp_g2(const u8 u[32], const u8 v[32], const u8 x[16],
+		  const u8 y[16], u32 *val)
 {
 	u8 m[80], tmp[16];
 	int err;
@@ -323,7 +305,7 @@ static int smp_g2(struct crypto_shash *tfm_cmac, const u8 u[32], const u8 v[32],
 	memcpy(m + 16, v, 32);
 	memcpy(m + 48, u, 32);
 
-	err = aes_cmac(tfm_cmac, x, m, sizeof(m), tmp);
+	err = smp_aes_cmac(x, m, sizeof(m), tmp);
 	if (err)
 		return err;
 
@@ -335,14 +317,13 @@ static int smp_g2(struct crypto_shash *tfm_cmac, const u8 u[32], const u8 v[32],
 	return 0;
 }
 
-static int smp_h6(struct crypto_shash *tfm_cmac, const u8 w[16],
-		  const u8 key_id[4], u8 res[16])
+static int smp_h6(const u8 w[16], const u8 key_id[4], u8 res[16])
 {
 	int err;
 
 	SMP_DBG("w %16phN key_id %4phN", w, key_id);
 
-	err = aes_cmac(tfm_cmac, w, key_id, 4, res);
+	err = smp_aes_cmac(w, key_id, 4, res);
 	if (err)
 		return err;
 
@@ -351,14 +332,13 @@ static int smp_h6(struct crypto_shash *tfm_cmac, const u8 w[16],
 	return err;
 }
 
-static int smp_h7(struct crypto_shash *tfm_cmac, const u8 w[16],
-		  const u8 salt[16], u8 res[16])
+static int smp_h7(const u8 w[16], const u8 salt[16], u8 res[16])
 {
 	int err;
 
 	SMP_DBG("w %16phN salt %16phN", w, salt);
 
-	err = aes_cmac(tfm_cmac, salt, w, 16, res);
+	err = smp_aes_cmac(salt, w, 16, res);
 	if (err)
 		return err;
 
@@ -373,7 +353,7 @@ static int smp_h7(struct crypto_shash *tfm_cmac, const u8 w[16],
 
 static int smp_e(const u8 *k, u8 *r)
 {
-	struct crypto_aes_ctx ctx;
+	struct aes_enckey aes;
 	uint8_t tmp[16], data[16];
 	int err;
 
@@ -382,7 +362,7 @@ static int smp_e(const u8 *k, u8 *r)
 	/* The most significant octet of key corresponds to k[0] */
 	swap_buf(k, tmp, 16);
 
-	err = aes_expandkey(&ctx, tmp, 16);
+	err = aes_prepareenckey(&aes, tmp, 16);
 	if (err) {
 		BT_ERR("cipher setkey failed: %d", err);
 		return err;
@@ -391,14 +371,14 @@ static int smp_e(const u8 *k, u8 *r)
 	/* Most significant octet of plaintextData corresponds to data[0] */
 	swap_buf(r, data, 16);
 
-	aes_encrypt(&ctx, data, data);
+	aes_encrypt(&aes, data, data);
 
 	/* Most significant octet of encryptedData corresponds to data[0] */
 	swap_buf(data, r, 16);
 
 	SMP_DBG("r %16phN", r);
 
-	memzero_explicit(&ctx, sizeof(ctx));
+	memzero_explicit(&aes, sizeof(aes));
 	return err;
 }
 
@@ -573,8 +553,7 @@ int smp_generate_oob(struct hci_dev *hdev, u8 hash[16], u8 rand[16])
 
 	get_random_bytes(smp->local_rand, 16);
 
-	err = smp_f4(smp->tfm_cmac, smp->local_pk, smp->local_pk,
-		     smp->local_rand, 0, hash);
+	err = smp_f4(smp->local_pk, smp->local_pk, smp->local_rand, 0, hash);
 	if (err < 0)
 		return err;
 
@@ -607,7 +586,7 @@ static void smp_send_cmd(struct l2cap_conn *conn, u8 code, u16 len, void *data)
 
 	iov_iter_kvec(&msg.msg_iter, ITER_SOURCE, iv, 2, 1 + len);
 
-	l2cap_chan_send(chan, &msg, 1 + len);
+	l2cap_chan_send(chan, &msg, 1 + len, NULL);
 
 	if (!chan->data)
 		return;
@@ -756,7 +735,6 @@ static void smp_chan_destroy(struct l2cap_conn *conn)
 	kfree_sensitive(smp->responder_csrk);
 	kfree_sensitive(smp->link_key);
 
-	crypto_free_shash(smp->tfm_cmac);
 	crypto_free_kpp(smp->tfm_ecdh);
 
 	/* Ensure that we don't leave any debug key around if debug key
@@ -913,7 +891,7 @@ static int tk_request(struct l2cap_conn *conn, u8 remote_oob, u8 auth,
 	 * Confirms and the responder Enters the passkey.
 	 */
 	if (smp->method == OVERLAP) {
-		if (hcon->role == HCI_ROLE_MASTER)
+		if (test_bit(SMP_FLAG_INITIATOR, &smp->flags))
 			smp->method = CFM_PASSKEY;
 		else
 			smp->method = REQ_PASSKEY;
@@ -963,7 +941,7 @@ static u8 smp_confirm(struct smp_chan *smp)
 
 	smp_send_cmd(smp->conn, SMP_CMD_PAIRING_CONFIRM, sizeof(cp), &cp);
 
-	if (conn->hcon->out)
+	if (test_bit(SMP_FLAG_INITIATOR, &smp->flags))
 		SMP_ALLOW_CMD(smp, SMP_CMD_PAIRING_CONFIRM);
 	else
 		SMP_ALLOW_CMD(smp, SMP_CMD_PAIRING_RANDOM);
@@ -979,7 +957,8 @@ static u8 smp_random(struct smp_chan *smp)
 	int ret;
 
 	bt_dev_dbg(conn->hcon->hdev, "conn %p %s", conn,
-		   conn->hcon->out ? "initiator" : "responder");
+		   test_bit(SMP_FLAG_INITIATOR, &smp->flags) ? "initiator" :
+		   "responder");
 
 	ret = smp_c1(smp->tk, smp->rrnd, smp->preq, smp->prsp,
 		     hcon->init_addr_type, &hcon->init_addr,
@@ -993,7 +972,7 @@ static u8 smp_random(struct smp_chan *smp)
 		return SMP_CONFIRM_FAILED;
 	}
 
-	if (hcon->out) {
+	if (test_bit(SMP_FLAG_INITIATOR, &smp->flags)) {
 		u8 stk[16];
 		__le64 rand = 0;
 		__le16 ediv = 0;
@@ -1016,10 +995,7 @@ static u8 smp_random(struct smp_chan *smp)
 
 		smp_s1(smp->tk, smp->prnd, smp->rrnd, stk);
 
-		if (hcon->pending_sec_level == BT_SECURITY_HIGH)
-			auth = 1;
-		else
-			auth = 0;
+		auth = test_bit(SMP_FLAG_MITM_AUTH, &smp->flags) ? 1 : 0;
 
 		/* Even though there's no _RESPONDER suffix this is the
 		 * responder STK we're adding for later lookup (the initiator
@@ -1067,7 +1043,12 @@ static void smp_notify_keys(struct l2cap_conn *conn)
 		if (hcon->type == LE_LINK) {
 			bacpy(&hcon->dst, &smp->remote_irk->bdaddr);
 			hcon->dst_type = smp->remote_irk->addr_type;
-			queue_work(hdev->workqueue, &conn->id_addr_update_work);
+			/* Use a short delay to make sure the new address is
+			 * propagated _before_ the channels.
+			 */
+			queue_delayed_work(hdev->workqueue,
+					   &conn->id_addr_timer,
+					   ID_ADDR_TIMEOUT);
 		}
 	}
 
@@ -1156,7 +1137,7 @@ static void sc_generate_link_key(struct smp_chan *smp)
 		/* SALT = 0x000000000000000000000000746D7031 */
 		const u8 salt[16] = { 0x31, 0x70, 0x6d, 0x74 };
 
-		if (smp_h7(smp->tfm_cmac, smp->tk, salt, smp->link_key)) {
+		if (smp_h7(smp->tk, salt, smp->link_key)) {
 			kfree_sensitive(smp->link_key);
 			smp->link_key = NULL;
 			return;
@@ -1165,14 +1146,14 @@ static void sc_generate_link_key(struct smp_chan *smp)
 		/* From core spec. Spells out in ASCII as 'tmp1'. */
 		const u8 tmp1[4] = { 0x31, 0x70, 0x6d, 0x74 };
 
-		if (smp_h6(smp->tfm_cmac, smp->tk, tmp1, smp->link_key)) {
+		if (smp_h6(smp->tk, tmp1, smp->link_key)) {
 			kfree_sensitive(smp->link_key);
 			smp->link_key = NULL;
 			return;
 		}
 	}
 
-	if (smp_h6(smp->tfm_cmac, smp->link_key, lebr, smp->link_key)) {
+	if (smp_h6(smp->link_key, lebr, smp->link_key)) {
 		kfree_sensitive(smp->link_key);
 		smp->link_key = NULL;
 		return;
@@ -1214,17 +1195,17 @@ static void sc_generate_ltk(struct smp_chan *smp)
 		/* SALT = 0x000000000000000000000000746D7032 */
 		const u8 salt[16] = { 0x32, 0x70, 0x6d, 0x74 };
 
-		if (smp_h7(smp->tfm_cmac, key->val, salt, smp->tk))
+		if (smp_h7(key->val, salt, smp->tk))
 			return;
 	} else {
 		/* From core spec. Spells out in ASCII as 'tmp2'. */
 		const u8 tmp2[4] = { 0x32, 0x70, 0x6d, 0x74 };
 
-		if (smp_h6(smp->tfm_cmac, key->val, tmp2, smp->tk))
+		if (smp_h6(key->val, tmp2, smp->tk))
 			return;
 	}
 
-	if (smp_h6(smp->tfm_cmac, smp->tk, brle, smp->tk))
+	if (smp_h6(smp->tk, brle, smp->tk))
 		return;
 
 	sc_add_ltk(smp);
@@ -1243,14 +1224,15 @@ static void smp_distribute_keys(struct smp_chan *smp)
 	rsp = (void *) &smp->prsp[1];
 
 	/* The responder sends its keys first */
-	if (hcon->out && (smp->remote_key_dist & KEY_DIST_MASK)) {
+	if (test_bit(SMP_FLAG_INITIATOR, &smp->flags) &&
+	    (smp->remote_key_dist & KEY_DIST_MASK)) {
 		smp_allow_key_dist(smp);
 		return;
 	}
 
 	req = (void *) &smp->preq[1];
 
-	if (hcon->out) {
+	if (test_bit(SMP_FLAG_INITIATOR, &smp->flags)) {
 		keydist = &rsp->init_key_dist;
 		*keydist &= req->init_key_dist;
 	} else {
@@ -1336,7 +1318,7 @@ static void smp_distribute_keys(struct smp_chan *smp)
 		/* Generate a new random key */
 		get_random_bytes(sign.csrk, sizeof(sign.csrk));
 
-		csrk = kzalloc(sizeof(*csrk), GFP_KERNEL);
+		csrk = kzalloc_obj(*csrk);
 		if (csrk) {
 			if (hcon->sec_level > BT_SECURITY_MEDIUM)
 				csrk->type = MGMT_CSRK_LOCAL_AUTHENTICATED;
@@ -1371,7 +1353,7 @@ static void smp_timeout(struct work_struct *work)
 
 	bt_dev_dbg(conn->hcon->hdev, "conn %p", conn);
 
-	hci_disconnect(conn->hcon, HCI_ERROR_REMOTE_USER_TERM);
+	hci_disconnect(conn->hcon, HCI_ERROR_AUTH_FAILURE);
 }
 
 static struct smp_chan *smp_chan_create(struct l2cap_conn *conn)
@@ -1380,20 +1362,14 @@ static struct smp_chan *smp_chan_create(struct l2cap_conn *conn)
 	struct l2cap_chan *chan = conn->smp;
 	struct smp_chan *smp;
 
-	smp = kzalloc(sizeof(*smp), GFP_ATOMIC);
+	smp = kzalloc_obj(*smp, GFP_ATOMIC);
 	if (!smp)
 		return NULL;
-
-	smp->tfm_cmac = crypto_alloc_shash("cmac(aes)", 0, 0);
-	if (IS_ERR(smp->tfm_cmac)) {
-		bt_dev_err(hcon->hdev, "Unable to create CMAC crypto context");
-		goto zfree_smp;
-	}
 
 	smp->tfm_ecdh = crypto_alloc_kpp("ecdh-nist-p256", 0, 0);
 	if (IS_ERR(smp->tfm_ecdh)) {
 		bt_dev_err(hcon->hdev, "Unable to create ECDH crypto context");
-		goto free_shash;
+		goto zfree_smp;
 	}
 
 	smp->conn = conn;
@@ -1407,8 +1383,6 @@ static struct smp_chan *smp_chan_create(struct l2cap_conn *conn)
 
 	return smp;
 
-free_shash:
-	crypto_free_shash(smp->tfm_cmac);
 zfree_smp:
 	kfree_sensitive(smp);
 	return NULL;
@@ -1419,7 +1393,7 @@ static int sc_mackey_and_ltk(struct smp_chan *smp, u8 mackey[16], u8 ltk[16])
 	struct hci_conn *hcon = smp->conn->hcon;
 	u8 *na, *nb, a[7], b[7];
 
-	if (hcon->out) {
+	if (test_bit(SMP_FLAG_INITIATOR, &smp->flags)) {
 		na   = smp->prnd;
 		nb   = smp->rrnd;
 	} else {
@@ -1432,7 +1406,7 @@ static int sc_mackey_and_ltk(struct smp_chan *smp, u8 mackey[16], u8 ltk[16])
 	a[6] = hcon->init_addr_type;
 	b[6] = hcon->resp_addr_type;
 
-	return smp_f5(smp->tfm_cmac, smp->dhkey, na, nb, a, b, mackey, ltk);
+	return smp_f5(smp->dhkey, na, nb, a, b, mackey, ltk);
 }
 
 static void sc_dhkey_check(struct smp_chan *smp)
@@ -1447,7 +1421,7 @@ static void sc_dhkey_check(struct smp_chan *smp)
 	a[6] = hcon->init_addr_type;
 	b[6] = hcon->resp_addr_type;
 
-	if (hcon->out) {
+	if (test_bit(SMP_FLAG_INITIATOR, &smp->flags)) {
 		local_addr = a;
 		remote_addr = b;
 		memcpy(io_cap, &smp->preq[1], 3);
@@ -1465,8 +1439,8 @@ static void sc_dhkey_check(struct smp_chan *smp)
 	if (smp->method == REQ_OOB)
 		memcpy(r, smp->rr, 16);
 
-	smp_f6(smp->tfm_cmac, smp->mackey, smp->prnd, smp->rrnd, r, io_cap,
-	       local_addr, remote_addr, check.e);
+	smp_f6(smp->mackey, smp->prnd, smp->rrnd, r, io_cap, local_addr,
+	       remote_addr, check.e);
 
 	smp_send_cmd(smp->conn, SMP_CMD_DHKEY_CHECK, sizeof(check), &check);
 }
@@ -1483,7 +1457,7 @@ static u8 sc_passkey_send_confirm(struct smp_chan *smp)
 
 	get_random_bytes(smp->prnd, sizeof(smp->prnd));
 
-	if (smp_f4(smp->tfm_cmac, smp->local_pk, smp->remote_pk, smp->prnd, r,
+	if (smp_f4(smp->local_pk, smp->remote_pk, smp->prnd, r,
 		   cfm.confirm_val))
 		return SMP_UNSPECIFIED;
 
@@ -1508,8 +1482,7 @@ static u8 sc_passkey_round(struct smp_chan *smp, u8 smp_op)
 		r = ((hcon->passkey_notify >> smp->passkey_round) & 0x01);
 		r |= 0x80;
 
-		if (smp_f4(smp->tfm_cmac, smp->remote_pk, smp->local_pk,
-			   smp->rrnd, r, cfm))
+		if (smp_f4(smp->remote_pk, smp->local_pk, smp->rrnd, r, cfm))
 			return SMP_UNSPECIFIED;
 
 		if (crypto_memneq(smp->pcnf, cfm, 16))
@@ -1526,7 +1499,7 @@ static u8 sc_passkey_round(struct smp_chan *smp, u8 smp_op)
 		/* The round is only complete when the initiator
 		 * receives pairing random.
 		 */
-		if (!hcon->out) {
+		if (!test_bit(SMP_FLAG_INITIATOR, &smp->flags)) {
 			smp_send_cmd(conn, SMP_CMD_PAIRING_RANDOM,
 				     sizeof(smp->prnd), smp->prnd);
 			if (smp->passkey_round == 20)
@@ -1554,7 +1527,7 @@ static u8 sc_passkey_round(struct smp_chan *smp, u8 smp_op)
 
 		SMP_ALLOW_CMD(smp, SMP_CMD_PAIRING_RANDOM);
 
-		if (hcon->out) {
+		if (test_bit(SMP_FLAG_INITIATOR, &smp->flags)) {
 			smp_send_cmd(conn, SMP_CMD_PAIRING_RANDOM,
 				     sizeof(smp->prnd), smp->prnd);
 			return 0;
@@ -1565,7 +1538,7 @@ static u8 sc_passkey_round(struct smp_chan *smp, u8 smp_op)
 	case SMP_CMD_PUBLIC_KEY:
 	default:
 		/* Initiating device starts the round */
-		if (!hcon->out)
+		if (!test_bit(SMP_FLAG_INITIATOR, &smp->flags))
 			return 0;
 
 		bt_dev_dbg(hdev, "Starting passkey round %u",
@@ -1610,7 +1583,7 @@ static int sc_user_reply(struct smp_chan *smp, u16 mgmt_op, __le32 passkey)
 	}
 
 	/* Initiator sends DHKey check first */
-	if (hcon->out) {
+	if (test_bit(SMP_FLAG_INITIATOR, &smp->flags)) {
 		sc_dhkey_check(smp);
 		SMP_ALLOW_CMD(smp, SMP_CMD_DHKEY_CHECK);
 	} else if (test_and_clear_bit(SMP_FLAG_DHKEY_PENDING, &smp->flags)) {
@@ -1733,7 +1706,7 @@ static u8 smp_cmd_pairing_req(struct l2cap_conn *conn, struct sk_buff *skb)
 	struct smp_cmd_pairing rsp, *req = (void *) skb->data;
 	struct l2cap_chan *chan = conn->smp;
 	struct hci_dev *hdev = conn->hcon->hdev;
-	struct smp_chan *smp;
+	struct smp_chan *smp = chan->data;
 	u8 key_size, auth, sec_level;
 	int ret;
 
@@ -1742,16 +1715,14 @@ static u8 smp_cmd_pairing_req(struct l2cap_conn *conn, struct sk_buff *skb)
 	if (skb->len < sizeof(*req))
 		return SMP_INVALID_PARAMS;
 
-	if (conn->hcon->role != HCI_ROLE_SLAVE)
+	if (smp && test_bit(SMP_FLAG_INITIATOR, &smp->flags))
 		return SMP_CMD_NOTSUPP;
 
-	if (!chan->data)
+	if (!smp) {
 		smp = smp_chan_create(conn);
-	else
-		smp = chan->data;
-
-	if (!smp)
-		return SMP_UNSPECIFIED;
+		if (!smp)
+			return SMP_UNSPECIFIED;
+	}
 
 	/* We didn't start the pairing, so match remote */
 	auth = req->auth_req & AUTH_REQ_MASK(hdev);
@@ -1820,7 +1791,7 @@ static u8 smp_cmd_pairing_req(struct l2cap_conn *conn, struct sk_buff *skb)
 	if (sec_level > conn->hcon->pending_sec_level)
 		conn->hcon->pending_sec_level = sec_level;
 
-	/* If we need MITM check that it can be achieved */
+	/* If we need MITM check that it can be achieved. */
 	if (conn->hcon->pending_sec_level >= BT_SECURITY_HIGH) {
 		u8 method;
 
@@ -1828,6 +1799,10 @@ static u8 smp_cmd_pairing_req(struct l2cap_conn *conn, struct sk_buff *skb)
 					 req->io_capability);
 		if (method == JUST_WORKS || method == JUST_CFM)
 			return SMP_AUTH_REQUIREMENTS;
+
+		/* Force MITM bit if it isn't set by the initiator. */
+		auth |= SMP_AUTH_MITM;
+		rsp.auth_req |= SMP_AUTH_MITM;
 	}
 
 	key_size = min(req->max_key_size, rsp.max_key_size);
@@ -1933,7 +1908,7 @@ static u8 smp_cmd_pairing_rsp(struct l2cap_conn *conn, struct sk_buff *skb)
 	if (skb->len < sizeof(*rsp))
 		return SMP_INVALID_PARAMS;
 
-	if (conn->hcon->role != HCI_ROLE_MASTER)
+	if (!test_bit(SMP_FLAG_INITIATOR, &smp->flags))
 		return SMP_CMD_NOTSUPP;
 
 	skb_pull(skb, sizeof(*rsp));
@@ -2028,7 +2003,7 @@ static u8 sc_check_confirm(struct smp_chan *smp)
 	if (smp->method == REQ_PASSKEY || smp->method == DSP_PASSKEY)
 		return sc_passkey_round(smp, SMP_CMD_PAIRING_CONFIRM);
 
-	if (conn->hcon->out) {
+	if (test_bit(SMP_FLAG_INITIATOR, &smp->flags)) {
 		smp_send_cmd(conn, SMP_CMD_PAIRING_RANDOM, sizeof(smp->prnd),
 			     smp->prnd);
 		SMP_ALLOW_CMD(smp, SMP_CMD_PAIRING_RANDOM);
@@ -2050,7 +2025,7 @@ static int fixup_sc_false_positive(struct smp_chan *smp)
 	u8 auth;
 
 	/* The issue is only observed when we're in responder role */
-	if (hcon->out)
+	if (test_bit(SMP_FLAG_INITIATOR, &smp->flags))
 		return SMP_UNSPECIFIED;
 
 	if (hci_dev_test_flag(hdev, HCI_SC_ONLY)) {
@@ -2086,7 +2061,8 @@ static u8 smp_cmd_pairing_confirm(struct l2cap_conn *conn, struct sk_buff *skb)
 	struct hci_dev *hdev = hcon->hdev;
 
 	bt_dev_dbg(hdev, "conn %p %s", conn,
-		   hcon->out ? "initiator" : "responder");
+		   test_bit(SMP_FLAG_INITIATOR, &smp->flags) ? "initiator" :
+		   "responder");
 
 	if (skb->len < sizeof(smp->pcnf))
 		return SMP_INVALID_PARAMS;
@@ -2108,7 +2084,7 @@ static u8 smp_cmd_pairing_confirm(struct l2cap_conn *conn, struct sk_buff *skb)
 			return ret;
 	}
 
-	if (conn->hcon->out) {
+	if (test_bit(SMP_FLAG_INITIATOR, &smp->flags)) {
 		smp_send_cmd(conn, SMP_CMD_PAIRING_RANDOM, sizeof(smp->prnd),
 			     smp->prnd);
 		SMP_ALLOW_CMD(smp, SMP_CMD_PAIRING_RANDOM);
@@ -2129,7 +2105,7 @@ static u8 smp_cmd_pairing_random(struct l2cap_conn *conn, struct sk_buff *skb)
 	struct smp_chan *smp = chan->data;
 	struct hci_conn *hcon = conn->hcon;
 	u8 *pkax, *pkbx, *na, *nb, confirm_hint;
-	u32 passkey;
+	u32 passkey = 0;
 	int err;
 
 	bt_dev_dbg(hcon->hdev, "conn %p", conn);
@@ -2143,7 +2119,7 @@ static u8 smp_cmd_pairing_random(struct l2cap_conn *conn, struct sk_buff *skb)
 	if (!test_bit(SMP_FLAG_SC, &smp->flags))
 		return smp_random(smp);
 
-	if (hcon->out) {
+	if (test_bit(SMP_FLAG_INITIATOR, &smp->flags)) {
 		pkax = smp->local_pk;
 		pkbx = smp->remote_pk;
 		na   = smp->prnd;
@@ -2156,7 +2132,7 @@ static u8 smp_cmd_pairing_random(struct l2cap_conn *conn, struct sk_buff *skb)
 	}
 
 	if (smp->method == REQ_OOB) {
-		if (!hcon->out)
+		if (!test_bit(SMP_FLAG_INITIATOR, &smp->flags))
 			smp_send_cmd(conn, SMP_CMD_PAIRING_RANDOM,
 				     sizeof(smp->prnd), smp->prnd);
 		SMP_ALLOW_CMD(smp, SMP_CMD_DHKEY_CHECK);
@@ -2167,11 +2143,10 @@ static u8 smp_cmd_pairing_random(struct l2cap_conn *conn, struct sk_buff *skb)
 	if (smp->method == REQ_PASSKEY || smp->method == DSP_PASSKEY)
 		return sc_passkey_round(smp, SMP_CMD_PAIRING_RANDOM);
 
-	if (hcon->out) {
+	if (test_bit(SMP_FLAG_INITIATOR, &smp->flags)) {
 		u8 cfm[16];
 
-		err = smp_f4(smp->tfm_cmac, smp->remote_pk, smp->local_pk,
-			     smp->rrnd, 0, cfm);
+		err = smp_f4(smp->remote_pk, smp->local_pk, smp->rrnd, 0, cfm);
 		if (err)
 			return SMP_UNSPECIFIED;
 
@@ -2181,24 +2156,6 @@ static u8 smp_cmd_pairing_random(struct l2cap_conn *conn, struct sk_buff *skb)
 		smp_send_cmd(conn, SMP_CMD_PAIRING_RANDOM, sizeof(smp->prnd),
 			     smp->prnd);
 		SMP_ALLOW_CMD(smp, SMP_CMD_DHKEY_CHECK);
-
-		/* Only Just-Works pairing requires extra checks */
-		if (smp->method != JUST_WORKS)
-			goto mackey_and_ltk;
-
-		/* If there already exists long term key in local host, leave
-		 * the decision to user space since the remote device could
-		 * be legitimate or malicious.
-		 */
-		if (hci_find_ltk(hcon->hdev, &hcon->dst, hcon->dst_type,
-				 hcon->role)) {
-			/* Set passkey to 0. The value can be any number since
-			 * it'll be ignored anyway.
-			 */
-			passkey = 0;
-			confirm_hint = 1;
-			goto confirm;
-		}
 	}
 
 mackey_and_ltk:
@@ -2208,22 +2165,23 @@ mackey_and_ltk:
 		return SMP_UNSPECIFIED;
 
 	if (smp->method == REQ_OOB) {
-		if (hcon->out) {
+		if (test_bit(SMP_FLAG_INITIATOR, &smp->flags)) {
 			sc_dhkey_check(smp);
 			SMP_ALLOW_CMD(smp, SMP_CMD_DHKEY_CHECK);
 		}
 		return 0;
 	}
 
-	err = smp_g2(smp->tfm_cmac, pkax, pkbx, na, nb, &passkey);
+	err = smp_g2(pkax, pkbx, na, nb, &passkey);
 	if (err)
 		return SMP_UNSPECIFIED;
 
-	confirm_hint = 0;
-
-confirm:
-	if (smp->method == JUST_WORKS)
-		confirm_hint = 1;
+	/* Always require user confirmation for Just-Works pairing to prevent
+	 * impersonation attacks, or in case of a legitimate device that is
+	 * repairing use the confirmation as acknowledgment to proceed with the
+	 * creation of new keys.
+	 */
+	confirm_hint = smp->method == JUST_WORKS ? 1 : 0;
 
 	err = mgmt_user_confirm_request(hcon->hdev, &hcon->dst, hcon->type,
 					hcon->dst_type, passkey, confirm_hint);
@@ -2282,10 +2240,27 @@ bool smp_sufficient_security(struct hci_conn *hcon, u8 sec_level,
 	return false;
 }
 
+static void smp_send_pairing_req(struct smp_chan *smp, __u8 auth)
+{
+	struct smp_cmd_pairing cp;
+
+	if (smp->conn->hcon->type == ACL_LINK)
+		build_bredr_pairing_cmd(smp, &cp, NULL);
+	else
+		build_pairing_cmd(smp->conn, &cp, NULL, auth);
+
+	smp->preq[0] = SMP_CMD_PAIRING_REQ;
+	memcpy(&smp->preq[1], &cp, sizeof(cp));
+
+	smp_send_cmd(smp->conn, SMP_CMD_PAIRING_REQ, sizeof(cp), &cp);
+	SMP_ALLOW_CMD(smp, SMP_CMD_PAIRING_RSP);
+
+	set_bit(SMP_FLAG_INITIATOR, &smp->flags);
+}
+
 static u8 smp_cmd_security_req(struct l2cap_conn *conn, struct sk_buff *skb)
 {
 	struct smp_cmd_security_req *rp = (void *) skb->data;
-	struct smp_cmd_pairing cp;
 	struct hci_conn *hcon = conn->hcon;
 	struct hci_dev *hdev = hcon->hdev;
 	struct smp_chan *smp;
@@ -2334,16 +2309,20 @@ static u8 smp_cmd_security_req(struct l2cap_conn *conn, struct sk_buff *skb)
 
 	skb_pull(skb, sizeof(*rp));
 
-	memset(&cp, 0, sizeof(cp));
-	build_pairing_cmd(conn, &cp, NULL, auth);
-
-	smp->preq[0] = SMP_CMD_PAIRING_REQ;
-	memcpy(&smp->preq[1], &cp, sizeof(cp));
-
-	smp_send_cmd(conn, SMP_CMD_PAIRING_REQ, sizeof(cp), &cp);
-	SMP_ALLOW_CMD(smp, SMP_CMD_PAIRING_RSP);
+	smp_send_pairing_req(smp, auth);
 
 	return 0;
+}
+
+static void smp_send_security_req(struct smp_chan *smp, __u8 auth)
+{
+	struct smp_cmd_security_req cp;
+
+	cp.auth_req = auth;
+	smp_send_cmd(smp->conn, SMP_CMD_SECURITY_REQ, sizeof(cp), &cp);
+	SMP_ALLOW_CMD(smp, SMP_CMD_PAIRING_REQ);
+
+	clear_bit(SMP_FLAG_INITIATOR, &smp->flags);
 }
 
 int smp_conn_security(struct hci_conn *hcon, __u8 sec_level)
@@ -2414,23 +2393,11 @@ int smp_conn_security(struct hci_conn *hcon, __u8 sec_level)
 			authreq |= SMP_AUTH_MITM;
 	}
 
-	if (hcon->role == HCI_ROLE_MASTER) {
-		struct smp_cmd_pairing cp;
+	if (hcon->role == HCI_ROLE_MASTER)
+		smp_send_pairing_req(smp, authreq);
+	else
+		smp_send_security_req(smp, authreq);
 
-		build_pairing_cmd(conn, &cp, NULL, authreq);
-		smp->preq[0] = SMP_CMD_PAIRING_REQ;
-		memcpy(&smp->preq[1], &cp, sizeof(cp));
-
-		smp_send_cmd(conn, SMP_CMD_PAIRING_REQ, sizeof(cp), &cp);
-		SMP_ALLOW_CMD(smp, SMP_CMD_PAIRING_RSP);
-	} else {
-		struct smp_cmd_security_req cp;
-		cp.auth_req = authreq;
-		smp_send_cmd(conn, SMP_CMD_SECURITY_REQ, sizeof(cp), &cp);
-		SMP_ALLOW_CMD(smp, SMP_CMD_PAIRING_REQ);
-	}
-
-	set_bit(SMP_FLAG_INITIATOR, &smp->flags);
 	ret = 0;
 
 unlock:
@@ -2665,7 +2632,7 @@ static int smp_cmd_sign_info(struct l2cap_conn *conn, struct sk_buff *skb)
 
 	skb_pull(skb, sizeof(*rp));
 
-	csrk = kzalloc(sizeof(*csrk), GFP_KERNEL);
+	csrk = kzalloc_obj(*csrk);
 	if (csrk) {
 		if (conn->hcon->sec_level > BT_SECURITY_MEDIUM)
 			csrk->type = MGMT_CSRK_REMOTE_AUTHENTICATED;
@@ -2681,8 +2648,6 @@ static int smp_cmd_sign_info(struct l2cap_conn *conn, struct sk_buff *skb)
 
 static u8 sc_select_method(struct smp_chan *smp)
 {
-	struct l2cap_conn *conn = smp->conn;
-	struct hci_conn *hcon = conn->hcon;
 	struct smp_cmd_pairing *local, *remote;
 	u8 local_mitm, remote_mitm, local_io, remote_io, method;
 
@@ -2695,7 +2660,7 @@ static u8 sc_select_method(struct smp_chan *smp)
 	 * the "struct smp_cmd_pairing" from them we need to skip the
 	 * first byte which contains the opcode.
 	 */
-	if (hcon->out) {
+	if (test_bit(SMP_FLAG_INITIATOR, &smp->flags)) {
 		local = (void *) &smp->preq[1];
 		remote = (void *) &smp->prsp[1];
 	} else {
@@ -2746,14 +2711,14 @@ static int smp_cmd_public_key(struct l2cap_conn *conn, struct sk_buff *skb)
 	if (!test_bit(SMP_FLAG_DEBUG_KEY, &smp->flags) &&
 	    !crypto_memneq(key, smp->local_pk, 64)) {
 		bt_dev_err(hdev, "Remote and local public keys are identical");
-		return SMP_UNSPECIFIED;
+		return SMP_DHKEY_CHECK_FAILED;
 	}
 
 	memcpy(smp->remote_pk, key, 64);
 
 	if (test_bit(SMP_FLAG_REMOTE_OOB, &smp->flags)) {
-		err = smp_f4(smp->tfm_cmac, smp->remote_pk, smp->remote_pk,
-			     smp->rr, 0, cfm.confirm_val);
+		err = smp_f4(smp->remote_pk, smp->remote_pk, smp->rr, 0,
+			     cfm.confirm_val);
 		if (err)
 			return SMP_UNSPECIFIED;
 
@@ -2764,7 +2729,7 @@ static int smp_cmd_public_key(struct l2cap_conn *conn, struct sk_buff *skb)
 	/* Non-initiating device sends its public key after receiving
 	 * the key from the initiating device.
 	 */
-	if (!hcon->out) {
+	if (!test_bit(SMP_FLAG_INITIATOR, &smp->flags)) {
 		err = sc_send_public_key(smp);
 		if (err)
 			return err;
@@ -2826,7 +2791,7 @@ static int smp_cmd_public_key(struct l2cap_conn *conn, struct sk_buff *skb)
 	}
 
 	if (smp->method == REQ_OOB) {
-		if (hcon->out)
+		if (test_bit(SMP_FLAG_INITIATOR, &smp->flags))
 			smp_send_cmd(conn, SMP_CMD_PAIRING_RANDOM,
 				     sizeof(smp->prnd), smp->prnd);
 
@@ -2835,7 +2800,7 @@ static int smp_cmd_public_key(struct l2cap_conn *conn, struct sk_buff *skb)
 		return 0;
 	}
 
-	if (hcon->out)
+	if (test_bit(SMP_FLAG_INITIATOR, &smp->flags))
 		SMP_ALLOW_CMD(smp, SMP_CMD_PAIRING_CONFIRM);
 
 	if (smp->method == REQ_PASSKEY) {
@@ -2850,11 +2815,11 @@ static int smp_cmd_public_key(struct l2cap_conn *conn, struct sk_buff *skb)
 	/* The Initiating device waits for the non-initiating device to
 	 * send the confirm value.
 	 */
-	if (conn->hcon->out)
+	if (test_bit(SMP_FLAG_INITIATOR, &smp->flags))
 		return 0;
 
-	err = smp_f4(smp->tfm_cmac, smp->local_pk, smp->remote_pk, smp->prnd,
-		     0, cfm.confirm_val);
+	err = smp_f4(smp->local_pk, smp->remote_pk, smp->prnd, 0,
+		     cfm.confirm_val);
 	if (err)
 		return SMP_UNSPECIFIED;
 
@@ -2884,7 +2849,7 @@ static int smp_cmd_dhkey_check(struct l2cap_conn *conn, struct sk_buff *skb)
 	a[6] = hcon->init_addr_type;
 	b[6] = hcon->resp_addr_type;
 
-	if (hcon->out) {
+	if (test_bit(SMP_FLAG_INITIATOR, &smp->flags)) {
 		local_addr = a;
 		remote_addr = b;
 		memcpy(io_cap, &smp->prsp[1], 3);
@@ -2901,15 +2866,15 @@ static int smp_cmd_dhkey_check(struct l2cap_conn *conn, struct sk_buff *skb)
 	else if (smp->method == REQ_OOB)
 		memcpy(r, smp->lr, 16);
 
-	err = smp_f6(smp->tfm_cmac, smp->mackey, smp->rrnd, smp->prnd, r,
-		     io_cap, remote_addr, local_addr, e);
+	err = smp_f6(smp->mackey, smp->rrnd, smp->prnd, r, io_cap, remote_addr,
+		     local_addr, e);
 	if (err)
 		return SMP_UNSPECIFIED;
 
 	if (crypto_memneq(check->e, e, 16))
 		return SMP_DHKEY_CHECK_FAILED;
 
-	if (!hcon->out) {
+	if (!test_bit(SMP_FLAG_INITIATOR, &smp->flags)) {
 		if (test_bit(SMP_FLAG_WAIT_USER, &smp->flags)) {
 			set_bit(SMP_FLAG_DHKEY_PENDING, &smp->flags);
 			return 0;
@@ -2921,7 +2886,7 @@ static int smp_cmd_dhkey_check(struct l2cap_conn *conn, struct sk_buff *skb)
 
 	sc_add_ltk(smp);
 
-	if (hcon->out) {
+	if (test_bit(SMP_FLAG_INITIATOR, &smp->flags)) {
 		hci_le_start_enc(hcon, 0, 0, smp->tk, smp->enc_key_size);
 		hcon->enc_key_size = smp->enc_key_size;
 	}
@@ -2963,8 +2928,25 @@ static int smp_sig_channel(struct l2cap_chan *chan, struct sk_buff *skb)
 	if (code > SMP_CMD_MAX)
 		goto drop;
 
-	if (smp && !test_and_clear_bit(code, &smp->allow_cmd))
+	if (smp && !test_and_clear_bit(code, &smp->allow_cmd)) {
+		/* If there is a context and the command is not allowed consider
+		 * it a failure so the session is cleanup properly.
+		 */
+		switch (code) {
+		case SMP_CMD_IDENT_INFO:
+		case SMP_CMD_IDENT_ADDR_INFO:
+		case SMP_CMD_SIGN_INFO:
+			/* 3.6.1. Key distribution and generation
+			 *
+			 * A device may reject a distributed key by sending the
+			 * Pairing Failed command with the reason set to
+			 * "Key Rejected".
+			 */
+			smp_failure(conn, SMP_KEY_REJECTED);
+			break;
+		}
 		goto drop;
+	}
 
 	/* If we don't have a context the only allowed commands are
 	 * pairing request and security request.
@@ -3070,7 +3052,6 @@ static void bredr_pairing(struct l2cap_chan *chan)
 	struct l2cap_conn *conn = chan->conn;
 	struct hci_conn *hcon = conn->hcon;
 	struct hci_dev *hdev = hcon->hdev;
-	struct smp_cmd_pairing req;
 	struct smp_chan *smp;
 
 	bt_dev_dbg(hdev, "chan %p", chan);
@@ -3122,14 +3103,7 @@ static void bredr_pairing(struct l2cap_chan *chan)
 
 	bt_dev_dbg(hdev, "starting SMP over BR/EDR");
 
-	/* Prepare and send the BR/EDR SMP Pairing Request */
-	build_bredr_pairing_cmd(smp, &req, NULL);
-
-	smp->preq[0] = SMP_CMD_PAIRING_REQ;
-	memcpy(&smp->preq[1], &req, sizeof(req));
-
-	smp_send_cmd(conn, SMP_CMD_PAIRING_REQ, sizeof(req), &req);
-	SMP_ALLOW_CMD(smp, SMP_CMD_PAIRING_RSP);
+	smp_send_pairing_req(smp, 0x00);
 }
 
 static void smp_resume_cb(struct l2cap_chan *chan)
@@ -3166,7 +3140,7 @@ static void smp_ready_cb(struct l2cap_chan *chan)
 	/* No need to call l2cap_chan_hold() here since we already own
 	 * the reference taken in smp_new_conn_cb(). This is just the
 	 * first time that we tie it to a specific pointer. The code in
-	 * l2cap_core.c ensures that there's no risk this function wont
+	 * l2cap_core.c ensures that there's no risk this function won't
 	 * get called if smp_new_conn_cb was previously called.
 	 */
 	conn->smp = chan;
@@ -3227,34 +3201,19 @@ static const struct l2cap_ops smp_chan_ops = {
 	.get_sndtimeo		= l2cap_chan_no_get_sndtimeo,
 };
 
-static inline struct l2cap_chan *smp_new_conn_cb(struct l2cap_chan *pchan)
+static inline int smp_new_conn_cb(struct l2cap_chan *chan,
+				  struct l2cap_chan *new_chan)
 {
-	struct l2cap_chan *chan;
-
-	BT_DBG("pchan %p", pchan);
-
-	chan = l2cap_chan_create();
-	if (!chan)
-		return NULL;
-
-	chan->chan_type	= pchan->chan_type;
-	chan->ops	= &smp_chan_ops;
-	chan->scid	= pchan->scid;
-	chan->dcid	= chan->scid;
-	chan->imtu	= pchan->imtu;
-	chan->omtu	= pchan->omtu;
-	chan->mode	= pchan->mode;
+	new_chan->ops = &smp_chan_ops;
 
 	/* Other L2CAP channels may request SMP routines in order to
 	 * change the security level. This means that the SMP channel
 	 * lock must be considered in its own category to avoid lockdep
 	 * warnings.
 	 */
-	atomic_set(&chan->nesting, L2CAP_NESTING_SMP);
+	atomic_set(&new_chan->nesting, L2CAP_NESTING_SMP);
 
-	BT_DBG("created chan %p", chan);
-
-	return chan;
+	return 0;
 }
 
 static const struct l2cap_ops smp_root_chan_ops = {
@@ -3279,7 +3238,6 @@ static struct l2cap_chan *smp_add_cid(struct hci_dev *hdev, u16 cid)
 {
 	struct l2cap_chan *chan;
 	struct smp_dev *smp;
-	struct crypto_shash *tfm_cmac;
 	struct crypto_kpp *tfm_ecdh;
 
 	if (cid == L2CAP_CID_SMP_BREDR) {
@@ -3287,34 +3245,24 @@ static struct l2cap_chan *smp_add_cid(struct hci_dev *hdev, u16 cid)
 		goto create_chan;
 	}
 
-	smp = kzalloc(sizeof(*smp), GFP_KERNEL);
+	smp = kzalloc_obj(*smp);
 	if (!smp)
 		return ERR_PTR(-ENOMEM);
-
-	tfm_cmac = crypto_alloc_shash("cmac(aes)", 0, 0);
-	if (IS_ERR(tfm_cmac)) {
-		bt_dev_err(hdev, "Unable to create CMAC crypto context");
-		kfree_sensitive(smp);
-		return ERR_CAST(tfm_cmac);
-	}
 
 	tfm_ecdh = crypto_alloc_kpp("ecdh-nist-p256", 0, 0);
 	if (IS_ERR(tfm_ecdh)) {
 		bt_dev_err(hdev, "Unable to create ECDH crypto context");
-		crypto_free_shash(tfm_cmac);
 		kfree_sensitive(smp);
 		return ERR_CAST(tfm_ecdh);
 	}
 
 	smp->local_oob = false;
-	smp->tfm_cmac = tfm_cmac;
 	smp->tfm_ecdh = tfm_ecdh;
 
 create_chan:
 	chan = l2cap_chan_create();
 	if (!chan) {
 		if (smp) {
-			crypto_free_shash(smp->tfm_cmac);
 			crypto_free_kpp(smp->tfm_ecdh);
 			kfree_sensitive(smp);
 		}
@@ -3325,7 +3273,7 @@ create_chan:
 
 	l2cap_add_scid(chan, cid);
 
-	l2cap_chan_set_defaults(chan);
+	l2cap_chan_set_defaults(chan, NULL);
 
 	if (cid == L2CAP_CID_SMP) {
 		u8 bdaddr_type;
@@ -3361,7 +3309,6 @@ static void smp_del_chan(struct l2cap_chan *chan)
 	smp = chan->data;
 	if (smp) {
 		chan->data = NULL;
-		crypto_free_shash(smp->tfm_cmac);
 		crypto_free_kpp(smp->tfm_ecdh);
 		kfree_sensitive(smp);
 	}
@@ -3558,7 +3505,7 @@ static int __init test_s1(void)
 	return 0;
 }
 
-static int __init test_f4(struct crypto_shash *tfm_cmac)
+static int __init test_f4(void)
 {
 	const u8 u[32] = {
 			0xe6, 0x9d, 0x35, 0x0e, 0x48, 0x01, 0x03, 0xcc,
@@ -3580,7 +3527,7 @@ static int __init test_f4(struct crypto_shash *tfm_cmac)
 	u8 res[16];
 	int err;
 
-	err = smp_f4(tfm_cmac, u, v, x, z, res);
+	err = smp_f4(u, v, x, z, res);
 	if (err)
 		return err;
 
@@ -3590,7 +3537,7 @@ static int __init test_f4(struct crypto_shash *tfm_cmac)
 	return 0;
 }
 
-static int __init test_f5(struct crypto_shash *tfm_cmac)
+static int __init test_f5(void)
 {
 	const u8 w[32] = {
 			0x98, 0xa6, 0xbf, 0x73, 0xf3, 0x34, 0x8d, 0x86,
@@ -3614,7 +3561,7 @@ static int __init test_f5(struct crypto_shash *tfm_cmac)
 	u8 mackey[16], ltk[16];
 	int err;
 
-	err = smp_f5(tfm_cmac, w, n1, n2, a1, a2, mackey, ltk);
+	err = smp_f5(w, n1, n2, a1, a2, mackey, ltk);
 	if (err)
 		return err;
 
@@ -3627,7 +3574,7 @@ static int __init test_f5(struct crypto_shash *tfm_cmac)
 	return 0;
 }
 
-static int __init test_f6(struct crypto_shash *tfm_cmac)
+static int __init test_f6(void)
 {
 	const u8 w[16] = {
 			0x20, 0x6e, 0x63, 0xce, 0x20, 0x6a, 0x3f, 0xfd,
@@ -3650,7 +3597,7 @@ static int __init test_f6(struct crypto_shash *tfm_cmac)
 	u8 res[16];
 	int err;
 
-	err = smp_f6(tfm_cmac, w, n1, n2, r, io_cap, a1, a2, res);
+	err = smp_f6(w, n1, n2, r, io_cap, a1, a2, res);
 	if (err)
 		return err;
 
@@ -3660,7 +3607,7 @@ static int __init test_f6(struct crypto_shash *tfm_cmac)
 	return 0;
 }
 
-static int __init test_g2(struct crypto_shash *tfm_cmac)
+static int __init test_g2(void)
 {
 	const u8 u[32] = {
 			0xe6, 0x9d, 0x35, 0x0e, 0x48, 0x01, 0x03, 0xcc,
@@ -3682,7 +3629,7 @@ static int __init test_g2(struct crypto_shash *tfm_cmac)
 	u32 val;
 	int err;
 
-	err = smp_g2(tfm_cmac, u, v, x, y, &val);
+	err = smp_g2(u, v, x, y, &val);
 	if (err)
 		return err;
 
@@ -3692,7 +3639,7 @@ static int __init test_g2(struct crypto_shash *tfm_cmac)
 	return 0;
 }
 
-static int __init test_h6(struct crypto_shash *tfm_cmac)
+static int __init test_h6(void)
 {
 	const u8 w[16] = {
 			0x9b, 0x7d, 0x39, 0x0a, 0xa6, 0x10, 0x10, 0x34,
@@ -3704,7 +3651,7 @@ static int __init test_h6(struct crypto_shash *tfm_cmac)
 	u8 res[16];
 	int err;
 
-	err = smp_h6(tfm_cmac, w, key_id, res);
+	err = smp_h6(w, key_id, res);
 	if (err)
 		return err;
 
@@ -3729,8 +3676,7 @@ static const struct file_operations test_smp_fops = {
 	.llseek		= default_llseek,
 };
 
-static int __init run_selftests(struct crypto_shash *tfm_cmac,
-				struct crypto_kpp *tfm_ecdh)
+static int __init run_selftests(struct crypto_kpp *tfm_ecdh)
 {
 	ktime_t calltime, delta, rettime;
 	unsigned long long duration;
@@ -3762,31 +3708,31 @@ static int __init run_selftests(struct crypto_shash *tfm_cmac,
 		goto done;
 	}
 
-	err = test_f4(tfm_cmac);
+	err = test_f4();
 	if (err) {
 		BT_ERR("smp_f4 test failed");
 		goto done;
 	}
 
-	err = test_f5(tfm_cmac);
+	err = test_f5();
 	if (err) {
 		BT_ERR("smp_f5 test failed");
 		goto done;
 	}
 
-	err = test_f6(tfm_cmac);
+	err = test_f6();
 	if (err) {
 		BT_ERR("smp_f6 test failed");
 		goto done;
 	}
 
-	err = test_g2(tfm_cmac);
+	err = test_g2();
 	if (err) {
 		BT_ERR("smp_g2 test failed");
 		goto done;
 	}
 
-	err = test_h6(tfm_cmac);
+	err = test_h6();
 	if (err) {
 		BT_ERR("smp_h6 test failed");
 		goto done;
@@ -3813,26 +3759,17 @@ done:
 
 int __init bt_selftest_smp(void)
 {
-	struct crypto_shash *tfm_cmac;
 	struct crypto_kpp *tfm_ecdh;
 	int err;
-
-	tfm_cmac = crypto_alloc_shash("cmac(aes)", 0, 0);
-	if (IS_ERR(tfm_cmac)) {
-		BT_ERR("Unable to create CMAC crypto context");
-		return PTR_ERR(tfm_cmac);
-	}
 
 	tfm_ecdh = crypto_alloc_kpp("ecdh-nist-p256", 0, 0);
 	if (IS_ERR(tfm_ecdh)) {
 		BT_ERR("Unable to create ECDH crypto context");
-		crypto_free_shash(tfm_cmac);
 		return PTR_ERR(tfm_ecdh);
 	}
 
-	err = run_selftests(tfm_cmac, tfm_ecdh);
+	err = run_selftests(tfm_ecdh);
 
-	crypto_free_shash(tfm_cmac);
 	crypto_free_kpp(tfm_ecdh);
 
 	return err;

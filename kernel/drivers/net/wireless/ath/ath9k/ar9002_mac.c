@@ -21,7 +21,7 @@
 
 static void ar9002_hw_rx_enable(struct ath_hw *ah)
 {
-	REG_WRITE(ah, AR_CR, AR_CR_RXE);
+	REG_WRITE(ah, AR_CR, AR_CR_RXE(ah));
 }
 
 static void ar9002_hw_set_desc_link(void *ds, u32 ds_link)
@@ -40,14 +40,14 @@ static bool ar9002_hw_get_isr(struct ath_hw *ah, enum ath9k_int *masked,
 	struct ath_common *common = ath9k_hw_common(ah);
 
 	if (!AR_SREV_9100(ah)) {
-		if (REG_READ(ah, AR_INTR_ASYNC_CAUSE) & AR_INTR_MAC_IRQ) {
-			if ((REG_READ(ah, AR_RTC_STATUS) & AR_RTC_STATUS_M)
+		if (REG_READ(ah, AR_INTR_ASYNC_CAUSE(ah)) & AR_INTR_MAC_IRQ) {
+			if ((REG_READ(ah, AR_RTC_STATUS(ah)) & AR_RTC_STATUS_M(ah))
 			    == AR_RTC_STATUS_ON) {
 				isr = REG_READ(ah, AR_ISR);
 			}
 		}
 
-		sync_cause = REG_READ(ah, AR_INTR_SYNC_CAUSE) &
+		sync_cause = REG_READ(ah, AR_INTR_SYNC_CAUSE(ah)) &
 			AR_INTR_SYNC_DEFAULT;
 
 		*masked = 0;
@@ -138,7 +138,7 @@ static bool ar9002_hw_get_isr(struct ath_hw *ah, enum ath9k_int *masked,
 		u32 s5_s;
 
 		if (pCap->hw_caps & ATH9K_HW_CAP_RAC_SUPPORTED) {
-			s5_s = REG_READ(ah, AR_ISR_S5_S);
+			s5_s = REG_READ(ah, AR_ISR_S5_S(ah));
 		} else {
 			s5_s = REG_READ(ah, AR_ISR_S5);
 		}
@@ -201,8 +201,8 @@ static bool ar9002_hw_get_isr(struct ath_hw *ah, enum ath9k_int *masked,
 				"AR_INTR_SYNC_LOCAL_TIMEOUT\n");
 		}
 
-		REG_WRITE(ah, AR_INTR_SYNC_CAUSE_CLR, sync_cause);
-		(void) REG_READ(ah, AR_INTR_SYNC_CAUSE_CLR);
+		REG_WRITE(ah, AR_INTR_SYNC_CAUSE_CLR(ah), sync_cause);
+		(void) REG_READ(ah, AR_INTR_SYNC_CAUSE_CLR(ah));
 	}
 
 	return true;
@@ -403,6 +403,19 @@ static int ar9002_hw_get_duration(struct ath_hw *ah, const void *ds, int index)
 	}
 }
 
+static void ath9k_hw_clear_rxdesc_status(struct ar5416_desc *ads)
+{
+	WRITE_ONCE(ads->u.rx.status0, 0);
+	WRITE_ONCE(ads->u.rx.status1, 0);
+	WRITE_ONCE(ads->u.rx.status2, 0);
+	WRITE_ONCE(ads->u.rx.status3, 0);
+	WRITE_ONCE(ads->u.rx.status4, 0);
+	WRITE_ONCE(ads->u.rx.status5, 0);
+	WRITE_ONCE(ads->u.rx.status6, 0);
+	WRITE_ONCE(ads->u.rx.status7, 0);
+	WRITE_ONCE(ads->u.rx.status8, 0);
+}
+
 void ath9k_hw_setuprxdesc(struct ath_hw *ah, struct ath_desc *ds,
 			  u32 size, u32 flags)
 {
@@ -412,7 +425,7 @@ void ath9k_hw_setuprxdesc(struct ath_hw *ah, struct ath_desc *ds,
 	if (flags & ATH9K_RXDESC_INTREQ)
 		ads->ds_ctl1 |= AR_RxIntrReq;
 
-	memset(&ads->u.rx, 0, sizeof(ads->u.rx));
+	ath9k_hw_clear_rxdesc_status(ads);
 }
 EXPORT_SYMBOL(ath9k_hw_setuprxdesc);
 

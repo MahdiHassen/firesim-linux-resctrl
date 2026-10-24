@@ -517,14 +517,15 @@ static int max77686_pmic_probe(struct platform_device *pdev)
 }
 
 static const struct platform_device_id max77686_pmic_id[] = {
-	{"max77686-pmic", 0},
-	{ },
+	{ .name = "max77686-pmic" },
+	{ }
 };
 MODULE_DEVICE_TABLE(platform, max77686_pmic_id);
 
 static struct platform_driver max77686_pmic_driver = {
 	.driver = {
 		.name = "max77686-pmic",
+		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
 	},
 	.probe = max77686_pmic_probe,
 	.id_table = max77686_pmic_id,

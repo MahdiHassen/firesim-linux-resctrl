@@ -9,13 +9,19 @@
 #define __LINUX_MIPI_DBI_H
 
 #include <linux/mutex.h>
-#include <drm/drm_device.h>
-#include <drm/drm_simple_kms_helper.h>
 
+#include <drm/drm_atomic_state_helper.h>
+#include <drm/drm_device.h>
+#include <drm/drm_gem_atomic_helper.h>
+#include <drm/drm_gem_framebuffer_helper.h>
+#include <drm/drm_probe_helper.h>
+
+struct drm_format_conv_state;
 struct drm_rect;
-struct spi_device;
 struct gpio_desc;
+struct iosys_map;
 struct regulator;
+struct spi_device;
 
 /**
  * struct mipi_dbi - MIPI DBI interface
@@ -55,6 +61,11 @@ struct mipi_dbi {
 	struct spi_device *spi;
 
 	/**
+	 * @write_memory_bpw: Bits per word used on a MIPI_DCS_WRITE_MEMORY_START transfer
+	 */
+	unsigned int write_memory_bpw;
+
+	/**
 	 * @dc: Optional D/C gpio.
 	 */
 	struct gpio_desc *dc;
@@ -80,19 +91,14 @@ struct mipi_dbi_dev {
 	struct drm_device drm;
 
 	/**
-	 * @pipe: Display pipe structure
-	 */
-	struct drm_simple_display_pipe pipe;
-
-	/**
-	 * @connector: Connector
-	 */
-	struct drm_connector connector;
-
-	/**
 	 * @mode: Fixed display mode
 	 */
 	struct drm_display_mode mode;
+
+	/**
+	 * @pixel_format: Native pixel format (DRM_FORMAT\_\*)
+	 */
+	u32 pixel_format;
 
 	/**
 	 * @tx_buf: Buffer used for transfer (copy clip rect area)
@@ -122,9 +128,14 @@ struct mipi_dbi_dev {
 	struct backlight_device *backlight;
 
 	/**
-	 * @regulator: power regulator (optional)
+	 * @regulator: power regulator (Vdd) (optional)
 	 */
 	struct regulator *regulator;
+
+	/**
+	 * @io_regulator: I/O power regulator (Vddi) (optional)
+	 */
+	struct regulator *io_regulator;
 
 	/**
 	 * @dbi: MIPI DBI interface
@@ -147,22 +158,10 @@ static inline struct mipi_dbi_dev *drm_to_mipi_dbi_dev(struct drm_device *drm)
 
 int mipi_dbi_spi_init(struct spi_device *spi, struct mipi_dbi *dbi,
 		      struct gpio_desc *dc);
-int mipi_dbi_dev_init_with_formats(struct mipi_dbi_dev *dbidev,
-				   const struct drm_simple_display_pipe_funcs *funcs,
-				   const uint32_t *formats, unsigned int format_count,
-				   const struct drm_display_mode *mode,
-				   unsigned int rotation, size_t tx_buf_size);
-int mipi_dbi_dev_init(struct mipi_dbi_dev *dbidev,
-		      const struct drm_simple_display_pipe_funcs *funcs,
-		      const struct drm_display_mode *mode, unsigned int rotation);
-enum drm_mode_status mipi_dbi_pipe_mode_valid(struct drm_simple_display_pipe *pipe,
-					      const struct drm_display_mode *mode);
-void mipi_dbi_pipe_update(struct drm_simple_display_pipe *pipe,
-			  struct drm_plane_state *old_state);
-void mipi_dbi_enable_flush(struct mipi_dbi_dev *dbidev,
-			   struct drm_crtc_state *crtc_state,
-			   struct drm_plane_state *plan_state);
-void mipi_dbi_pipe_disable(struct drm_simple_display_pipe *pipe);
+
+int drm_mipi_dbi_dev_init(struct mipi_dbi_dev *dbidev, const struct drm_display_mode *mode,
+			  u32 format, unsigned int rotation, size_t tx_buf_size);
+
 void mipi_dbi_hw_reset(struct mipi_dbi *dbi);
 bool mipi_dbi_display_is_on(struct mipi_dbi *dbi);
 int mipi_dbi_poweron_reset(struct mipi_dbi_dev *dbidev);
@@ -176,8 +175,10 @@ int mipi_dbi_command_read(struct mipi_dbi *dbi, u8 cmd, u8 *val);
 int mipi_dbi_command_buf(struct mipi_dbi *dbi, u8 cmd, u8 *data, size_t len);
 int mipi_dbi_command_stackbuf(struct mipi_dbi *dbi, u8 cmd, const u8 *data,
 			      size_t len);
-int mipi_dbi_buf_copy(void *dst, struct drm_framebuffer *fb,
-		      struct drm_rect *clip, bool swap);
+int mipi_dbi_buf_copy(void *dst, struct iosys_map *src, struct drm_framebuffer *fb,
+		      struct drm_rect *clip, bool swap,
+		      struct drm_format_conv_state *fmtcnv_state);
+
 /**
  * mipi_dbi_command - MIPI DCS command with optional parameter(s)
  * @dbi: MIPI DBI structure
@@ -200,6 +201,87 @@ int mipi_dbi_buf_copy(void *dst, struct drm_framebuffer *fb,
 		dev_err_ratelimited(dev, "error %d when sending command %#02x\n", ret, cmd); \
 	ret; \
 })
+
+/*
+ * Plane
+ */
+
+#define DRM_MIPI_DBI_PLANE_FORMATS \
+	DRM_FORMAT_RGB565, \
+	DRM_FORMAT_XRGB8888
+
+#define DRM_MIPI_DBI_PLANE_FORMAT_MODIFIERS \
+	DRM_FORMAT_MOD_LINEAR, \
+	DRM_FORMAT_MOD_INVALID
+
+#define DRM_MIPI_DBI_PLANE_FUNCS \
+	DRM_GEM_SHADOW_PLANE_FUNCS, \
+	.update_plane = drm_atomic_helper_update_plane, \
+	.disable_plane = drm_atomic_helper_disable_plane
+
+int drm_mipi_dbi_plane_helper_atomic_check(struct drm_plane *plane,
+					   struct drm_atomic_commit *state);
+void drm_mipi_dbi_plane_helper_atomic_update(struct drm_plane *plane,
+					     struct drm_atomic_commit *state);
+
+#define DRM_MIPI_DBI_PLANE_HELPER_FUNCS \
+	DRM_GEM_SHADOW_PLANE_HELPER_FUNCS, \
+	.atomic_check = drm_mipi_dbi_plane_helper_atomic_check, \
+	.atomic_update = drm_mipi_dbi_plane_helper_atomic_update
+
+/*
+ * CRTC
+ */
+
+#define DRM_MIPI_DBI_CRTC_FUNCS \
+	.reset = drm_atomic_helper_crtc_reset, \
+	.set_config = drm_atomic_helper_set_config, \
+	.page_flip = drm_atomic_helper_page_flip, \
+	.atomic_duplicate_state = drm_atomic_helper_crtc_duplicate_state, \
+	.atomic_destroy_state = drm_atomic_helper_crtc_destroy_state
+
+enum drm_mode_status drm_mipi_dbi_crtc_helper_mode_valid(struct drm_crtc *crtc,
+							 const struct drm_display_mode *mode);
+int drm_mipi_dbi_crtc_helper_atomic_check(struct drm_crtc *crtc,
+					  struct drm_atomic_commit *state);
+void drm_mipi_dbi_crtc_helper_atomic_disable(struct drm_crtc *crtc,
+					     struct drm_atomic_commit *state);
+
+#define DRM_MIPI_DBI_CRTC_HELPER_FUNCS \
+	.mode_valid = drm_mipi_dbi_crtc_helper_mode_valid, \
+	.atomic_check = drm_mipi_dbi_crtc_helper_atomic_check, \
+	.atomic_disable = drm_mipi_dbi_crtc_helper_atomic_disable
+
+/*
+ * Connector
+ */
+
+#define DRM_MIPI_DBI_CONNECTOR_FUNCS \
+	.reset = drm_atomic_helper_connector_reset, \
+	.fill_modes = drm_helper_probe_single_connector_modes, \
+	.atomic_duplicate_state = drm_atomic_helper_connector_duplicate_state, \
+	.atomic_destroy_state = drm_atomic_helper_connector_destroy_state
+
+int drm_mipi_dbi_connector_helper_get_modes(struct drm_connector *connector);
+
+#define DRM_MIPI_DBI_CONNECTOR_HELPER_FUNCS \
+	.get_modes = drm_mipi_dbi_connector_helper_get_modes
+
+/*
+ * Mode config
+ */
+
+#define DRM_MIPI_DBI_MODE_CONFIG_FUNCS \
+	.fb_create = drm_gem_fb_create_with_dirty, \
+	.atomic_check = drm_atomic_helper_check, \
+	.atomic_commit = drm_atomic_helper_commit
+
+#define DRM_MIPI_DBI_MODE_CONFIG_HELPER_FUNCS \
+	.atomic_commit_tail = drm_atomic_helper_commit_tail_rpm
+
+/*
+ * Debug FS
+ */
 
 #ifdef CONFIG_DEBUG_FS
 void mipi_dbi_debugfs_init(struct drm_minor *minor);

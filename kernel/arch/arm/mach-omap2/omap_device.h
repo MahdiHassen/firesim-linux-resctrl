@@ -25,9 +25,6 @@
 
 #include "omap_hwmod.h"
 
-extern struct dev_pm_domain omap_device_pm_domain;
-extern struct dev_pm_domain omap_device_fail_pm_domain;
-
 /* omap_device._state values */
 #define OMAP_DEVICE_STATE_UNKNOWN	0
 #define OMAP_DEVICE_STATE_ENABLED	1
@@ -40,11 +37,11 @@ extern struct dev_pm_domain omap_device_fail_pm_domain;
 /**
  * struct omap_device - omap_device wrapper for platform_devices
  * @pdev: platform_device
- * @hwmods: (one .. many per omap_device)
  * @hwmods_cnt: ARRAY_SIZE() of @hwmods
  * @_state: one of OMAP_DEVICE_STATE_* (see above)
  * @flags: device flags
  * @_driver_status: one of BUS_NOTIFY_*_DRIVER from <linux/device.h>
+ * @hwmods: (one .. many per omap_device)
  *
  * Integrates omap_hwmod data into Linux platform_device.
  *
@@ -54,28 +51,17 @@ extern struct dev_pm_domain omap_device_fail_pm_domain;
  */
 struct omap_device {
 	struct platform_device		*pdev;
-	struct omap_hwmod		**hwmods;
 	unsigned long			_driver_status;
 	u8				hwmods_cnt;
 	u8				_state;
 	u8                              flags;
+	struct omap_hwmod		*hwmods[] __counted_by(hwmods_cnt);
 };
 
 /* Device driver interface (call via platform_data fn ptrs) */
 
 int omap_device_enable(struct platform_device *pdev);
 int omap_device_idle(struct platform_device *pdev);
-
-/* Core code interface */
-
-struct omap_device *omap_device_alloc(struct platform_device *pdev,
-				      struct omap_hwmod **ohs, int oh_cnt);
-void omap_device_delete(struct omap_device *od);
-
-struct device *omap_device_get_by_hwmod_name(const char *oh_name);
-
-/* OMAP PM interface */
-int omap_device_get_context_loss_count(struct platform_device *pdev);
 
 /* Other */
 

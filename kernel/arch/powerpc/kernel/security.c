@@ -11,10 +11,11 @@
 #include <linux/nospec.h>
 #include <linux/prctl.h>
 #include <linux/seq_buf.h>
+#include <linux/sysfs.h>
 #include <linux/debugfs.h>
 
 #include <asm/asm-prototypes.h>
-#include <asm/code-patching.h>
+#include <asm/text-patching.h>
 #include <asm/security_features.h>
 #include <asm/sections.h>
 #include <asm/setup.h>
@@ -163,13 +164,13 @@ ssize_t cpu_show_meltdown(struct device *dev, struct device_attribute *attr, cha
 	}
 
 	if (thread_priv)
-		return sprintf(buf, "Vulnerable: L1D private per thread\n");
+		return sysfs_emit(buf, "Vulnerable: L1D private per thread\n");
 
 	if (!security_ftr_enabled(SEC_FTR_L1D_FLUSH_HV) &&
 	    !security_ftr_enabled(SEC_FTR_L1D_FLUSH_PR))
-		return sprintf(buf, "Not affected\n");
+		return sysfs_emit(buf, "Not affected\n");
 
-	return sprintf(buf, "Vulnerable\n");
+	return sysfs_emit(buf, "Vulnerable\n");
 }
 
 ssize_t cpu_show_l1tf(struct device *dev, struct device_attribute *attr, char *buf)
@@ -352,38 +353,39 @@ ssize_t cpu_show_spec_store_bypass(struct device *dev, struct device_attribute *
 		default:
 			type = "unknown";
 		}
-		return sprintf(buf, "Mitigation: Kernel entry/exit barrier (%s)\n", type);
+		return sysfs_emit(buf, "Mitigation: Kernel entry/exit barrier (%s)\n", type);
 	}
 
 	if (!security_ftr_enabled(SEC_FTR_L1D_FLUSH_HV) &&
 	    !security_ftr_enabled(SEC_FTR_L1D_FLUSH_PR))
-		return sprintf(buf, "Not affected\n");
+		return sysfs_emit(buf, "Not affected\n");
 
-	return sprintf(buf, "Vulnerable\n");
+	return sysfs_emit(buf, "Vulnerable\n");
 }
 
 static int ssb_prctl_get(struct task_struct *task)
 {
-	if (stf_enabled_flush_types == STF_BARRIER_NONE)
-		/*
-		 * We don't have an explicit signal from firmware that we're
-		 * vulnerable or not, we only have certain CPU revisions that
-		 * are known to be vulnerable.
-		 *
-		 * We assume that if we're on another CPU, where the barrier is
-		 * NONE, then we are not vulnerable.
-		 */
+	/*
+	 * The STF_BARRIER feature is on by default, so if it's off that means
+	 * firmware has explicitly said the CPU is not vulnerable via either
+	 * the hypercall or device tree.
+	 */
+	if (!security_ftr_enabled(SEC_FTR_STF_BARRIER))
 		return PR_SPEC_NOT_AFFECTED;
-	else
-		/*
-		 * If we do have a barrier type then we are vulnerable. The
-		 * barrier is not a global or per-process mitigation, so the
-		 * only value we can report here is PR_SPEC_ENABLE, which
-		 * appears as "vulnerable" in /proc.
-		 */
-		return PR_SPEC_ENABLE;
 
-	return -EINVAL;
+	/*
+	 * If the system's CPU has no known barrier (see setup_stf_barrier())
+	 * then assume that the CPU is not vulnerable.
+	 */
+	if (stf_enabled_flush_types == STF_BARRIER_NONE)
+		return PR_SPEC_NOT_AFFECTED;
+
+	/*
+	 * Otherwise the CPU is vulnerable. The barrier is not a global or
+	 * per-process mitigation, so the only value that can be reported here
+	 * is PR_SPEC_ENABLE, which appears as "vulnerable" in /proc.
+	 */
+	return PR_SPEC_ENABLE;
 }
 
 int arch_prctl_spec_ctrl_get(struct task_struct *task, unsigned long which)

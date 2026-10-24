@@ -24,6 +24,7 @@
 #include <linux/gfp.h>
 #include <linux/hugetlb.h>
 #include <linux/mmzone.h>
+#include <linux/execmem.h>
 
 #include <asm/asm-offsets.h>
 #include <asm/bootinfo.h>
@@ -35,48 +36,6 @@
 #include <asm/pgalloc.h>
 #include <asm/tlb.h>
 
-/*
- * We have up to 8 empty zeroed pages so we can map one of the right colour
- * when needed.	 Since page is never written to after the initialization we
- * don't have to care about aliases on other CPUs.
- */
-unsigned long empty_zero_page, zero_page_mask;
-EXPORT_SYMBOL_GPL(empty_zero_page);
-EXPORT_SYMBOL(zero_page_mask);
-
-void setup_zero_pages(void)
-{
-	unsigned int order, i;
-	struct page *page;
-
-	order = 0;
-
-	empty_zero_page = __get_free_pages(GFP_KERNEL | __GFP_ZERO, order);
-	if (!empty_zero_page)
-		panic("Oh boy, that early out of memory?");
-
-	page = virt_to_page((void *)empty_zero_page);
-	split_page(page, order);
-	for (i = 0; i < (1 << order); i++, page++)
-		mark_page_reserved(page);
-
-	zero_page_mask = ((PAGE_SIZE << order) - 1) & PAGE_MASK;
-}
-
-void copy_user_highpage(struct page *to, struct page *from,
-	unsigned long vaddr, struct vm_area_struct *vma)
-{
-	void *vfrom, *vto;
-
-	vto = kmap_atomic(to);
-	vfrom = kmap_atomic(from);
-	copy_page(vto, vfrom);
-	kunmap_atomic(vfrom);
-	kunmap_atomic(vto);
-	/* Make sure this page is cleared on other CPU's too before using it */
-	smp_wmb();
-}
-
 int __ref page_is_ram(unsigned long pfn)
 {
 	unsigned long addr = PFN_PHYS(pfn);
@@ -84,36 +43,65 @@ int __ref page_is_ram(unsigned long pfn)
 	return memblock_is_memory(addr) && !memblock_is_reserved(addr);
 }
 
-#ifndef CONFIG_NUMA
-void __init paging_init(void)
+void __init arch_zone_limits_init(unsigned long *max_zone_pfns)
 {
-	unsigned long max_zone_pfns[MAX_NR_ZONES];
-
-#ifdef CONFIG_ZONE_DMA
-	max_zone_pfns[ZONE_DMA] = MAX_DMA_PFN;
-#endif
 #ifdef CONFIG_ZONE_DMA32
 	max_zone_pfns[ZONE_DMA32] = MAX_DMA32_PFN;
 #endif
 	max_zone_pfns[ZONE_NORMAL] = max_low_pfn;
-
-	free_area_init(max_zone_pfns);
+#ifdef CONFIG_HIGHMEM
+	max_zone_pfns[ZONE_HIGHMEM] = max_pfn;
+#endif
 }
-
-void __init mem_init(void)
-{
-	max_mapnr = max_low_pfn;
-	high_memory = (void *) __va(max_low_pfn << PAGE_SHIFT);
-
-	memblock_free_all();
-	setup_zero_pages();	/* Setup zeroed pages.  */
-}
-#endif /* !CONFIG_NUMA */
 
 void __ref free_initmem(void)
 {
 	free_initmem_default(POISON_FREE_INITMEM);
 }
+
+#ifdef CONFIG_HIGHMEM
+
+void __init fixrange_init(unsigned long start, unsigned long end, pgd_t *pgd_base)
+{
+	pgd_t *pgd;
+	pud_t *pud;
+	pmd_t *pmd;
+	pte_t *pte;
+	int i, j, k;
+	int ptrs_per_pgd;
+	unsigned long vaddr;
+
+	vaddr = start;
+	i = pgd_index(vaddr);
+	j = pud_index(vaddr);
+	k = pmd_index(vaddr);
+	pgd = pgd_base + i;
+	ptrs_per_pgd = min((1 << (BITS_PER_LONG - PGDIR_SHIFT)), PTRS_PER_PGD);
+
+	for ( ; (i < ptrs_per_pgd) && (vaddr < end); pgd++, i++) {
+		pud = (pud_t *)pgd;
+		for ( ; (j < PTRS_PER_PUD) && (vaddr < end); pud++, j++) {
+			pmd = (pmd_t *)pud;
+			for (; (k < PTRS_PER_PMD) && (vaddr < end); pmd++, k++) {
+				if (pmd_none(*pmd)) {
+					pte = (pte_t *) memblock_alloc_low(PAGE_SIZE, PAGE_SIZE);
+					if (!pte)
+						panic("%s: Failed to allocate %lu bytes align=%lx\n",
+						      __func__, PAGE_SIZE, PAGE_SIZE);
+
+					kernel_pte_init(pte);
+					set_pmd(pmd, __pmd((unsigned long)pte));
+					BUG_ON(pte != pte_offset_kernel(pmd, 0));
+				}
+				vaddr += PMD_SIZE;
+			}
+			k = 0;
+		}
+		j = 0;
+	}
+}
+
+#endif
 
 #ifdef CONFIG_MEMORY_HOTPLUG
 int arch_add_memory(int nid, u64 start, u64 size, struct mhp_params *params)
@@ -131,25 +119,14 @@ int arch_add_memory(int nid, u64 start, u64 size, struct mhp_params *params)
 	return ret;
 }
 
-void arch_remove_memory(u64 start, u64 size, struct vmem_altmap *altmap)
+void arch_remove_memory(u64 start, u64 size, struct vmem_altmap *altmap,
+			struct dev_pagemap *pgmap)
 {
 	unsigned long start_pfn = start >> PAGE_SHIFT;
 	unsigned long nr_pages = size >> PAGE_SHIFT;
-	struct page *page = pfn_to_page(start_pfn);
 
-	/* With altmap the first mapped page is offset from @start */
-	if (altmap)
-		page += vmem_altmap_offset(altmap);
-	__remove_pages(start_pfn, nr_pages, altmap);
+	__remove_pages(start_pfn, nr_pages, altmap, pgmap);
 }
-
-#ifdef CONFIG_NUMA
-int memory_add_physaddr_to_nid(u64 start)
-{
-	return pa_to_nid(start);
-}
-EXPORT_SYMBOL_GPL(memory_add_physaddr_to_nid);
-#endif
 #endif
 
 #ifdef CONFIG_SPARSEMEM_VMEMMAP
@@ -161,17 +138,6 @@ void __meminit vmemmap_set_pmd(pmd_t *pmd, void *p, int node,
 	entry = pfn_pmd(virt_to_pfn(p), PAGE_KERNEL);
 	pmd_val(entry) |= _PAGE_HUGE | _PAGE_HGLOBAL;
 	set_pmd_at(&init_mm, addr, pmd, entry);
-}
-
-int __meminit vmemmap_check_pmd(pmd_t *pmd, int node,
-				unsigned long addr, unsigned long next)
-{
-	int huge = pmd_val(*pmd) & _PAGE_HUGE;
-
-	if (huge)
-		vmemmap_verify((pte_t *)pmd, node, addr, next);
-
-	return huge;
 }
 
 int __meminit vmemmap_populate(unsigned long start, unsigned long end,
@@ -191,43 +157,37 @@ void vmemmap_free(unsigned long start, unsigned long end, struct vmem_altmap *al
 #endif
 #endif
 
-static pte_t *fixmap_pte(unsigned long addr)
+pte_t * __init populate_kernel_pte(unsigned long addr)
 {
-	pgd_t *pgd;
-	p4d_t *p4d;
+	pgd_t *pgd = pgd_offset_k(addr);
+	p4d_t *p4d = p4d_offset(pgd, addr);
 	pud_t *pud;
 	pmd_t *pmd;
 
-	pgd = pgd_offset_k(addr);
-	p4d = p4d_offset(pgd, addr);
-
-	if (pgd_none(*pgd)) {
-		pud_t *new __maybe_unused;
-
-		new = memblock_alloc_low(PAGE_SIZE, PAGE_SIZE);
-		pgd_populate(&init_mm, pgd, new);
+	if (p4d_none(p4dp_get(p4d))) {
+		pud = memblock_alloc_or_panic(PAGE_SIZE, PAGE_SIZE);
+		p4d_populate(&init_mm, p4d, pud);
 #ifndef __PAGETABLE_PUD_FOLDED
-		pud_init(new);
+		pud_init(pud);
 #endif
 	}
 
 	pud = pud_offset(p4d, addr);
-	if (pud_none(*pud)) {
-		pmd_t *new __maybe_unused;
-
-		new = memblock_alloc_low(PAGE_SIZE, PAGE_SIZE);
-		pud_populate(&init_mm, pud, new);
+	if (pud_none(pudp_get(pud))) {
+		pmd = memblock_alloc_or_panic(PAGE_SIZE, PAGE_SIZE);
+		pud_populate(&init_mm, pud, pmd);
 #ifndef __PAGETABLE_PMD_FOLDED
-		pmd_init(new);
+		pmd_init(pmd);
 #endif
 	}
 
 	pmd = pmd_offset(pud, addr);
-	if (pmd_none(*pmd)) {
-		pte_t *new __maybe_unused;
+	if (!pmd_present(pmdp_get(pmd))) {
+		pte_t *pte;
 
-		new = memblock_alloc_low(PAGE_SIZE, PAGE_SIZE);
-		pmd_populate_kernel(&init_mm, pmd, new);
+		pte = memblock_alloc_or_panic(PAGE_SIZE, PAGE_SIZE);
+		pmd_populate_kernel(&init_mm, pmd, pte);
+		kernel_pte_init(pte);
 	}
 
 	return pte_offset_kernel(pmd, addr);
@@ -241,8 +201,8 @@ void __init __set_fixmap(enum fixed_addresses idx,
 
 	BUG_ON(idx <= FIX_HOLE || idx >= __end_of_fixed_addresses);
 
-	ptep = fixmap_pte(addr);
-	if (!pte_none(*ptep)) {
+	ptep = populate_kernel_pte(addr);
+	if (!pte_none(ptep_get(ptep))) {
 		pte_ERROR(*ptep);
 		return;
 	}
@@ -267,10 +227,31 @@ pgd_t swapper_pg_dir[_PTRS_PER_PGD] __section(".bss..swapper_pg_dir");
 pgd_t invalid_pg_dir[_PTRS_PER_PGD] __page_aligned_bss;
 #ifndef __PAGETABLE_PUD_FOLDED
 pud_t invalid_pud_table[PTRS_PER_PUD] __page_aligned_bss;
+EXPORT_SYMBOL(invalid_pud_table);
 #endif
 #ifndef __PAGETABLE_PMD_FOLDED
 pmd_t invalid_pmd_table[PTRS_PER_PMD] __page_aligned_bss;
-EXPORT_SYMBOL_GPL(invalid_pmd_table);
+EXPORT_SYMBOL(invalid_pmd_table);
 #endif
 pte_t invalid_pte_table[PTRS_PER_PTE] __page_aligned_bss;
 EXPORT_SYMBOL(invalid_pte_table);
+
+#if defined(CONFIG_EXECMEM) && defined(MODULES_VADDR)
+static struct execmem_info execmem_info __ro_after_init;
+
+struct execmem_info __init *execmem_arch_setup(void)
+{
+	execmem_info = (struct execmem_info){
+		.ranges = {
+			[EXECMEM_DEFAULT] = {
+				.start	= MODULES_VADDR,
+				.end	= MODULES_END,
+				.pgprot	= PAGE_KERNEL,
+				.alignment = 1,
+			},
+		},
+	};
+
+	return &execmem_info;
+}
+#endif /* CONFIG_EXECMEM && MODULES_VADDR */

@@ -27,36 +27,25 @@ bool efi_runtime_fixup_exception(struct pt_regs *regs, const char *msg)
 #endif
 
 int efi_create_mapping(struct mm_struct *mm, efi_memory_desc_t *md);
-int efi_set_mapping_permissions(struct mm_struct *mm, efi_memory_desc_t *md);
-
-#define arch_efi_call_virt_setup()					\
-({									\
-	efi_virtmap_load();						\
-	__efi_fpsimd_begin();						\
-	spin_lock(&efi_rt_lock);					\
-})
+int efi_set_mapping_permissions(struct mm_struct *mm, efi_memory_desc_t *md,
+				bool has_bti);
 
 #undef arch_efi_call_virt
 #define arch_efi_call_virt(p, f, args...)				\
 	__efi_rt_asm_wrapper((p)->f, #f, args)
 
-#define arch_efi_call_virt_teardown()					\
-({									\
-	spin_unlock(&efi_rt_lock);					\
-	__efi_fpsimd_end();						\
-	efi_virtmap_unload();						\
-})
-
-extern spinlock_t efi_rt_lock;
 extern u64 *efi_rt_stack_top;
 efi_status_t __efi_rt_asm_wrapper(void *, const char *, ...);
+
+void arch_efi_call_virt_setup(void);
+void arch_efi_call_virt_teardown(void);
 
 /*
  * efi_rt_stack_top[-1] contains the value the stack pointer had before
  * switching to the EFI runtime stack.
  */
 #define current_in_efi()						\
-	(!preemptible() && efi_rt_stack_top != NULL &&			\
+	(efi_rt_stack_top != NULL &&					\
 	 on_task_stack(current, READ_ONCE(efi_rt_stack_top[-1]), 1))
 
 #define ARCH_EFI_IRQ_FLAGS_MASK (PSR_D_BIT | PSR_A_BIT | PSR_I_BIT | PSR_F_BIT)
@@ -87,7 +76,7 @@ efi_status_t __efi_rt_asm_wrapper(void *, const char *, ...);
  * guaranteed to cover the kernel Image.
  *
  * Since the EFI stub is part of the kernel Image, we can relax the
- * usual requirements in Documentation/arm64/booting.rst, which still
+ * usual requirements in Documentation/arch/arm64/booting.rst, which still
  * apply to other bootloaders, and are required for some kernel
  * configurations.
  */
@@ -114,6 +103,8 @@ static inline unsigned long efi_get_kimg_min_align(void)
 #define EFI_ALLOC_ALIGN		SZ_64K
 #define EFI_ALLOC_LIMIT		((1UL << 48) - 1)
 
+extern unsigned long primary_entry_offset(void);
+
 /*
  * On ARM systems, virtually remapped UEFI runtime services are set up in two
  * distinct stages:
@@ -135,21 +126,14 @@ static inline void efi_set_pgd(struct mm_struct *mm)
 		if (mm != current->active_mm) {
 			/*
 			 * Update the current thread's saved ttbr0 since it is
-			 * restored as part of a return from exception. Enable
-			 * access to the valid TTBR0_EL1 and invoke the errata
-			 * workaround directly since there is no return from
-			 * exception when invoking the EFI run-time services.
+			 * restored as part of a return from exception.
 			 */
 			update_saved_ttbr0(current, mm);
-			uaccess_ttbr0_enable();
-			post_ttbr_update_workaround();
 		} else {
 			/*
-			 * Defer the switch to the current thread's TTBR0_EL1
-			 * until uaccess_enable(). Restore the current
-			 * thread's saved ttbr0 corresponding to its active_mm
+			 * Restore the current thread's saved ttbr0
+			 * corresponding to its active_mm
 			 */
-			uaccess_ttbr0_disable();
 			update_saved_ttbr0(current, current->active_mm);
 		}
 	}
@@ -162,5 +146,9 @@ static inline void efi_capsule_flush_cache_range(void *addr, int size)
 {
 	dcache_clean_inval_poc((unsigned long)addr, (unsigned long)addr + size);
 }
+
+efi_status_t efi_handle_corrupted_x18(efi_status_t s, const char *f);
+
+void efi_icache_sync(unsigned long start, unsigned long end);
 
 #endif /* _ASM_EFI_H */

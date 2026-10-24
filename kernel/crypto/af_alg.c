@@ -70,7 +70,7 @@ int af_alg_register_type(const struct af_alg_type *type)
 			goto unlock;
 	}
 
-	node = kmalloc(sizeof(*node), GFP_KERNEL);
+	node = kmalloc_obj(*node);
 	err = -ENOMEM;
 	if (!node)
 		goto unlock;
@@ -145,7 +145,7 @@ void af_alg_release_parent(struct sock *sk)
 }
 EXPORT_SYMBOL_GPL(af_alg_release_parent);
 
-static int alg_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len)
+static int alg_bind(struct socket *sock, struct sockaddr_unsized *uaddr, int addr_len)
 {
 	const u32 allowed = CRYPTO_ALG_KERN_DRIVER_ONLY;
 	struct sock *sk = sock->sk;
@@ -181,7 +181,7 @@ static int alg_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len)
 	if (IS_ERR(type))
 		return PTR_ERR(type);
 
-	private = type->bind(sa->salg_name, sa->salg_feat, sa->salg_mask);
+	private = type->bind(sa->salg_name);
 	if (IS_ERR(private)) {
 		module_put(type->owner);
 		return PTR_ERR(private);
@@ -320,18 +320,19 @@ static int alg_setkey_by_key_serial(struct alg_sock *ask, sockptr_t optval,
 
 	if (IS_ERR(ret)) {
 		up_read(&key->sem);
+		key_put(key);
 		return PTR_ERR(ret);
 	}
 
-	key_data = sock_kmalloc(&ask->sk, key_datalen, GFP_KERNEL);
+	key_data = sock_kmemdup(&ask->sk, ret, key_datalen, GFP_KERNEL);
 	if (!key_data) {
 		up_read(&key->sem);
+		key_put(key);
 		return -ENOMEM;
 	}
 
-	memcpy(key_data, ret, key_datalen);
-
 	up_read(&key->sem);
+	key_put(key);
 
 	err = type->setkey(ask->private, key_data, key_datalen);
 
@@ -404,7 +405,8 @@ unlock:
 	return err;
 }
 
-int af_alg_accept(struct sock *sk, struct socket *newsock, bool kern)
+int af_alg_accept(struct sock *sk, struct socket *newsock,
+		  struct proto_accept_arg *arg)
 {
 	struct alg_sock *ask = alg_sk(sk);
 	const struct af_alg_type *type;
@@ -419,7 +421,7 @@ int af_alg_accept(struct sock *sk, struct socket *newsock, bool kern)
 	if (!type)
 		goto unlock;
 
-	sk2 = sk_alloc(sock_net(sk), PF_ALG, GFP_KERNEL, &alg_proto, kern);
+	sk2 = sk_alloc(sock_net(sk), PF_ALG, GFP_KERNEL, &alg_proto, arg->kern);
 	err = -ENOMEM;
 	if (!sk2)
 		goto unlock;
@@ -465,10 +467,10 @@ unlock:
 }
 EXPORT_SYMBOL_GPL(af_alg_accept);
 
-static int alg_accept(struct socket *sock, struct socket *newsock, int flags,
-		      bool kern)
+static int alg_accept(struct socket *sock, struct socket *newsock,
+		      struct proto_accept_arg *arg)
 {
-	return af_alg_accept(sock->sk, newsock, kern);
+	return af_alg_accept(sock->sk, newsock, arg);
 }
 
 static const struct proto_ops alg_proto_ops = {
@@ -482,7 +484,6 @@ static const struct proto_ops alg_proto_ops = {
 	.listen		=	sock_no_listen,
 	.shutdown	=	sock_no_shutdown,
 	.mmap		=	sock_no_mmap,
-	.sendpage	=	sock_no_sendpage,
 	.sendmsg	=	sock_no_sendmsg,
 	.recvmsg	=	sock_no_recvmsg,
 
@@ -531,50 +532,25 @@ static const struct net_proto_family alg_family = {
 	.owner	=	THIS_MODULE,
 };
 
-int af_alg_make_sg(struct af_alg_sgl *sgl, struct iov_iter *iter, int len)
-{
-	size_t off;
-	ssize_t n;
-	int npages, i;
-
-	n = iov_iter_get_pages2(iter, sgl->pages, len, ALG_MAX_PAGES, &off);
-	if (n < 0)
-		return n;
-
-	npages = DIV_ROUND_UP(off + n, PAGE_SIZE);
-	if (WARN_ON(npages == 0))
-		return -EINVAL;
-	/* Add one extra for linking */
-	sg_init_table(sgl->sg, npages + 1);
-
-	for (i = 0, len = n; i < npages; i++) {
-		int plen = min_t(int, len, PAGE_SIZE - off);
-
-		sg_set_page(sgl->sg + i, sgl->pages[i], plen, off);
-
-		off = 0;
-		len -= plen;
-	}
-	sg_mark_end(sgl->sg + npages - 1);
-	sgl->npages = npages;
-
-	return n;
-}
-EXPORT_SYMBOL_GPL(af_alg_make_sg);
-
 static void af_alg_link_sg(struct af_alg_sgl *sgl_prev,
 			   struct af_alg_sgl *sgl_new)
 {
-	sg_unmark_end(sgl_prev->sg + sgl_prev->npages - 1);
-	sg_chain(sgl_prev->sg, sgl_prev->npages + 1, sgl_new->sg);
+	sg_unmark_end(sgl_prev->sgt.sgl + sgl_prev->sgt.nents - 1);
+	sg_chain(sgl_prev->sgt.sgl, sgl_prev->sgt.nents + 1, sgl_new->sgt.sgl);
 }
 
 void af_alg_free_sg(struct af_alg_sgl *sgl)
 {
 	int i;
 
-	for (i = 0; i < sgl->npages; i++)
-		put_page(sgl->pages[i]);
+	if (sgl->sgt.sgl) {
+		if (sgl->need_unpin)
+			for (i = 0; i < sgl->sgt.nents; i++)
+				unpin_user_page(sg_page(&sgl->sgt.sgl[i]));
+		if (sgl->sgt.sgl != sgl->sgl)
+			kvfree(sgl->sgt.sgl);
+		sgl->sgt.sgl = NULL;
+	}
 }
 EXPORT_SYMBOL_GPL(af_alg_free_sg);
 
@@ -608,6 +584,8 @@ static int af_alg_cmsg_send(struct msghdr *msg, struct af_alg_control *con)
 			if (cmsg->cmsg_len < CMSG_LEN(sizeof(u32)))
 				return -EINVAL;
 			con->aead_assoclen = *(u32 *)CMSG_DATA(cmsg);
+			if (con->aead_assoclen >= 0x80000000u)
+				return -EINVAL;
 			break;
 
 		default:
@@ -645,8 +623,10 @@ static int af_alg_alloc_tsgl(struct sock *sk)
 		sg_init_table(sgl->sg, MAX_SGL_ENTS + 1);
 		sgl->cur = 0;
 
-		if (sg)
+		if (sg) {
+			sg_unmark_end(sg + MAX_SGL_ENTS - 1);
 			sg_chain(sg, MAX_SGL_ENTS + 1, sgl->sg);
+		}
 
 		list_add_tail(&sgl->list, &ctx->tsgl_list);
 	}
@@ -657,15 +637,13 @@ static int af_alg_alloc_tsgl(struct sock *sk)
 /**
  * af_alg_count_tsgl - Count number of TX SG entries
  *
- * The counting starts from the beginning of the SGL to @bytes. If
- * an @offset is provided, the counting of the SG entries starts at the @offset.
+ * The counting starts from the beginning of the SGL to @bytes.
  *
  * @sk: socket of connection to user space
  * @bytes: Count the number of SG entries holding given number of bytes.
- * @offset: Start the counting of SG entries from the given offset.
  * Return: Number of TX SG entries found given the constraints
  */
-unsigned int af_alg_count_tsgl(struct sock *sk, size_t bytes, size_t offset)
+unsigned int af_alg_count_tsgl(struct sock *sk, size_t bytes)
 {
 	const struct alg_sock *ask = alg_sk(sk);
 	const struct af_alg_ctx *ctx = ask->private;
@@ -680,25 +658,11 @@ unsigned int af_alg_count_tsgl(struct sock *sk, size_t bytes, size_t offset)
 		const struct scatterlist *sg = sgl->sg;
 
 		for (i = 0; i < sgl->cur; i++) {
-			size_t bytes_count;
-
-			/* Skip offset */
-			if (offset >= sg[i].length) {
-				offset -= sg[i].length;
-				bytes -= sg[i].length;
-				continue;
-			}
-
-			bytes_count = sg[i].length - offset;
-
-			offset = 0;
 			sgl_count++;
-
-			/* If we have seen requested number of bytes, stop */
-			if (bytes_count >= bytes)
+			if (sg[i].length >= bytes)
 				return sgl_count;
 
-			bytes -= bytes_count;
+			bytes -= sg[i].length;
 		}
 	}
 
@@ -710,19 +674,14 @@ EXPORT_SYMBOL_GPL(af_alg_count_tsgl);
  * af_alg_pull_tsgl - Release the specified buffers from TX SGL
  *
  * If @dst is non-null, reassign the pages to @dst. The caller must release
- * the pages. If @dst_offset is given only reassign the pages to @dst starting
- * at the @dst_offset (byte). The caller must ensure that @dst is large
- * enough (e.g. by using af_alg_count_tsgl with the same offset).
+ * the pages.
  *
  * @sk: socket of connection to user space
  * @used: Number of bytes to pull from TX SGL
  * @dst: If non-NULL, buffer is reassigned to dst SGL instead of releasing. The
  *	 caller must release the buffers in dst.
- * @dst_offset: Reassign the TX SGL from given offset. All buffers before
- *	        reaching the offset is released.
  */
-void af_alg_pull_tsgl(struct sock *sk, size_t used, struct scatterlist *dst,
-		      size_t dst_offset)
+void af_alg_pull_tsgl(struct sock *sk, size_t used, struct scatterlist *dst)
 {
 	struct alg_sock *ask = alg_sk(sk);
 	struct af_alg_ctx *ctx = ask->private;
@@ -746,19 +705,11 @@ void af_alg_pull_tsgl(struct sock *sk, size_t used, struct scatterlist *dst,
 			 * Assumption: caller created af_alg_count_tsgl(len)
 			 * SG entries in dst.
 			 */
-			if (dst) {
-				if (dst_offset >= plen) {
-					/* discard page before offset */
-					dst_offset -= plen;
-				} else {
-					/* reassign page to dst after offset */
-					get_page(page);
-					sg_set_page(dst + j, page,
-						    plen - dst_offset,
-						    sg[i].offset + dst_offset);
-					dst_offset = 0;
-					j++;
-				}
+			if (dst && plen) {
+				/* reassign page to dst */
+				get_page(page);
+				sg_set_page(dst + j, page, plen, sg[i].offset);
+				j++;
 			}
 
 			sg[i].length -= plen;
@@ -870,7 +821,7 @@ void af_alg_wmem_wakeup(struct sock *sk)
 		wake_up_interruptible_sync_poll(&wq->wait, EPOLLIN |
 							   EPOLLRDNORM |
 							   EPOLLRDBAND);
-	sk_wake_async(sk, SOCK_WAKE_WAITD, POLL_IN);
+	sk_wake_async_rcu(sk, SOCK_WAKE_WAITD, POLL_IN);
 	rcu_read_unlock();
 }
 EXPORT_SYMBOL_GPL(af_alg_wmem_wakeup);
@@ -937,7 +888,7 @@ static void af_alg_data_wakeup(struct sock *sk)
 		wake_up_interruptible_sync_poll(&wq->wait, EPOLLOUT |
 							   EPOLLRDNORM |
 							   EPOLLRDBAND);
-	sk_wake_async(sk, SOCK_WAKE_SPACE, POLL_OUT);
+	sk_wake_async_rcu(sk, SOCK_WAKE_SPACE, POLL_OUT);
 	rcu_read_unlock();
 }
 
@@ -992,6 +943,12 @@ int af_alg_sendmsg(struct socket *sock, struct msghdr *msg, size_t size,
 	}
 
 	lock_sock(sk);
+	if (ctx->write) {
+		release_sock(sk);
+		return -EBUSY;
+	}
+	ctx->write = true;
+
 	if (ctx->init && !ctx->more) {
 		if (ctx->used) {
 			err = -EINVAL;
@@ -1015,7 +972,7 @@ int af_alg_sendmsg(struct socket *sock, struct msghdr *msg, size_t size,
 	while (size) {
 		struct scatterlist *sg;
 		size_t len = size;
-		size_t plen;
+		ssize_t plen;
 
 		/* use the existing memory in an allocated page */
 		if (ctx->merge) {
@@ -1040,6 +997,8 @@ int af_alg_sendmsg(struct socket *sock, struct msghdr *msg, size_t size,
 			size -= len;
 			continue;
 		}
+
+		ctx->merge = 0;
 
 		if (!af_alg_writable(sk)) {
 			err = af_alg_wait_for_wmem(sk, msg->msg_flags);
@@ -1090,10 +1049,10 @@ int af_alg_sendmsg(struct socket *sock, struct msghdr *msg, size_t size,
 			sgl->cur++;
 		} while (len && sgl->cur < MAX_SGL_ENTS);
 
+		ctx->merge = plen & (PAGE_SIZE - 1);
+
 		if (!size)
 			sg_mark_end(sg + sgl->cur - 1);
-
-		ctx->merge = plen & (PAGE_SIZE - 1);
 	}
 
 	err = 0;
@@ -1102,74 +1061,12 @@ int af_alg_sendmsg(struct socket *sock, struct msghdr *msg, size_t size,
 
 unlock:
 	af_alg_data_wakeup(sk);
+	ctx->write = false;
 	release_sock(sk);
 
 	return copied ?: err;
 }
 EXPORT_SYMBOL_GPL(af_alg_sendmsg);
-
-/**
- * af_alg_sendpage - sendpage system call handler
- * @sock: socket of connection to user space to write to
- * @page: data to send
- * @offset: offset into page to begin sending
- * @size: length of data
- * @flags: message send/receive flags
- *
- * This is a generic implementation of sendpage to fill ctx->tsgl_list.
- */
-ssize_t af_alg_sendpage(struct socket *sock, struct page *page,
-			int offset, size_t size, int flags)
-{
-	struct sock *sk = sock->sk;
-	struct alg_sock *ask = alg_sk(sk);
-	struct af_alg_ctx *ctx = ask->private;
-	struct af_alg_tsgl *sgl;
-	int err = -EINVAL;
-
-	if (flags & MSG_SENDPAGE_NOTLAST)
-		flags |= MSG_MORE;
-
-	lock_sock(sk);
-	if (!ctx->more && ctx->used)
-		goto unlock;
-
-	if (!size)
-		goto done;
-
-	if (!af_alg_writable(sk)) {
-		err = af_alg_wait_for_wmem(sk, flags);
-		if (err)
-			goto unlock;
-	}
-
-	err = af_alg_alloc_tsgl(sk);
-	if (err)
-		goto unlock;
-
-	ctx->merge = 0;
-	sgl = list_entry(ctx->tsgl_list.prev, struct af_alg_tsgl, list);
-
-	if (sgl->cur)
-		sg_unmark_end(sgl->sg + sgl->cur - 1);
-
-	sg_mark_end(sgl->sg + sgl->cur);
-
-	get_page(page);
-	sg_set_page(sgl->sg + sgl->cur, page, size, offset);
-	sgl->cur++;
-	ctx->used += size;
-
-done:
-	ctx->more = flags & MSG_MORE;
-
-unlock:
-	af_alg_data_wakeup(sk);
-	release_sock(sk);
-
-	return err ?: size;
-}
-EXPORT_SYMBOL_GPL(af_alg_sendpage);
 
 /**
  * af_alg_free_resources - release resources required for crypto request
@@ -1178,40 +1075,15 @@ EXPORT_SYMBOL_GPL(af_alg_sendpage);
 void af_alg_free_resources(struct af_alg_async_req *areq)
 {
 	struct sock *sk = areq->sk;
+	struct af_alg_ctx *ctx;
 
 	af_alg_free_areq_sgls(areq);
 	sock_kfree_s(sk, areq, areq->areqlen);
+
+	ctx = alg_sk(sk)->private;
+	ctx->inflight = false;
 }
 EXPORT_SYMBOL_GPL(af_alg_free_resources);
-
-/**
- * af_alg_async_cb - AIO callback handler
- * @_req: async request info
- * @err: if non-zero, error result to be returned via ki_complete();
- *       otherwise return the AIO output length via ki_complete().
- *
- * This handler cleans up the struct af_alg_async_req upon completion of the
- * AIO operation.
- *
- * The number of bytes to be generated with the AIO operation must be set
- * in areq->outlen before the AIO callback handler is invoked.
- */
-void af_alg_async_cb(struct crypto_async_request *_req, int err)
-{
-	struct af_alg_async_req *areq = _req->data;
-	struct sock *sk = areq->sk;
-	struct kiocb *iocb = areq->iocb;
-	unsigned int resultlen;
-
-	/* Buffer size written by crypto operation. */
-	resultlen = areq->outlen;
-
-	af_alg_free_resources(areq);
-	sock_put(sk);
-
-	iocb->ki_complete(iocb, err ? err : (int)resultlen);
-}
-EXPORT_SYMBOL_GPL(af_alg_async_cb);
 
 /**
  * af_alg_poll - poll system call handler
@@ -1250,17 +1122,25 @@ EXPORT_SYMBOL_GPL(af_alg_poll);
 struct af_alg_async_req *af_alg_alloc_areq(struct sock *sk,
 					   unsigned int areqlen)
 {
-	struct af_alg_async_req *areq = sock_kmalloc(sk, areqlen, GFP_KERNEL);
+	struct af_alg_ctx *ctx = alg_sk(sk)->private;
+	struct af_alg_async_req *areq;
 
+	/* Only one request can be in flight. */
+	if (WARN_ON_ONCE(ctx->inflight))
+		return ERR_PTR(-EBUSY);
+
+	areq = sock_kmalloc(sk, areqlen, GFP_KERNEL);
 	if (unlikely(!areq))
 		return ERR_PTR(-ENOMEM);
 
+	memset(areq, 0, areqlen);
+
+	ctx->inflight = true;
+
 	areq->areqlen = areqlen;
 	areq->sk = sk;
-	areq->last_rsgl = NULL;
+	areq->first_rsgl.sgl.sgt.sgl = areq->first_rsgl.sgl.sgl;
 	INIT_LIST_HEAD(&areq->rsgl_list);
-	areq->tsgl = NULL;
-	areq->tsgl_entries = 0;
 
 	return areq;
 }
@@ -1288,8 +1168,8 @@ int af_alg_get_rsgl(struct sock *sk, struct msghdr *msg, int flags,
 
 	while (maxsize > len && msg_data_left(msg)) {
 		struct af_alg_rsgl *rsgl;
+		ssize_t err;
 		size_t seglen;
-		int err;
 
 		/* limit the amount of readable buffers */
 		if (!af_alg_readable(sk))
@@ -1297,6 +1177,8 @@ int af_alg_get_rsgl(struct sock *sk, struct msghdr *msg, int flags,
 
 		seglen = min_t(size_t, (maxsize - len),
 			       msg_data_left(msg));
+		/* Never pin more pages than the remaining RX accounting budget. */
+		seglen = min_t(size_t, seglen, af_alg_rcvbuf(sk));
 
 		if (list_empty(&areq->rsgl_list)) {
 			rsgl = &areq->first_rsgl;
@@ -1306,15 +1188,22 @@ int af_alg_get_rsgl(struct sock *sk, struct msghdr *msg, int flags,
 				return -ENOMEM;
 		}
 
-		rsgl->sgl.npages = 0;
+		rsgl->sgl.need_unpin =
+			iov_iter_extract_will_pin(&msg->msg_iter);
+		rsgl->sgl.sgt.sgl = rsgl->sgl.sgl;
+		rsgl->sgl.sgt.nents = 0;
+		rsgl->sgl.sgt.orig_nents = 0;
 		list_add_tail(&rsgl->list, &areq->rsgl_list);
 
-		/* make one iovec available as scatterlist */
-		err = af_alg_make_sg(&rsgl->sgl, &msg->msg_iter, seglen);
+		sg_init_table(rsgl->sgl.sgt.sgl, ALG_MAX_PAGES);
+		err = extract_iter_to_sg(&msg->msg_iter, seglen, &rsgl->sgl.sgt,
+					 ALG_MAX_PAGES, 0);
 		if (err < 0) {
 			rsgl->sg_num_bytes = 0;
 			return err;
 		}
+
+		sg_mark_end(rsgl->sgl.sgt.sgl + rsgl->sgl.sgt.nents - 1);
 
 		/* chain the new scatterlist with previous one */
 		if (areq->last_rsgl)
@@ -1358,5 +1247,6 @@ static void __exit af_alg_exit(void)
 
 module_init(af_alg_init);
 module_exit(af_alg_exit);
+MODULE_DESCRIPTION("Crypto userspace interface");
 MODULE_LICENSE("GPL");
 MODULE_ALIAS_NETPROTO(AF_ALG);

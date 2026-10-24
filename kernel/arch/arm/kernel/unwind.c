@@ -308,6 +308,29 @@ static int unwind_exec_pop_subset_r0_to_r3(struct unwind_ctrl_block *ctrl,
 	return URC_OK;
 }
 
+static unsigned long unwind_decode_uleb128(struct unwind_ctrl_block *ctrl)
+{
+	unsigned long bytes = 0;
+	unsigned long insn;
+	unsigned long result = 0;
+
+	/*
+	 * unwind_get_byte() will advance `ctrl` one instruction at a time, so
+	 * loop until we get an instruction byte where bit 7 is not set.
+	 *
+	 * Note: This decodes a maximum of 4 bytes to output 28 bits data where
+	 * max is 0xfffffff: that will cover a vsp increment of 1073742336, hence
+	 * it is sufficient for unwinding the stack.
+	 */
+	do {
+		insn = unwind_get_byte(ctrl);
+		result |= (insn & 0x7f) << (bytes * 7);
+		bytes++;
+	} while (!!(insn & 0x80) && (bytes != sizeof(result)));
+
+	return result;
+}
+
 /*
  * Execute the current unwind instruction.
  */
@@ -361,7 +384,7 @@ static int unwind_exec_insn(struct unwind_ctrl_block *ctrl)
 		if (ret)
 			goto error;
 	} else if (insn == 0xb2) {
-		unsigned long uleb128 = unwind_get_byte(ctrl);
+		unsigned long uleb128 = unwind_decode_uleb128(ctrl);
 
 		ctrl->vrs[SP] += 0x204 + (uleb128 << 2);
 	} else {
@@ -501,6 +524,8 @@ void unwind_backtrace(struct pt_regs *regs, struct task_struct *tsk,
 {
 	struct stackframe frame;
 
+	printk("%sCall trace: ", loglvl);
+
 	pr_debug("%s(regs = %p tsk = %p)\n", __func__, regs, tsk);
 
 	if (!tsk)
@@ -549,7 +574,7 @@ struct unwind_table *unwind_table_add(unsigned long start, unsigned long size,
 				      unsigned long text_size)
 {
 	unsigned long flags;
-	struct unwind_table *tab = kmalloc(sizeof(*tab), GFP_KERNEL);
+	struct unwind_table *tab = kmalloc_obj(*tab);
 
 	pr_debug("%s(%08lx, %08lx, %08lx, %08lx)\n", __func__, start, size,
 		 text_addr, text_size);

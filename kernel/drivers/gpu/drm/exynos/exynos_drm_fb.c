@@ -11,10 +11,10 @@
 #include <drm/drm_atomic.h>
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_crtc.h>
-#include <drm/drm_fb_helper.h>
 #include <drm/drm_framebuffer.h>
 #include <drm/drm_fourcc.h>
 #include <drm/drm_gem_framebuffer_helper.h>
+#include <drm/drm_print.h>
 #include <drm/drm_probe_helper.h>
 #include <drm/exynos_drm.h>
 
@@ -22,6 +22,7 @@
 #include "exynos_drm_drv.h"
 #include "exynos_drm_fb.h"
 #include "exynos_drm_fbdev.h"
+#include "exynos_drm_gem.h"
 
 static int check_fb_gem_memory_type(struct drm_device *drm_dev,
 				    struct exynos_drm_gem *exynos_gem)
@@ -55,8 +56,9 @@ static const struct drm_framebuffer_funcs exynos_drm_fb_funcs = {
 	.create_handle	= drm_gem_fb_create_handle,
 };
 
-struct drm_framebuffer *
+static struct drm_framebuffer *
 exynos_drm_framebuffer_init(struct drm_device *dev,
+			    const struct drm_format_info *info,
 			    const struct drm_mode_fb_cmd2 *mode_cmd,
 			    struct exynos_drm_gem **exynos_gem,
 			    int count)
@@ -65,7 +67,7 @@ exynos_drm_framebuffer_init(struct drm_device *dev,
 	int i;
 	int ret;
 
-	fb = kzalloc(sizeof(*fb), GFP_KERNEL);
+	fb = kzalloc_obj(*fb);
 	if (!fb)
 		return ERR_PTR(-ENOMEM);
 
@@ -77,7 +79,7 @@ exynos_drm_framebuffer_init(struct drm_device *dev,
 		fb->obj[i] = &exynos_gem[i]->base;
 	}
 
-	drm_helper_mode_fill_fb_struct(dev, fb, mode_cmd);
+	drm_helper_mode_fill_fb_struct(dev, fb, info, mode_cmd);
 
 	ret = drm_framebuffer_init(dev, fb, &exynos_drm_fb_funcs);
 	if (ret < 0) {
@@ -95,10 +97,10 @@ err:
 
 static struct drm_framebuffer *
 exynos_user_fb_create(struct drm_device *dev, struct drm_file *file_priv,
+		      const struct drm_format_info *info,
 		      const struct drm_mode_fb_cmd2 *mode_cmd)
 {
-	const struct drm_format_info *info = drm_get_format_info(dev, mode_cmd);
-	struct exynos_drm_gem *exynos_gem[MAX_FB_BUFFER];
+	struct exynos_drm_gem *exynos_gem[DRM_FORMAT_MAX_PLANES];
 	struct drm_framebuffer *fb;
 	int i;
 	int ret;
@@ -118,14 +120,14 @@ exynos_user_fb_create(struct drm_device *dev, struct drm_file *file_priv,
 			goto err;
 		}
 
-		if (size > exynos_gem[i]->size) {
+		if (size > exynos_gem[i]->base.size) {
 			i++;
 			ret = -EINVAL;
 			goto err;
 		}
 	}
 
-	fb = exynos_drm_framebuffer_init(dev, mode_cmd, exynos_gem, i);
+	fb = exynos_drm_framebuffer_init(dev, info, mode_cmd, exynos_gem, i);
 	if (IS_ERR(fb)) {
 		ret = PTR_ERR(fb);
 		goto err;
@@ -144,7 +146,7 @@ dma_addr_t exynos_drm_fb_dma_addr(struct drm_framebuffer *fb, int index)
 {
 	struct exynos_drm_gem *exynos_gem;
 
-	if (WARN_ON_ONCE(index >= MAX_FB_BUFFER))
+	if (WARN_ON_ONCE(index >= DRM_FORMAT_MAX_PLANES))
 		return 0;
 
 	exynos_gem = to_exynos_gem(fb->obj[index]);
@@ -157,7 +159,6 @@ static struct drm_mode_config_helper_funcs exynos_drm_mode_config_helpers = {
 
 static const struct drm_mode_config_funcs exynos_drm_mode_config_funcs = {
 	.fb_create = exynos_user_fb_create,
-	.output_poll_changed = drm_fb_helper_output_poll_changed,
 	.atomic_check = drm_atomic_helper_check,
 	.atomic_commit = drm_atomic_helper_commit,
 };

@@ -8,9 +8,9 @@
  * Copyright (C) 2007 by Maciej W. Rozycki
  * Copyright (C) 2011, 2012 MIPS Technologies, Inc.
  */
+#include <linux/export.h>
 #include <asm/asm.h>
 #include <asm/asm-offsets.h>
-#include <asm/export.h>
 #include <asm/regdef.h>
 
 #if LONGSIZE == 4
@@ -89,7 +89,6 @@
 	/* Initialize __memset if this is the first time we call this macro */
 	.ifnotdef __memset
 	.set __memset, 1
-	.hidden __memset /* Make sure it does not leak */
 	.endif
 
 	sltiu		t0, a2, STORSIZE	/* very small region? */
@@ -231,7 +230,6 @@
 	.if __memset == 1
 	END(memset)
 	.set __memset, 0
-	.hidden __memset
 	.endif
 
 #ifdef CONFIG_CPU_NO_LOAD_STORE_LR

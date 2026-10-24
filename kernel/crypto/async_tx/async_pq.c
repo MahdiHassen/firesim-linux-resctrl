@@ -8,11 +8,12 @@
 #include <linux/module.h>
 #include <linux/dma-mapping.h>
 #include <linux/raid/pq.h>
+#include <linux/raid/pq_tables.h>
 #include <linux/async_tx.h>
 #include <linux/gfp.h>
 
-/**
- * pq_scribble_page - space to hold throwaway P or Q buffer for
+/*
+ * struct pq_scribble_page - space to hold throwaway P or Q buffer for
  * synchronous gen_syndrome
  */
 static struct page *pq_scribble_page;
@@ -28,7 +29,7 @@ static struct page *pq_scribble_page;
 
 #define MAX_DISKS 255
 
-/**
+/*
  * do_async_gen_syndrome - asynchronously calculate P and/or Q
  */
 static __async_inline struct dma_async_tx_descriptor *
@@ -100,7 +101,7 @@ do_async_gen_syndrome(struct dma_chan *chan,
 	return tx;
 }
 
-/**
+/*
  * do_sync_gen_syndrome - synchronously calculate a raid6 syndrome
  */
 static void
@@ -119,7 +120,7 @@ do_sync_gen_syndrome(struct page **blocks, unsigned int *offsets, int disks,
 	for (i = 0; i < disks; i++) {
 		if (blocks[i] == NULL) {
 			BUG_ON(i > disks - 3); /* P or Q can't be zero */
-			srcs[i] = (void*)raid6_empty_zero_page;
+			srcs[i] = page_address(ZERO_PAGE(0));
 		} else {
 			srcs[i] = page_address(blocks[i]) + offsets[i];
 
@@ -131,11 +132,11 @@ do_sync_gen_syndrome(struct page **blocks, unsigned int *offsets, int disks,
 		}
 	}
 	if (submit->flags & ASYNC_TX_PQ_XOR_DST) {
-		BUG_ON(!raid6_call.xor_syndrome);
+		BUG_ON(!raid6_can_xor_syndrome());
 		if (start >= 0)
-			raid6_call.xor_syndrome(disks, start, stop, len, srcs);
+			raid6_xor_syndrome(disks, start, stop, len, srcs);
 	} else
-		raid6_call.gen_syndrome(disks, len, srcs);
+		raid6_gen_syndrome(disks, len, srcs);
 	async_tx_sync_epilog(submit);
 }
 
@@ -281,7 +282,7 @@ pq_val_chan(struct async_submit_ctl *submit, struct page **blocks, int disks, si
 /**
  * async_syndrome_val - asynchronously validate a raid6 syndrome
  * @blocks: source blocks from idx 0..disks-3, P @ disks-2 and Q @ disks-1
- * @offset: common offset into each block (src and dest) to start transaction
+ * @offsets: common offset into each block (src and dest) to start transaction
  * @disks: number of blocks (including missing P or Q, see below)
  * @len: length of operation in bytes
  * @pqres: on val failure SUM_CHECK_P_RESULT and/or SUM_CHECK_Q_RESULT are set

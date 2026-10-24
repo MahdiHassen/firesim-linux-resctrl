@@ -17,8 +17,6 @@ struct mlx5e_tc_act_parse_state {
 	struct mlx5e_tc_flow *flow;
 	struct netlink_ext_ack *extack;
 	u32 actions;
-	bool ct;
-	bool ct_clear;
 	bool encap;
 	bool decap;
 	bool mpls_push;
@@ -56,6 +54,8 @@ struct mlx5e_tc_act {
 				   const struct flow_action_entry *act,
 				   struct mlx5_flow_attr *attr);
 
+	bool (*is_missable)(const struct flow_action_entry *act);
+
 	int (*offload_action)(struct mlx5e_priv *priv,
 			      struct flow_offload_action *fl_act,
 			      struct flow_action_entry *act);
@@ -71,11 +71,6 @@ struct mlx5e_tc_act {
 				struct mlx5e_tc_act_branch_ctrl *cond_false);
 
 	bool is_terminating_action;
-};
-
-struct mlx5e_tc_flow_action {
-	unsigned int num_entries;
-	struct flow_action_entry **entries;
 };
 
 extern struct mlx5e_tc_act mlx5e_tc_act_drop;
@@ -110,13 +105,9 @@ mlx5e_tc_act_init_parse_state(struct mlx5e_tc_act_parse_state *parse_state,
 			      struct flow_action *flow_action,
 			      struct netlink_ext_ack *extack);
 
-void
-mlx5e_tc_act_reorder_flow_actions(struct flow_action *flow_action,
-				  struct mlx5e_tc_flow_action *flow_action_reorder);
-
 int
 mlx5e_tc_act_post_parse(struct mlx5e_tc_act_parse_state *parse_state,
-			struct flow_action *flow_action,
+			struct flow_action *flow_action, int from, int to,
 			struct mlx5_flow_attr *attr,
 			enum mlx5_flow_namespace_type ns_type);
 

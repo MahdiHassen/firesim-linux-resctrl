@@ -27,54 +27,98 @@ struct alt_group {
 	struct alt_group *orig_group;
 
 	/* First and last instructions in the group */
-	struct instruction *first_insn, *last_insn;
+	struct instruction *first_insn, *last_insn, *nop;
 
 	/*
 	 * Byte-offset-addressed len-sized array of pointers to CFI structs.
 	 * This is shared with the other alt_groups in the same alternative.
 	 */
 	struct cfi_state **cfi;
+
+	bool ignore;
+	unsigned int feature;
 };
 
+enum alternative_type {
+	ALT_TYPE_INSTRUCTIONS,
+	ALT_TYPE_JUMP_TABLE,
+	ALT_TYPE_EX_TABLE,
+};
+
+struct alternative {
+	struct alternative *next;
+	struct instruction *insn;
+	enum alternative_type type;
+};
+
+#define INSN_CHUNK_BITS		8
+#define INSN_CHUNK_SIZE		(1 << INSN_CHUNK_BITS)
+#define INSN_CHUNK_MAX		(INSN_CHUNK_SIZE - 1)
+
 struct instruction {
-	struct list_head list;
 	struct hlist_node hash;
 	struct list_head call_node;
 	struct section *sec;
 	unsigned long offset;
-	unsigned int len;
-	enum insn_type type;
 	unsigned long immediate;
 
-	u16 dead_end		: 1,
-	   ignore		: 1,
-	   ignore_alts		: 1,
-	   hint			: 1,
-	   save			: 1,
-	   restore		: 1,
-	   retpoline_safe	: 1,
-	   noendbr		: 1,
-	   entry		: 1;
-		/* 7 bit hole */
-
+	u8 len;
+	u8 prev_len;
+	u8 type;
 	s8 instr;
-	u8 visited;
+
+	u32 idx			: INSN_CHUNK_BITS,
+	    immediate_len	: 4,
+	    dead_end		: 1,
+	    ignore_alts		: 1,
+	    hint		: 1,
+	    save		: 1,
+	    restore		: 1,
+	    retpoline_safe	: 1,
+	    noendbr		: 1,
+	    unret		: 1,
+	    visited		: 4,
+	    no_reloc		: 1,
+	    hole		: 1,
+	    fake		: 1,
+	    trace		: 1;
+		/* 4 bit hole */
 
 	struct alt_group *alt_group;
-	struct symbol *call_dest;
 	struct instruction *jump_dest;
 	struct instruction *first_jump_src;
-	struct reloc *jump_table;
-	struct reloc *reloc;
-	struct list_head alts;
-	struct symbol *sym;
-	struct list_head stack_ops;
+	union {
+		struct symbol *_call_dest;
+		struct {
+			struct reloc *_jump_table;
+			unsigned long _jump_table_size;
+		};
+	};
+	struct alternative *alts;
+	struct symbol *_sym;
+	struct stack_op *stack_ops;
 	struct cfi_state *cfi;
 };
 
+/*
+ * Return the symbol associated with an instruction.  For alternative
+ * replacements, return the symbol of the original code being replaced rather
+ * than NULL.  insn->_sym reflects the actual location in the ELF file.
+ */
+static inline struct symbol *insn_sym(struct instruction *insn)
+{
+	struct symbol *sym = insn->_sym;
+
+	if ((!sym || !is_func_sym(sym)) &&
+	    insn->alt_group && insn->alt_group->orig_group)
+		sym = insn->alt_group->orig_group->first_insn->_sym;
+
+	return sym;
+}
+
 static inline struct symbol *insn_func(struct instruction *insn)
 {
-	struct symbol *sym = insn->sym;
+	struct symbol *sym = insn_sym(insn);
 
 	if (sym && sym->type != STT_FUNC)
 		sym = NULL;
@@ -85,7 +129,7 @@ static inline struct symbol *insn_func(struct instruction *insn)
 #define VISITED_BRANCH		0x01
 #define VISITED_BRANCH_UACCESS	0x02
 #define VISITED_BRANCH_MASK	0x03
-#define VISITED_ENTRY		0x04
+#define VISITED_UNRET		0x04
 
 static inline bool is_static_jump(struct instruction *insn)
 {
@@ -104,16 +148,45 @@ static inline bool is_jump(struct instruction *insn)
 	return is_static_jump(insn) || is_dynamic_jump(insn);
 }
 
+static inline struct symbol *insn_call_dest(struct instruction *insn)
+{
+	if (insn->type == INSN_JUMP_DYNAMIC ||
+	    insn->type == INSN_CALL_DYNAMIC)
+		return NULL;
+
+	return insn->_call_dest;
+}
+
 struct instruction *find_insn(struct objtool_file *file,
 			      struct section *sec, unsigned long offset);
 
-#define for_each_insn(file, insn)					\
-	list_for_each_entry(insn, &file->insn_list, list)
+struct instruction *next_insn_same_sec(struct objtool_file *file, struct instruction *insn);
+struct instruction *next_insn_same_func(struct objtool_file *file, struct instruction *insn);
 
-#define sec_for_each_insn(file, sec, insn)				\
-	for (insn = find_insn(file, sec, 0);				\
-	     insn && &insn->list != &file->insn_list &&			\
-			insn->sec == sec;				\
-	     insn = list_next_entry(insn, list))
+#define func_for_each_insn(file, func, insn)				\
+	for (insn = find_insn(file, func->sec, func->offset);		\
+	     insn;							\
+	     insn = next_insn_same_func(file, insn))
+
+#define sec_for_each_insn(file, _sec, insn)				\
+	for (insn = find_insn(file, _sec, 0);				\
+	     insn && insn->sec == _sec;					\
+	     insn = next_insn_same_sec(file, insn))
+
+#define sym_for_each_insn(file, sym, insn)				\
+	for (insn = find_insn(file, sym->sec, sym->offset);		\
+	     insn && insn->offset < sym->offset + sym->len;		\
+	     insn = next_insn_same_sec(file, insn))
+
+struct reloc *insn_reloc(struct objtool_file *file, struct instruction *insn);
+
+int decode_file(struct objtool_file *file);
+void free_insns(struct objtool_file *file);
+
+const char *objtool_disas_insn(struct instruction *insn);
+
+extern size_t sym_name_max_len;
+extern struct disas_context *objtool_disas_ctx;
+int pv_ops_idx_off(const char *symname);
 
 #endif /* _CHECK_H */

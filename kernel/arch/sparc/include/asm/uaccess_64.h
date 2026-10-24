@@ -8,8 +8,10 @@
 
 #include <linux/compiler.h>
 #include <linux/string.h>
+#include <linux/mm_types.h>
 #include <asm/asi.h>
 #include <asm/spitfire.h>
+#include <asm/pgtable.h>
 
 #include <asm/processor.h>
 #include <asm-generic/access_ok.h>
@@ -229,8 +231,7 @@ unsigned long __must_check raw_copy_from_user(void *to,
 unsigned long __must_check raw_copy_to_user(void __user *to,
 					   const void *from,
 					   unsigned long size);
-#define INLINE_COPY_FROM_USER
-#define INLINE_COPY_TO_USER
+#define INLINE_COPY_USER
 
 unsigned long __must_check raw_copy_in_user(void __user *to,
 					   const void __user *from,

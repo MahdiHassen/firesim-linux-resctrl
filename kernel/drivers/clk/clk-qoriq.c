@@ -9,6 +9,7 @@
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <dt-bindings/clock/fsl,qoriq-clockgen.h>
+#include <linux/cleanup.h>
 #include <linux/clk.h>
 #include <linux/clk-provider.h>
 #include <linux/clkdev.h>
@@ -17,8 +18,8 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/of_address.h>
-#include <linux/of_platform.h>
 #include <linux/of.h>
+#include <linux/platform_device.h>
 #include <linux/slab.h>
 
 #define PLL_DIV1	0
@@ -878,6 +879,7 @@ static u8 mux_get_parent(struct clk_hw *hw)
 }
 
 static const struct clk_ops cmux_ops = {
+	.determine_rate = clk_hw_determine_rate_no_reparent,
 	.get_parent = mux_get_parent,
 	.set_parent = mux_set_parent,
 };
@@ -905,13 +907,11 @@ static const struct clockgen_pll_div *get_pll_div(struct clockgen *cg,
 	return &cg->pll[pll].div[div];
 }
 
-static struct clk * __init create_mux_common(struct clockgen *cg,
-					     struct mux_hwclock *hwc,
-					     const struct clk_ops *ops,
-					     unsigned long min_rate,
-					     unsigned long max_rate,
-					     unsigned long pct80_rate,
-					     const char *fmt, int idx)
+static struct clk * __init __printf(7, 8)
+create_mux_common(struct clockgen *cg, struct mux_hwclock *hwc,
+		  const struct clk_ops *ops, unsigned long min_rate,
+		  unsigned long max_rate, unsigned long pct80_rate,
+		  const char *fmt, ...)
 {
 	struct clk_init_data init = {};
 	struct clk *clk;
@@ -919,8 +919,11 @@ static struct clk * __init create_mux_common(struct clockgen *cg,
 	const char *parent_names[NUM_MUX_PARENTS];
 	char name[32];
 	int i, j;
+	va_list args;
 
-	snprintf(name, sizeof(name), fmt, idx);
+	va_start(args, fmt);
+	vsnprintf(name, sizeof(name), fmt, args);
+	va_end(args);
 
 	for (i = 0, j = 0; i < NUM_MUX_PARENTS; i++) {
 		unsigned long rate;
@@ -974,7 +977,7 @@ static struct clk * __init create_one_cmux(struct clockgen *cg, int idx)
 	u64 max_rate, pct80_rate;
 	u32 clksel;
 
-	hwc = kzalloc(sizeof(*hwc), GFP_KERNEL);
+	hwc = kzalloc_obj(*hwc);
 	if (!hwc)
 		return NULL;
 
@@ -1018,7 +1021,7 @@ static struct clk * __init create_one_hwaccel(struct clockgen *cg, int idx)
 {
 	struct mux_hwclock *hwc;
 
-	hwc = kzalloc(sizeof(*hwc), GFP_KERNEL);
+	hwc = kzalloc_obj(*hwc);
 	if (!hwc)
 		return NULL;
 
@@ -1064,11 +1067,8 @@ static void __init _clockgen_init(struct device_node *np, bool legacy);
 static void __init legacy_init_clockgen(struct device_node *np)
 {
 	if (!clockgen.node) {
-		struct device_node *parent_np;
-
-		parent_np = of_get_parent(np);
+		struct device_node *parent_np __free(device_node) = of_get_parent(np);
 		_clockgen_init(parent_np, true);
-		of_node_put(parent_np);
 	}
 }
 
@@ -1320,11 +1320,11 @@ static void __init legacy_pll_init(struct device_node *np, int idx)
 	count = of_property_count_strings(np, "clock-output-names");
 
 	BUILD_BUG_ON(ARRAY_SIZE(pll->div) < 4);
-	subclks = kcalloc(4, sizeof(struct clk *), GFP_KERNEL);
+	subclks = kzalloc_objs(struct clk *, 4);
 	if (!subclks)
 		return;
 
-	onecell_data = kmalloc(sizeof(*onecell_data), GFP_KERNEL);
+	onecell_data = kmalloc_obj(*onecell_data);
 	if (!onecell_data)
 		goto err_clks;
 

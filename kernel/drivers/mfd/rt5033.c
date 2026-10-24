@@ -12,7 +12,6 @@
 #include <linux/err.h>
 #include <linux/module.h>
 #include <linux/interrupt.h>
-#include <linux/of_device.h>
 #include <linux/mfd/core.h>
 #include <linux/mfd/rt5033.h>
 #include <linux/mfd/rt5033-private.h>
@@ -41,9 +40,6 @@ static const struct mfd_cell rt5033_devs[] = {
 		.name = "rt5033-charger",
 		.of_compatible = "richtek,rt5033-charger",
 	}, {
-		.name = "rt5033-battery",
-		.of_compatible = "richtek,rt5033-battery",
-	}, {
 		.name = "rt5033-led",
 		.of_compatible = "richtek,rt5033-led",
 	},
@@ -58,7 +54,7 @@ static const struct regmap_config rt5033_regmap_config = {
 static int rt5033_i2c_probe(struct i2c_client *i2c)
 {
 	struct rt5033_dev *rt5033;
-	unsigned int dev_id;
+	unsigned int dev_id, chip_rev;
 	int ret;
 
 	rt5033 = devm_kzalloc(&i2c->dev, sizeof(*rt5033), GFP_KERNEL);
@@ -81,10 +77,11 @@ static int rt5033_i2c_probe(struct i2c_client *i2c)
 		dev_err(&i2c->dev, "Device not found\n");
 		return -ENODEV;
 	}
-	dev_info(&i2c->dev, "Device found Device ID: %04x\n", dev_id);
+	chip_rev = dev_id & RT5033_CHIP_REV_MASK;
+	dev_info(&i2c->dev, "Device found (rev. %d)\n", chip_rev);
 
-	ret = regmap_add_irq_chip(rt5033->regmap, rt5033->irq,
-			IRQF_TRIGGER_FALLING | IRQF_ONESHOT,
+	ret = devm_regmap_add_irq_chip(rt5033->dev, rt5033->regmap,
+			rt5033->irq, IRQF_TRIGGER_FALLING | IRQF_ONESHOT,
 			0, &rt5033_irq_chip, &rt5033->irq_data);
 	if (ret) {
 		dev_err(&i2c->dev, "Failed to request IRQ %d: %d\n",
@@ -100,7 +97,11 @@ static int rt5033_i2c_probe(struct i2c_client *i2c)
 		return ret;
 	}
 
-	device_init_wakeup(rt5033->dev, rt5033->wakeup);
+	if (rt5033->wakeup) {
+		ret = devm_device_init_wakeup(rt5033->dev);
+		if (ret)
+			return dev_err_probe(rt5033->dev, ret, "Failed to init wakeup\n");
+	}
 
 	return 0;
 }
@@ -122,7 +123,7 @@ static struct i2c_driver rt5033_driver = {
 		.name = "rt5033",
 		.of_match_table = rt5033_dt_match,
 	},
-	.probe_new = rt5033_i2c_probe,
+	.probe = rt5033_i2c_probe,
 	.id_table = rt5033_i2c_id,
 };
 module_i2c_driver(rt5033_driver);

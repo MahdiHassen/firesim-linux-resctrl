@@ -84,8 +84,11 @@ static int i2c_acpi_resource_count(struct acpi_resource *ares, void *data)
  * i2c_acpi_client_count - Count the number of I2cSerialBus resources
  * @adev:	ACPI device
  *
- * Returns the number of I2cSerialBus resources in the ACPI-device's
+ * Return:
+ * The number of I2cSerialBus resources in the ACPI-device's
  * resource-list; or a negative error code.
+ *
+ * Specifically returns -ENOENT when no resources found.
  */
 int i2c_acpi_client_count(struct acpi_device *adev)
 {
@@ -97,7 +100,7 @@ int i2c_acpi_client_count(struct acpi_device *adev)
 		return ret;
 
 	acpi_dev_free_resource_list(&r);
-	return count;
+	return count ?: -ENOENT;
 }
 EXPORT_SYMBOL_GPL(i2c_acpi_client_count);
 
@@ -250,7 +253,7 @@ static int i2c_acpi_get_info(struct acpi_device *adev,
 
 	if (adapter) {
 		/* The adapter must match the one in I2cSerialBus() connector */
-		if (ACPI_HANDLE(&adapter->dev) != lookup.adapter_handle)
+		if (!device_match_acpi_handle(&adapter->dev, lookup.adapter_handle))
 			return -ENODEV;
 	} else {
 		struct acpi_device *adapter_adev;
@@ -355,6 +358,27 @@ static const struct acpi_device_id i2c_acpi_force_400khz_device_ids[] = {
 	{}
 };
 
+static const struct acpi_device_id i2c_acpi_force_100khz_device_ids[] = {
+	/*
+	 * When a 400KHz freq is used on this model of ELAN touchpad in Linux,
+	 * excessive smoothing (similar to when the touchpad's firmware detects
+	 * a noisy signal) is sometimes applied. As some devices' (e.g, Lenovo
+	 * V15 G4) ACPI tables specify a 400KHz frequency for this device and
+	 * some I2C busses (e.g, Designware I2C) default to a 400KHz freq,
+	 * force the speed to 100KHz as a workaround.
+	 *
+	 * For future investigation: This problem may be related to the default
+	 * HCNT/LCNT values given by some busses' drivers, because they are not
+	 * specified in the aforementioned devices' ACPI tables, and because
+	 * the device works without issues on Windows at what is expected to be
+	 * a 400KHz frequency. The root cause of the issue is not known.
+	 */
+	{ "DLL0945", 0 },
+	{ "ELAN0678", 0 },
+	{ "ELAN06FA", 0 },
+	{}
+};
+
 static acpi_status i2c_acpi_lookup_speed(acpi_handle handle, u32 level,
 					   void *data, void **return_value)
 {
@@ -372,6 +396,9 @@ static acpi_status i2c_acpi_lookup_speed(acpi_handle handle, u32 level,
 
 	if (acpi_match_device_ids(adev, i2c_acpi_force_400khz_device_ids) == 0)
 		lookup->force_speed = I2C_MAX_FAST_MODE_FREQ;
+
+	if (acpi_match_device_ids(adev, i2c_acpi_force_100khz_device_ids) == 0)
+		lookup->force_speed = I2C_MAX_STANDARD_MODE_FREQ;
 
 	return AE_OK;
 }
@@ -442,18 +469,12 @@ EXPORT_SYMBOL_GPL(i2c_acpi_find_adapter_by_handle);
 
 static struct i2c_client *i2c_acpi_find_client_by_adev(struct acpi_device *adev)
 {
-	struct device *dev;
-	struct i2c_client *client;
+	return i2c_find_device_by_fwnode(acpi_fwnode_handle(adev));
+}
 
-	dev = bus_find_device_by_acpi_dev(&i2c_bus_type, adev);
-	if (!dev)
-		return NULL;
-
-	client = i2c_verify_client(dev);
-	if (!client)
-		put_device(dev);
-
-	return client;
+static struct i2c_adapter *i2c_acpi_find_adapter_by_adev(struct acpi_device *adev)
+{
+	return i2c_find_adapter_by_fwnode(acpi_fwnode_handle(adev));
 }
 
 static int i2c_acpi_notify(struct notifier_block *nb, unsigned long value,
@@ -482,11 +503,17 @@ static int i2c_acpi_notify(struct notifier_block *nb, unsigned long value,
 			break;
 
 		client = i2c_acpi_find_client_by_adev(adev);
-		if (!client)
-			break;
+		if (client) {
+			i2c_unregister_device(client);
+			put_device(&client->dev);
+		}
 
-		i2c_unregister_device(client);
-		put_device(&client->dev);
+		adapter = i2c_acpi_find_adapter_by_adev(adev);
+		if (adapter) {
+			acpi_unbind_one(&adapter->dev);
+			put_device(&adapter->dev);
+		}
+
 		break;
 	}
 
@@ -660,7 +687,7 @@ i2c_acpi_space_handler(u32 function, acpi_physical_address command,
 	if (ACPI_FAILURE(ret))
 		return ret;
 
-	client = kzalloc(sizeof(*client), GFP_KERNEL);
+	client = kzalloc_obj(*client);
 	if (!client) {
 		ret = AE_NO_MEMORY;
 		goto err;
@@ -770,8 +797,7 @@ int i2c_acpi_install_space_handler(struct i2c_adapter *adapter)
 	if (!handle)
 		return -ENODEV;
 
-	data = kzalloc(sizeof(struct i2c_acpi_handler_data),
-			    GFP_KERNEL);
+	data = kzalloc_obj(struct i2c_acpi_handler_data);
 	if (!data)
 		return -ENOMEM;
 

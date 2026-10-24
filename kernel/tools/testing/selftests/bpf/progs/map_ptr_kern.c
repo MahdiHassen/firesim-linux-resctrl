@@ -103,6 +103,8 @@ struct {
 	__type(value, __u32);
 } m_hash SEC(".maps");
 
+__s64 bpf_map_sum_elem_count(struct bpf_map *map) __ksym;
+
 static inline int check_hash(void)
 {
 	struct bpf_htab *hash = (struct bpf_htab *)&m_hash;
@@ -115,6 +117,8 @@ static inline int check_hash(void)
 	VERIFY(hash->elem_size == 64);
 
 	VERIFY(hash->count.counter == 0);
+	VERIFY(bpf_map_sum_elem_count(map) == 0);
+
 	for (i = 0; i < HALF_ENTRIES; ++i) {
 		const __u32 key = i;
 		const __u32 val = 1;
@@ -123,6 +127,7 @@ static inline int check_hash(void)
 			return 0;
 	}
 	VERIFY(hash->count.counter == HALF_ENTRIES);
+	VERIFY(bpf_map_sum_elem_count(map) == HALF_ENTRIES);
 
 	return 1;
 }
@@ -311,7 +316,7 @@ struct lpm_trie {
 } __attribute__((preserve_access_index));
 
 struct lpm_key {
-	struct bpf_lpm_trie_key trie_key;
+	struct bpf_lpm_trie_key_hdr trie_key;
 	__u32 data;
 };
 
@@ -642,8 +647,14 @@ static inline int check_devmap_hash(void)
 	return 1;
 }
 
+struct bpf_ringbuf {
+	unsigned long consumer_pos;
+	unsigned long producer_pos;
+} __attribute__((preserve_access_index));
+
 struct bpf_ringbuf_map {
 	struct bpf_map map;
+	struct bpf_ringbuf *rb;
 } __attribute__((preserve_access_index));
 
 struct {
@@ -654,8 +665,19 @@ static inline int check_ringbuf(void)
 {
 	struct bpf_ringbuf_map *ringbuf = (struct bpf_ringbuf_map *)&m_ringbuf;
 	struct bpf_map *map = (struct bpf_map *)&m_ringbuf;
+	struct bpf_ringbuf *rb;
+	void *ptr;
 
 	VERIFY(check(&ringbuf->map, map, 0, 0, page_size));
+
+	ptr = bpf_ringbuf_reserve(&m_ringbuf, 128, 0);
+	VERIFY(ptr);
+
+	bpf_ringbuf_discard(ptr, 0);
+	rb = ringbuf->rb;
+	VERIFY(rb);
+	VERIFY(rb->consumer_pos == 0);
+	VERIFY(rb->producer_pos == 128 + BPF_RINGBUF_HDR_SZ);
 
 	return 1;
 }

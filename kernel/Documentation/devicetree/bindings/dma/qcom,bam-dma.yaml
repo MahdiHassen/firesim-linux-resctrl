@@ -11,17 +11,25 @@ maintainers:
   - Bjorn Andersson <andersson@kernel.org>
 
 allOf:
-  - $ref: "dma-controller.yaml#"
+  - $ref: dma-controller.yaml#
 
 properties:
   compatible:
-    enum:
-        # APQ8064, IPQ8064 and MSM8960
-      - qcom,bam-v1.3.0
-        # MSM8974, APQ8074 and APQ8084
-      - qcom,bam-v1.4.0
-        # MSM8916 and SDM845
-      - qcom,bam-v1.7.0
+    oneOf:
+      - enum:
+          # APQ8064, IPQ8064 and MSM8960
+          - qcom,bam-v1.3.0
+          # MSM8974, APQ8074 and APQ8084
+          - qcom,bam-v1.4.0
+          # MSM8916, SDM630
+          - qcom,bam-v1.7.0
+          # Kaanapali
+          - qcom,bam-v2.0.0
+      - items:
+          - enum:
+              # SDM845, SM6115, SM8150, SM8250 and QCM2290
+              - qcom,bam-v1.7.4
+          - const: qcom,bam-v1.7.0
 
   clocks:
     maxItems: 1
@@ -36,9 +44,11 @@ properties:
   interrupts:
     maxItems: 1
 
+  dma-coherent: true
+
   iommus:
     minItems: 1
-    maxItems: 4
+    maxItems: 6
 
   num-channels:
     $ref: /schemas/types.yaml#/definitions/uint32
@@ -48,7 +58,7 @@ properties:
   qcom,controlled-remotely:
     type: boolean
     description:
-      Indicates that the bam is controlled by remote proccessor i.e. execution
+      Indicates that the bam is controlled by remote processor i.e. execution
       environment.
 
   qcom,ee:
@@ -81,6 +91,19 @@ required:
   - qcom,ee
   - reg
 
+anyOf:
+  - required:
+      - qcom,powered-remotely
+      - num-channels
+      - qcom,num-ees
+  - required:
+      - qcom,controlled-remotely
+      - num-channels
+      - qcom,num-ees
+  - required:
+      - clocks
+      - clock-names
+
 additionalProperties: false
 
 examples:
@@ -96,5 +119,24 @@ examples:
         clock-names = "bam_clk";
         #dma-cells = <1>;
         qcom,ee = <0>;
+    };
+  - |
+    #include <dt-bindings/interrupt-controller/arm-gic.h>
+
+    soc {
+        #address-cells = <2>;
+        #size-cells = <2>;
+
+        dma-controller@1dc4000 {
+            compatible = "qcom,bam-v2.0.0";
+            reg = <0x0 0x01dc4000 0x0 0x22000>;
+            interrupts = <GIC_SPI 272 IRQ_TYPE_LEVEL_HIGH>;
+            #dma-cells = <1>;
+            iommus = <&apps_smmu 0xc0 0>, <&apps_smmu 0xc1 0>;
+            qcom,ee = <0>;
+            qcom,num-ees = <4>;
+            num-channels = <20>;
+            qcom,controlled-remotely;
+        };
     };
 ...

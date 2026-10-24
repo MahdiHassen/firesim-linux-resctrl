@@ -83,8 +83,10 @@ static int fch_misc_setup(struct apd_private_data *pdata)
 	if (!acpi_dev_get_property(adev, "clk-name", ACPI_TYPE_STRING, &obj)) {
 		clk_data->name = devm_kzalloc(&adev->dev, obj->string.length,
 					      GFP_KERNEL);
+		if (!clk_data->name)
+			return -ENOMEM;
 
-		strcpy(clk_data->name, obj->string.pointer);
+		strscpy(clk_data->name, obj->string.pointer, obj->string.length);
 	} else {
 		/* Set default name to mclk if entry missing in firmware */
 		clk_data->name = "mclk";
@@ -114,6 +116,11 @@ static const struct apd_device_desc cz_i2c_desc = {
 static const struct apd_device_desc wt_i2c_desc = {
 	.setup = acpi_apd_setup,
 	.fixed_clk_rate = 150000000,
+};
+
+static const struct apd_device_desc wt_i3c_desc = {
+	.setup = acpi_apd_setup,
+	.fixed_clk_rate = 125000000,
 };
 
 static struct property_entry uart_properties[] = {
@@ -174,6 +181,17 @@ static const struct apd_device_desc hip08_spi_desc = {
 	.setup = acpi_apd_setup,
 	.fixed_clk_rate = 250000000,
 };
+
+static const struct apd_device_desc leca_spi_desc = {
+	.setup = acpi_apd_setup,
+	.fixed_clk_rate = 400000000,
+};
+
+static const struct apd_device_desc leca_i2c_desc = {
+	.setup = acpi_apd_setup,
+	.fixed_clk_rate = 250000000,
+};
+
 #endif /* CONFIG_ARM64 */
 
 #endif
@@ -195,7 +213,7 @@ static int acpi_apd_create_device(struct acpi_device *adev,
 		return IS_ERR_OR_NULL(pdev) ? PTR_ERR(pdev) : 1;
 	}
 
-	pdata = kzalloc(sizeof(*pdata), GFP_KERNEL);
+	pdata = kzalloc_obj(*pdata);
 	if (!pdata)
 		return -ENOMEM;
 
@@ -229,6 +247,7 @@ static const struct acpi_device_id acpi_apd_device_ids[] = {
 	{ "AMD0030", },
 	{ "AMD0040", APD_ADDR(fch_misc_desc)},
 	{ "AMDI0010", APD_ADDR(wt_i2c_desc) },
+	{ "AMDI0015", APD_ADDR(wt_i3c_desc) },
 	{ "AMDI0019", APD_ADDR(wt_i2c_desc) },
 	{ "AMDI0020", APD_ADDR(cz_uart_desc) },
 	{ "AMDI0022", APD_ADDR(cz_uart_desc) },
@@ -243,6 +262,8 @@ static const struct acpi_device_id acpi_apd_device_ids[] = {
 	{ "HISI02A2", APD_ADDR(hip08_i2c_desc) },
 	{ "HISI02A3", APD_ADDR(hip08_lite_i2c_desc) },
 	{ "HISI0173", APD_ADDR(hip08_spi_desc) },
+	{ "LECA0002", APD_ADDR(leca_spi_desc) },
+	{ "LECA0003", APD_ADDR(leca_i2c_desc) },
 	{ "NXP0001", APD_ADDR(nxp_i2c_desc) },
 #endif
 	{ }

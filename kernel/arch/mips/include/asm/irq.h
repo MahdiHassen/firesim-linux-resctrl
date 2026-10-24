@@ -19,7 +19,6 @@
 #define IRQ_STACK_SIZE			THREAD_SIZE
 #define IRQ_STACK_START			(IRQ_STACK_SIZE - 16)
 
-extern void __init init_IRQ(void);
 extern void *irq_stack[NR_CPUS];
 
 /*
@@ -55,7 +54,7 @@ static inline int irq_canonicalize(int irq)
 
 asmlinkage void plat_irq_dispatch(void);
 
-extern void do_IRQ(unsigned int irq);
+asmlinkage void do_IRQ(unsigned int irq);
 
 struct irq_domain;
 extern void do_domain_IRQ(struct irq_domain *domain, unsigned int irq);
@@ -78,7 +77,7 @@ extern int cp0_fdc_irq;
 extern int get_c0_fdc_int(void);
 
 void arch_trigger_cpumask_backtrace(const struct cpumask *mask,
-				    bool exclude_self);
+				    int exclude_cpu);
 #define arch_trigger_cpumask_backtrace arch_trigger_cpumask_backtrace
 
 #endif /* _ASM_IRQ_H */

@@ -47,15 +47,6 @@ void rxrpc_get_skb(struct sk_buff *skb, enum rxrpc_skb_trace why)
 }
 
 /*
- * Note the dropping of a ref on a socket buffer by the core.
- */
-void rxrpc_eaten_skb(struct sk_buff *skb, enum rxrpc_skb_trace why)
-{
-	int n = atomic_inc_return(&rxrpc_n_rx_skbs);
-	trace_rxrpc_skb(skb, 0, n, why);
-}
-
-/*
  * Note the destruction of a socket buffer.
  */
 void rxrpc_free_skb(struct sk_buff *skb, enum rxrpc_skb_trace why)
@@ -63,7 +54,7 @@ void rxrpc_free_skb(struct sk_buff *skb, enum rxrpc_skb_trace why)
 	if (skb) {
 		int n = atomic_dec_return(select_skb_count(skb));
 		trace_rxrpc_skb(skb, refcount_read(&skb->users), n, why);
-		kfree_skb(skb);
+		consume_skb(skb);
 	}
 }
 
@@ -78,6 +69,6 @@ void rxrpc_purge_queue(struct sk_buff_head *list)
 		int n = atomic_dec_return(select_skb_count(skb));
 		trace_rxrpc_skb(skb, refcount_read(&skb->users), n,
 				rxrpc_skb_put_purge);
-		kfree_skb(skb);
+		consume_skb(skb);
 	}
 }

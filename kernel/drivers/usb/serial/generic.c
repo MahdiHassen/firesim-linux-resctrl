@@ -17,7 +17,6 @@
 #include <linux/moduleparam.h>
 #include <linux/usb.h>
 #include <linux/usb/serial.h>
-#include <linux/uaccess.h>
 #include <linux/kfifo.h>
 #include <linux/serial.h>
 
@@ -63,7 +62,6 @@ static int usb_serial_generic_calc_num_ports(struct usb_serial *serial,
 
 static struct usb_serial_driver usb_serial_generic_device = {
 	.driver = {
-		.owner =	THIS_MODULE,
 		.name =		"generic",
 	},
 	.id_table =		generic_device_ids,

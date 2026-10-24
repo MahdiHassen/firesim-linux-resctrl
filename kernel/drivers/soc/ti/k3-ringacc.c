@@ -9,8 +9,8 @@
 #include <linux/io.h>
 #include <linux/module.h>
 #include <linux/of.h>
-#include <linux/of_device.h>
 #include <linux/platform_device.h>
+#include <linux/string_choices.h>
 #include <linux/sys_soc.h>
 #include <linux/dma/ti-cppi5.h>
 #include <linux/soc/ti/k3-ringacc.h>
@@ -125,6 +125,7 @@ struct k3_ring_ops {
  * @occ: Occupancy
  * @windex: Write index
  * @rindex: Read index
+ * @tdown_complete: Tear down complete state
  */
 struct k3_ring_state {
 	u32 free;
@@ -161,7 +162,7 @@ struct k3_ring {
 	struct k3_ringacc_proxy_target_regs  __iomem *proxy;
 	dma_addr_t	ring_mem_dma;
 	void		*ring_mem_virt;
-	struct k3_ring_ops *ops;
+	const struct k3_ring_ops *ops;
 	u32		size;
 	enum k3_ring_size elm_size;
 	enum k3_ring_mode mode;
@@ -192,7 +193,7 @@ struct k3_ringacc_ops {
  * @num_rings: number of ring in RA
  * @rings_inuse: bitfield for ring usage tracking
  * @rm_gp_range: general purpose rings range from tisci
- * @dma_ring_reset_quirk: DMA reset w/a enable
+ * @dma_ring_reset_quirk: DMA reset workaround enable
  * @num_proxies: number of RA proxies
  * @proxy_inuse: bitfield for proxy usage tracking
  * @rings: array of rings descriptors (struct @k3_ring)
@@ -229,9 +230,9 @@ struct k3_ringacc {
 };
 
 /**
- * struct k3_ringacc - Rings accelerator SoC data
+ * struct k3_ringacc_soc_data - Rings accelerator SoC data
  *
- * @dma_ring_reset_quirk:  DMA reset w/a enable
+ * @dma_ring_reset_quirk:  DMA reset workaround enable
  */
 struct k3_ringacc_soc_data {
 	unsigned dma_ring_reset_quirk:1;
@@ -268,17 +269,17 @@ static int k3_ringacc_ring_pop_mem(struct k3_ring *ring, void *elem);
 static int k3_dmaring_fwd_pop(struct k3_ring *ring, void *elem);
 static int k3_dmaring_reverse_pop(struct k3_ring *ring, void *elem);
 
-static struct k3_ring_ops k3_ring_mode_ring_ops = {
+static const struct k3_ring_ops k3_ring_mode_ring_ops = {
 		.push_tail = k3_ringacc_ring_push_mem,
 		.pop_head = k3_ringacc_ring_pop_mem,
 };
 
-static struct k3_ring_ops k3_dmaring_fwd_ops = {
+static const struct k3_ring_ops k3_dmaring_fwd_ops = {
 		.push_tail = k3_ringacc_ring_push_mem,
 		.pop_head = k3_dmaring_fwd_pop,
 };
 
-static struct k3_ring_ops k3_dmaring_reverse_ops = {
+static const struct k3_ring_ops k3_dmaring_reverse_ops = {
 		/* Reverse side of the DMA ring can only be popped by SW */
 		.pop_head = k3_dmaring_reverse_pop,
 };
@@ -288,7 +289,7 @@ static int k3_ringacc_ring_pop_io(struct k3_ring *ring, void *elem);
 static int k3_ringacc_ring_push_head_io(struct k3_ring *ring, void *elem);
 static int k3_ringacc_ring_pop_tail_io(struct k3_ring *ring, void *elem);
 
-static struct k3_ring_ops k3_ring_mode_msg_ops = {
+static const struct k3_ring_ops k3_ring_mode_msg_ops = {
 		.push_tail = k3_ringacc_ring_push_io,
 		.push_head = k3_ringacc_ring_push_head_io,
 		.pop_tail = k3_ringacc_ring_pop_tail_io,
@@ -300,7 +301,7 @@ static int k3_ringacc_ring_push_tail_proxy(struct k3_ring *ring, void *elem);
 static int k3_ringacc_ring_pop_head_proxy(struct k3_ring *ring, void *elem);
 static int k3_ringacc_ring_pop_tail_proxy(struct k3_ring *ring, void *elem);
 
-static struct k3_ring_ops k3_ring_mode_proxy_ops = {
+static const struct k3_ring_ops k3_ring_mode_proxy_ops = {
 		.push_tail = k3_ringacc_ring_push_tail_proxy,
 		.push_head = k3_ringacc_ring_push_head_proxy,
 		.pop_tail = k3_ringacc_ring_pop_tail_proxy,
@@ -406,6 +407,11 @@ static int k3_dmaring_request_dual_ring(struct k3_ringacc *ringacc, int fwd_id,
 
 	mutex_lock(&ringacc->req_lock);
 
+	if (!try_module_get(ringacc->dev->driver->owner)) {
+		ret = -EINVAL;
+		goto err_module_get;
+	}
+
 	if (test_bit(fwd_id, ringacc->rings_inuse)) {
 		ret = -EBUSY;
 		goto error;
@@ -421,6 +427,8 @@ static int k3_dmaring_request_dual_ring(struct k3_ringacc *ringacc, int fwd_id,
 	return 0;
 
 error:
+	module_put(ringacc->dev->driver->owner);
+err_module_get:
 	mutex_unlock(&ringacc->req_lock);
 	return ret;
 }
@@ -1005,7 +1013,7 @@ static int k3_ringacc_ring_pop_head_proxy(struct k3_ring *ring, void *elem)
 static int k3_ringacc_ring_pop_tail_proxy(struct k3_ring *ring, void *elem)
 {
 	return k3_ringacc_ring_access_proxy(ring, elem,
-					    K3_RINGACC_ACCESS_MODE_POP_HEAD);
+					    K3_RINGACC_ACCESS_MODE_POP_TAIL);
 }
 
 static int k3_ringacc_ring_access_io(struct k3_ring *ring, void *elem,
@@ -1076,7 +1084,7 @@ static int k3_ringacc_ring_pop_io(struct k3_ring *ring, void *elem)
 static int k3_ringacc_ring_pop_tail_io(struct k3_ring *ring, void *elem)
 {
 	return k3_ringacc_ring_access_io(ring, elem,
-					 K3_RINGACC_ACCESS_MODE_POP_HEAD);
+					 K3_RINGACC_ACCESS_MODE_POP_TAIL);
 }
 
 /*
@@ -1284,7 +1292,7 @@ struct k3_ringacc *of_k3_ringacc_get_by_phandle(struct device_node *np,
 
 	mutex_lock(&k3_ringacc_list_lock);
 	list_for_each_entry(entry, &k3_ringacc_list, list)
-		if (entry->dev->of_node == ringacc_np) {
+		if (device_match_of_node(entry->dev, ringacc_np)) {
 			ringacc = entry;
 			break;
 		}
@@ -1361,15 +1369,12 @@ static int k3_ringacc_init(struct platform_device *pdev,
 	const struct soc_device_attribute *soc;
 	void __iomem *base_fifo, *base_rt;
 	struct device *dev = &pdev->dev;
-	struct resource *res;
 	int ret, i;
 
 	dev->msi.domain = of_msi_get_domain(dev, dev->of_node,
 					    DOMAIN_BUS_TI_SCI_INTA_MSI);
-	if (!dev->msi.domain) {
-		dev_err(dev, "Failed to get MSI domain\n");
+	if (!dev->msi.domain)
 		return -EPROBE_DEFER;
-	}
 
 	ret = k3_ringacc_probe_dt(ringacc);
 	if (ret)
@@ -1382,24 +1387,20 @@ static int k3_ringacc_init(struct platform_device *pdev,
 		ringacc->dma_ring_reset_quirk = soc_data->dma_ring_reset_quirk;
 	}
 
-	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "rt");
-	base_rt = devm_ioremap_resource(dev, res);
+	base_rt = devm_platform_ioremap_resource_byname(pdev, "rt");
 	if (IS_ERR(base_rt))
 		return PTR_ERR(base_rt);
 
-	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "fifos");
-	base_fifo = devm_ioremap_resource(dev, res);
+	base_fifo = devm_platform_ioremap_resource_byname(pdev, "fifos");
 	if (IS_ERR(base_fifo))
 		return PTR_ERR(base_fifo);
 
-	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "proxy_gcfg");
-	ringacc->proxy_gcfg = devm_ioremap_resource(dev, res);
+	ringacc->proxy_gcfg = devm_platform_ioremap_resource_byname(pdev, "proxy_gcfg");
 	if (IS_ERR(ringacc->proxy_gcfg))
 		return PTR_ERR(ringacc->proxy_gcfg);
 
-	res = platform_get_resource_byname(pdev, IORESOURCE_MEM,
-					   "proxy_target");
-	ringacc->proxy_target_base = devm_ioremap_resource(dev, res);
+	ringacc->proxy_target_base = devm_platform_ioremap_resource_byname(pdev,
+									   "proxy_target");
 	if (IS_ERR(ringacc->proxy_target_base))
 		return PTR_ERR(ringacc->proxy_target_base);
 
@@ -1436,7 +1437,7 @@ static int k3_ringacc_init(struct platform_device *pdev,
 		 ringacc->rm_gp_range->desc[0].num,
 		 ringacc->tisci_dev_id);
 	dev_info(dev, "dma-ring-reset-quirk: %s\n",
-		 ringacc->dma_ring_reset_quirk ? "enabled" : "disabled");
+		 str_enabled_disabled(ringacc->dma_ring_reset_quirk));
 	dev_info(dev, "RA Proxy rev. %08x, num_proxies:%u\n",
 		 readl(&ringacc->proxy_gcfg->revision), ringacc->num_proxies);
 
@@ -1466,7 +1467,6 @@ struct k3_ringacc *k3_ringacc_dmarings_init(struct platform_device *pdev,
 	struct device *dev = &pdev->dev;
 	struct k3_ringacc *ringacc;
 	void __iomem *base_rt;
-	struct resource *res;
 	int i;
 
 	ringacc = devm_kzalloc(dev, sizeof(*ringacc), GFP_KERNEL);
@@ -1481,8 +1481,7 @@ struct k3_ringacc *k3_ringacc_dmarings_init(struct platform_device *pdev,
 
 	mutex_init(&ringacc->req_lock);
 
-	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "ringrt");
-	base_rt = devm_ioremap_resource(dev, res);
+	base_rt = devm_platform_ioremap_resource_byname(pdev, "ringrt");
 	if (IS_ERR(base_rt))
 		return ERR_CAST(base_rt);
 
@@ -1553,14 +1552,13 @@ static int k3_ringacc_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int k3_ringacc_remove(struct platform_device *pdev)
+static void k3_ringacc_remove(struct platform_device *pdev)
 {
 	struct k3_ringacc *ringacc = dev_get_drvdata(&pdev->dev);
 
 	mutex_lock(&k3_ringacc_list_lock);
 	list_del(&ringacc->list);
 	mutex_unlock(&k3_ringacc_list_lock);
-	return 0;
 }
 
 static struct platform_driver k3_ringacc_driver = {

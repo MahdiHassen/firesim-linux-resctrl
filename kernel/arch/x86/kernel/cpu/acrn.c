@@ -26,8 +26,8 @@ static u32 __init acrn_detect(void)
 
 static void __init acrn_init_platform(void)
 {
-	/* Setup the IDT for ACRN hypervisor callback */
-	alloc_intr_gate(HYPERVISOR_CALLBACK_VECTOR, asm_sysvec_acrn_hv_callback);
+	/* Install system interrupt handler for ACRN hypervisor callback */
+	sysvec_install(HYPERVISOR_CALLBACK_VECTOR, sysvec_acrn_hv_callback);
 
 	x86_platform.calibrate_tsc = acrn_get_tsc_khz;
 	x86_platform.calibrate_cpu = acrn_get_tsc_khz;
@@ -51,8 +51,8 @@ DEFINE_IDTENTRY_SYSVEC(sysvec_acrn_hv_callback)
 	 * will block the interrupt whose vector is lower than
 	 * HYPERVISOR_CALLBACK_VECTOR.
 	 */
-	ack_APIC_irq();
-	inc_irq_stat(irq_hv_callback_count);
+	apic_eoi();
+	inc_irq_stat(HYPERVISOR_CALLBACK);
 
 	if (acrn_intr_handler)
 		acrn_intr_handler();

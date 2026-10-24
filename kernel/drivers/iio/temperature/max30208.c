@@ -34,7 +34,6 @@
 
 struct max30208_data {
 	struct i2c_client *client;
-	struct iio_dev *indio_dev;
 	struct mutex lock; /* Lock to prevent concurrent reads of temperature readings */
 };
 
@@ -219,7 +218,7 @@ static int max30208_probe(struct i2c_client *i2c)
 }
 
 static const struct i2c_device_id max30208_id_table[] = {
-	{ "max30208" },
+	{ .name = "max30208" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, max30208_id_table);
@@ -242,7 +241,7 @@ static struct i2c_driver max30208_driver = {
 		.of_match_table = max30208_of_match,
 		.acpi_match_table = max30208_acpi_match,
 	},
-	.probe_new = max30208_probe,
+	.probe = max30208_probe,
 	.id_table = max30208_id_table,
 };
 module_i2c_driver(max30208_driver);

@@ -11,7 +11,6 @@
 #include <linux/gpio/consumer.h>
 #include <linux/kernel.h>
 #include <linux/minmax.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/property.h>
@@ -318,15 +317,13 @@ static int mt6370_bl_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int mt6370_bl_remove(struct platform_device *pdev)
+static void mt6370_bl_remove(struct platform_device *pdev)
 {
 	struct mt6370_priv *priv = platform_get_drvdata(pdev);
 	struct backlight_device *bl_dev = priv->bl;
 
 	bl_dev->props.brightness = 0;
 	backlight_update_status(priv->bl);
-
-	return 0;
 }
 
 static const struct of_device_id mt6370_bl_of_match[] = {

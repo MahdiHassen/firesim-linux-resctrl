@@ -12,7 +12,6 @@
 #include <linux/i2c.h>
 #include <linux/interrupt.h>
 #include <linux/kernel.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/pm_runtime.h>
 #include <linux/regmap.h>
@@ -483,10 +482,11 @@ MODULE_DEVICE_TABLE(of, rt6190_of_dev_table);
 static struct i2c_driver rt6190_driver = {
 	.driver = {
 		.name = "rt6190",
+		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
 		.of_match_table = rt6190_of_dev_table,
 		.pm = pm_ptr(&rt6190_dev_pm),
 	},
-	.probe_new = rt6190_probe,
+	.probe = rt6190_probe,
 };
 module_i2c_driver(rt6190_driver);
 

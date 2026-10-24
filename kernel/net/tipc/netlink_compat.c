@@ -39,6 +39,7 @@
 #include "node.h"
 #include "net.h"
 #include <net/genetlink.h>
+#include <linux/string_helpers.h>
 #include <linux/tipc_config.h>
 
 /* The legacy API had an artificial message length limit called
@@ -101,6 +102,7 @@ static int tipc_add_tlv(struct sk_buff *skb, u16 type, void *data, u16 len)
 		return -EMSGSIZE;
 
 	skb_put(skb, TLV_SPACE(len));
+	memset(tlv, 0, TLV_SPACE(len));
 	tlv->tlv_type = htons(type);
 	tlv->tlv_len = htons(TLV_LENGTH(len));
 	if (len && data)
@@ -166,16 +168,11 @@ static struct sk_buff *tipc_get_err_tlv(char *str)
 	int str_len = strlen(str) + 1;
 	struct sk_buff *buf;
 
-	buf = tipc_tlv_alloc(TLV_SPACE(str_len));
+	buf = tipc_tlv_alloc(str_len);
 	if (buf)
 		tipc_add_tlv(buf, TIPC_TLV_ERROR_STRING, str, str_len);
 
 	return buf;
-}
-
-static inline bool string_is_valid(char *s, int len)
-{
-	return memchr(s, '\0', len) ? true : false;
 }
 
 static int __tipc_nl_compat_dumpit(struct tipc_nl_compat_cmd_dump *cmd,
@@ -205,14 +202,13 @@ static int __tipc_nl_compat_dumpit(struct tipc_nl_compat_cmd_dump *cmd,
 		return -ENOMEM;
 	}
 
-	attrbuf = kcalloc(tipc_genl_family.maxattr + 1,
-			  sizeof(struct nlattr *), GFP_KERNEL);
+	attrbuf = kzalloc_objs(struct nlattr *, tipc_genl_family.maxattr + 1);
 	if (!attrbuf) {
 		err = -ENOMEM;
 		goto err_out;
 	}
 
-	info.attrs = attrbuf;
+	info.info.attrs = attrbuf;
 
 	if (nlmsg_len(cb.nlh) > 0) {
 		err = nlmsg_parse_deprecated(cb.nlh, GENL_HDRLEN, attrbuf,
@@ -225,6 +221,10 @@ static int __tipc_nl_compat_dumpit(struct tipc_nl_compat_cmd_dump *cmd,
 		int rem;
 
 		len = (*cmd->dumpit)(buf, &cb);
+		if (len < 0) {
+			err = len;
+			goto err_out;
+		}
 
 		nlmsg_for_each_msg(nlmsg, nlmsg_hdr(buf), len, rem) {
 			err = nlmsg_parse_deprecated(nlmsg, GENL_HDRLEN,
@@ -341,9 +341,7 @@ static int __tipc_nl_compat_doit(struct tipc_nl_compat_cmd_doit *cmd,
 	if (!trans_buf)
 		return -ENOMEM;
 
-	attrbuf = kmalloc_array(tipc_genl_family.maxattr + 1,
-				sizeof(struct nlattr *),
-				GFP_KERNEL);
+	attrbuf = kmalloc_objs(struct nlattr *, tipc_genl_family.maxattr + 1);
 	if (!attrbuf) {
 		err = -ENOMEM;
 		goto trans_out;
@@ -445,7 +443,7 @@ static int tipc_nl_compat_bearer_enable(struct tipc_nl_compat_cmd_doit *cmd,
 		return -EINVAL;
 
 	len = min_t(int, len, TIPC_MAX_BEARER_NAME);
-	if (!string_is_valid(b->name, len))
+	if (!string_is_terminated(b->name, len))
 		return -EINVAL;
 
 	if (nla_put_string(skb, TIPC_NLA_BEARER_NAME, b->name))
@@ -486,7 +484,7 @@ static int tipc_nl_compat_bearer_disable(struct tipc_nl_compat_cmd_doit *cmd,
 		return -EINVAL;
 
 	len = min_t(int, len, TIPC_MAX_BEARER_NAME);
-	if (!string_is_valid(name, len))
+	if (!string_is_terminated(name, len))
 		return -EINVAL;
 
 	if (nla_put_string(skb, TIPC_NLA_BEARER_NAME, name))
@@ -584,7 +582,7 @@ static int tipc_nl_compat_link_stat_dump(struct tipc_nl_compat_msg *msg,
 		return -EINVAL;
 
 	len = min_t(int, len, TIPC_MAX_LINK_NAME);
-	if (!string_is_valid(name, len))
+	if (!string_is_terminated(name, len))
 		return -EINVAL;
 
 	if (strcmp(name, nla_data(link[TIPC_NLA_LINK_NAME])) != 0)
@@ -819,7 +817,7 @@ static int tipc_nl_compat_link_set(struct tipc_nl_compat_cmd_doit *cmd,
 		return -EINVAL;
 
 	len = min_t(int, len, TIPC_MAX_LINK_NAME);
-	if (!string_is_valid(lc->name, len))
+	if (!string_is_terminated(lc->name, len))
 		return -EINVAL;
 
 	media = tipc_media_find(lc->name);
@@ -856,7 +854,7 @@ static int tipc_nl_compat_link_reset_stats(struct tipc_nl_compat_cmd_doit *cmd,
 		return -EINVAL;
 
 	len = min_t(int, len, TIPC_MAX_LINK_NAME);
-	if (!string_is_valid(name, len))
+	if (!string_is_terminated(name, len))
 		return -EINVAL;
 
 	if (nla_put_string(skb, TIPC_NLA_LINK_NAME, name))
@@ -1298,7 +1296,7 @@ static int tipc_nl_compat_recv(struct sk_buff *skb, struct genl_info *info)
 	struct tipc_nl_compat_msg msg;
 	struct nlmsghdr *req_nlh;
 	struct nlmsghdr *rep_nlh;
-	struct tipc_genlmsghdr *req_userhdr = info->userhdr;
+	struct tipc_genlmsghdr *req_userhdr = genl_info_userhdr(info);
 
 	memset(&msg, 0, sizeof(msg));
 

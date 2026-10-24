@@ -86,13 +86,13 @@ nv50_gr_chan = {
 };
 
 int
-nv50_gr_chan_new(struct nvkm_gr *base, struct nvkm_fifo_chan *fifoch,
+nv50_gr_chan_new(struct nvkm_gr *base, struct nvkm_chan *fifoch,
 		 const struct nvkm_oclass *oclass, struct nvkm_object **pobject)
 {
 	struct nv50_gr *gr = nv50_gr(base);
 	struct nv50_gr_chan *chan;
 
-	if (!(chan = kzalloc(sizeof(*chan), GFP_KERNEL)))
+	if (!(chan = kzalloc_obj(*chan)))
 		return -ENOMEM;
 	nvkm_object_ctor(&nv50_gr_chan, oclass, &chan->object);
 	chan->gr = gr;
@@ -765,7 +765,7 @@ nv50_gr_new_(const struct nvkm_gr_func *func, struct nvkm_device *device,
 {
 	struct nv50_gr *gr;
 
-	if (!(gr = kzalloc(sizeof(*gr), GFP_KERNEL)))
+	if (!(gr = kzalloc_obj(*gr)))
 		return -ENOMEM;
 	spin_lock_init(&gr->lock);
 	*pgr = &gr->base;

@@ -10,13 +10,9 @@
 #include <linux/irqdomain.h>
 #include <linux/of.h>
 
-#ifndef ACPI_IRQCHIP_FWSPEC_ARG0
-#define ACPI_IRQCHIP_FWSPEC_ARG0	0 /* unused */
-#endif
-
 enum acpi_irq_model_id acpi_irq_model;
 
-static struct fwnode_handle *(*acpi_get_gsi_domain_id)(u32 gsi);
+static acpi_gsi_domain_disp_fn acpi_get_gsi_domain_id;
 static u32 (*acpi_gsi_to_irq_fallback)(u32 gsi);
 
 /**
@@ -47,54 +43,6 @@ int acpi_gsi_to_irq(u32 gsi, unsigned int *irq)
 }
 EXPORT_SYMBOL_GPL(acpi_gsi_to_irq);
 
-
-static void pack_fwspec(struct irq_fwspec *fwspec, u32 gsi, int trigger,
-			int polarity)
-{
-	unsigned int offset = 0;
-
-	if (IS_ENABLED(CONFIG_ACPI_IRQCHIP_FWSPEC_ARG0)) {
-		fwspec->param[0] = ACPI_IRQCHIP_FWSPEC_ARG0;
-		offset = 1;
-	}
-
-	fwspec->param[0 + offset] = gsi;
-	fwspec->param[1 + offset] = acpi_dev_get_irq_type(trigger, polarity);
-	fwspec->param_count = 2 + offset;
-}
-
-/**
- * acpi_register_partitioned_percpu_gsi() - Map a GSI to a percpu IRQ in the
- * provided partition.
- * @dev: device for which IRQ has to be mapped
- * @gsi: GSI IRQ number
- * @trigger: trigger type of the GSI number to be mapped
- * @polarity: polarity of the GSI to be mapped
- * @processor_container_uid: Which group of CPUs the percpu interrupt can be
- * 			     triggered on.
- *
- * Returns: a valid linux IRQ number on success
- *          -EINVAL on failure
- */
-int acpi_register_partitioned_percpu_gsi(struct device *dev, u32 gsi,
-					 int trigger, int polarity,
-					 u32 processor_container_uid)
-{
-	struct irq_fwspec fwspec;
-
-	fwspec.fwnode = acpi_get_gsi_domain_id(gsi);
-	if (WARN_ON(!fwspec.fwnode)) {
-		pr_warn("GSI: No registered irqchip, giving up\n");
-		return -EINVAL;
-	}
-
-	pack_fwspec(&fwspec, gsi, trigger, polarity);
-	fwspec.param[fwspec.param_count] = processor_container_uid;
-	fwspec.param_count++;
-
-	return irq_create_fwspec_mapping(&fwspec);
-}
-
 /**
  * acpi_register_gsi() - Map a GSI to a linux IRQ number
  * @dev: device for which IRQ has to be mapped
@@ -109,6 +57,7 @@ int acpi_register_gsi(struct device *dev, u32 gsi, int trigger,
 		      int polarity)
 {
 	struct irq_fwspec fwspec;
+	unsigned int irq;
 
 	fwspec.fwnode = acpi_get_gsi_domain_id(gsi);
 	if (WARN_ON(!fwspec.fwnode)) {
@@ -116,9 +65,15 @@ int acpi_register_gsi(struct device *dev, u32 gsi, int trigger,
 		return -EINVAL;
 	}
 
-	pack_fwspec(&fwspec, gsi, trigger, polarity);
+	fwspec.param[0] = gsi;
+	fwspec.param[1] = acpi_dev_get_irq_type(trigger, polarity);
+	fwspec.param_count = 2;
 
-	return irq_create_fwspec_mapping(&fwspec);
+	irq = irq_create_fwspec_mapping(&fwspec);
+	if (!irq)
+		return -EINVAL;
+
+	return irq;
 }
 EXPORT_SYMBOL_GPL(acpi_register_gsi);
 
@@ -215,9 +170,10 @@ static inline void acpi_irq_parse_one_match(struct fwnode_handle *fwnode,
 		return;
 	ctx->rc = 0;
 	*ctx->res_flags = acpi_dev_irq_flags(triggering, polarity, shareable, wake_capable);
-
-	pack_fwspec(ctx->fwspec, hwirq, triggering, polarity);
 	ctx->fwspec->fwnode = fwnode;
+	ctx->fwspec->param[0] = hwirq;
+	ctx->fwspec->param[1] = acpi_dev_get_irq_type(triggering, polarity);
+	ctx->fwspec->param_count = 2;
 }
 
 /**
@@ -344,6 +300,25 @@ int acpi_irq_get(acpi_handle handle, unsigned int index, struct resource *res)
 }
 EXPORT_SYMBOL_GPL(acpi_irq_get);
 
+const struct cpumask *acpi_irq_get_affinity(acpi_handle handle,
+					    unsigned int index)
+{
+	struct irq_fwspec_info info;
+	struct irq_fwspec fwspec;
+	unsigned long flags;
+
+	if (acpi_irq_parse_one(handle, index, &fwspec, &flags))
+		return NULL;
+
+	if (irq_populate_fwspec_info(&fwspec, &info))
+		return NULL;
+
+	if (!(info.flags & IRQ_FWSPEC_INFO_AFFINITY_VALID))
+		return NULL;
+
+	return info.affinity;
+}
+
 /**
  * acpi_set_irq_model - Setup the GSI irqdomain information
  * @model: the value assigned to acpi_irq_model
@@ -351,11 +326,23 @@ EXPORT_SYMBOL_GPL(acpi_irq_get);
  *	for a given GSI
  */
 void __init acpi_set_irq_model(enum acpi_irq_model_id model,
-			       struct fwnode_handle *(*fn)(u32))
+			       acpi_gsi_domain_disp_fn fn)
 {
 	acpi_irq_model = model;
 	acpi_get_gsi_domain_id = fn;
 }
+
+/*
+ * acpi_get_gsi_dispatcher() - Get the GSI dispatcher function
+ *
+ * Return the dispatcher function that computes the domain fwnode for
+ * a given GSI.
+ */
+acpi_gsi_domain_disp_fn acpi_get_gsi_dispatcher(void)
+{
+	return acpi_get_gsi_domain_id;
+}
+EXPORT_SYMBOL_GPL(acpi_get_gsi_dispatcher);
 
 /**
  * acpi_set_gsi_to_irq_fallback - Register a GSI transfer

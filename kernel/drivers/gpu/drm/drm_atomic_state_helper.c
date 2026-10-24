@@ -37,6 +37,7 @@
 #include <drm/drm_vblank.h>
 #include <drm/drm_writeback.h>
 
+#include <linux/export.h>
 #include <linux/slab.h>
 #include <linux/dma-fence.h>
 
@@ -74,6 +75,7 @@ __drm_atomic_helper_crtc_state_reset(struct drm_crtc_state *crtc_state,
 				     struct drm_crtc *crtc)
 {
 	crtc_state->crtc = crtc;
+	crtc_state->background_color = DRM_ARGB64_PREP(0xffff, 0, 0, 0);
 }
 EXPORT_SYMBOL(__drm_atomic_helper_crtc_state_reset);
 
@@ -113,7 +115,7 @@ EXPORT_SYMBOL(__drm_atomic_helper_crtc_reset);
 void drm_atomic_helper_crtc_reset(struct drm_crtc *crtc)
 {
 	struct drm_crtc_state *crtc_state =
-		kzalloc(sizeof(*crtc->state), GFP_KERNEL);
+		kzalloc_obj(*crtc->state);
 
 	if (crtc->state)
 		crtc->funcs->atomic_destroy_state(crtc, crtc->state);
@@ -174,7 +176,7 @@ drm_atomic_helper_crtc_duplicate_state(struct drm_crtc *crtc)
 	if (WARN_ON(!crtc->state))
 		return NULL;
 
-	state = kmalloc(sizeof(*state), GFP_KERNEL);
+	state = kmalloc_obj(*state);
 	if (state)
 		__drm_atomic_helper_crtc_duplicate_state(crtc, state);
 
@@ -267,6 +269,11 @@ void __drm_atomic_helper_plane_state_reset(struct drm_plane_state *plane_state,
 			plane_state->color_range = val;
 	}
 
+	if (plane->color_pipeline_property) {
+		/* default is always NULL, i.e., bypass */
+		plane_state->color_pipeline = NULL;
+	}
+
 	if (plane->zpos_property) {
 		if (!drm_object_property_get_default_value(&plane->base,
 							   plane->zpos_property,
@@ -274,6 +281,20 @@ void __drm_atomic_helper_plane_state_reset(struct drm_plane_state *plane_state,
 			plane_state->zpos = val;
 			plane_state->normalized_zpos = val;
 		}
+	}
+
+	if (plane->hotspot_x_property) {
+		if (!drm_object_property_get_default_value(&plane->base,
+							   plane->hotspot_x_property,
+							   &val))
+			plane_state->hotspot_x = val;
+	}
+
+	if (plane->hotspot_y_property) {
+		if (!drm_object_property_get_default_value(&plane->base,
+							   plane->hotspot_y_property,
+							   &val))
+			plane_state->hotspot_y = val;
 	}
 }
 EXPORT_SYMBOL(__drm_atomic_helper_plane_state_reset);
@@ -313,7 +334,7 @@ void drm_atomic_helper_plane_reset(struct drm_plane *plane)
 		__drm_atomic_helper_plane_destroy_state(plane->state);
 
 	kfree(plane->state);
-	plane->state = kzalloc(sizeof(*plane->state), GFP_KERNEL);
+	plane->state = kzalloc_obj(*plane->state);
 	if (plane->state)
 		__drm_atomic_helper_plane_reset(plane, plane->state);
 }
@@ -338,6 +359,7 @@ void __drm_atomic_helper_plane_duplicate_state(struct drm_plane *plane,
 	state->fence = NULL;
 	state->commit = NULL;
 	state->fb_damage_clips = NULL;
+	state->color_mgmt_changed = false;
 }
 EXPORT_SYMBOL(__drm_atomic_helper_plane_duplicate_state);
 
@@ -356,7 +378,7 @@ drm_atomic_helper_plane_duplicate_state(struct drm_plane *plane)
 	if (WARN_ON(!plane->state))
 		return NULL;
 
-	state = kmalloc(sizeof(*state), GFP_KERNEL);
+	state = kmalloc_obj(*state);
 	if (state)
 		__drm_atomic_helper_plane_duplicate_state(plane, state);
 
@@ -452,8 +474,7 @@ EXPORT_SYMBOL(__drm_atomic_helper_connector_reset);
  */
 void drm_atomic_helper_connector_reset(struct drm_connector *connector)
 {
-	struct drm_connector_state *conn_state =
-		kzalloc(sizeof(*conn_state), GFP_KERNEL);
+	struct drm_connector_state *conn_state = kzalloc_obj(*conn_state);
 
 	if (connector->state)
 		__drm_atomic_helper_connector_destroy_state(connector->state);
@@ -480,6 +501,130 @@ void drm_atomic_helper_connector_tv_margins_reset(struct drm_connector *connecto
 	state->tv.margins.bottom = cmdline->tv_margins.bottom;
 }
 EXPORT_SYMBOL(drm_atomic_helper_connector_tv_margins_reset);
+
+/**
+ * drm_atomic_helper_connector_tv_reset - Resets Analog TV connector properties
+ * @connector: DRM connector
+ *
+ * Resets the analog TV properties attached to a connector
+ */
+void drm_atomic_helper_connector_tv_reset(struct drm_connector *connector)
+{
+	struct drm_device *dev = connector->dev;
+	struct drm_cmdline_mode *cmdline = &connector->cmdline_mode;
+	struct drm_connector_state *state = connector->state;
+	struct drm_property *prop;
+	uint64_t val;
+
+	prop = dev->mode_config.tv_mode_property;
+	if (prop)
+		if (!drm_object_property_get_default_value(&connector->base,
+							   prop, &val))
+			state->tv.mode = val;
+
+	if (cmdline->tv_mode_specified)
+		state->tv.mode = cmdline->tv_mode;
+
+	prop = dev->mode_config.tv_select_subconnector_property;
+	if (prop)
+		if (!drm_object_property_get_default_value(&connector->base,
+							   prop, &val))
+			state->tv.select_subconnector = val;
+
+	prop = dev->mode_config.tv_subconnector_property;
+	if (prop)
+		if (!drm_object_property_get_default_value(&connector->base,
+							   prop, &val))
+			state->tv.subconnector = val;
+
+	prop = dev->mode_config.tv_brightness_property;
+	if (prop)
+		if (!drm_object_property_get_default_value(&connector->base,
+							   prop, &val))
+			state->tv.brightness = val;
+
+	prop = dev->mode_config.tv_contrast_property;
+	if (prop)
+		if (!drm_object_property_get_default_value(&connector->base,
+							   prop, &val))
+			state->tv.contrast = val;
+
+	prop = dev->mode_config.tv_flicker_reduction_property;
+	if (prop)
+		if (!drm_object_property_get_default_value(&connector->base,
+							   prop, &val))
+			state->tv.flicker_reduction = val;
+
+	prop = dev->mode_config.tv_overscan_property;
+	if (prop)
+		if (!drm_object_property_get_default_value(&connector->base,
+							   prop, &val))
+			state->tv.overscan = val;
+
+	prop = dev->mode_config.tv_saturation_property;
+	if (prop)
+		if (!drm_object_property_get_default_value(&connector->base,
+							   prop, &val))
+			state->tv.saturation = val;
+
+	prop = dev->mode_config.tv_hue_property;
+	if (prop)
+		if (!drm_object_property_get_default_value(&connector->base,
+							   prop, &val))
+			state->tv.hue = val;
+
+	drm_atomic_helper_connector_tv_margins_reset(connector);
+}
+EXPORT_SYMBOL(drm_atomic_helper_connector_tv_reset);
+
+/**
+ * drm_atomic_helper_connector_tv_check - Validate an analog TV connector state
+ * @connector: DRM Connector
+ * @state: the DRM State object
+ *
+ * Checks the state object to see if the requested state is valid for an
+ * analog TV connector.
+ *
+ * Return:
+ * %0 for success, a negative error code on error.
+ */
+int drm_atomic_helper_connector_tv_check(struct drm_connector *connector,
+					 struct drm_atomic_commit *state)
+{
+	struct drm_connector_state *old_conn_state =
+		drm_atomic_get_old_connector_state(state, connector);
+	struct drm_connector_state *new_conn_state =
+		drm_atomic_get_new_connector_state(state, connector);
+	struct drm_crtc_state *crtc_state;
+	struct drm_crtc *crtc;
+
+	crtc = new_conn_state->crtc;
+	if (!crtc)
+		return 0;
+
+	crtc_state = drm_atomic_get_new_crtc_state(state, crtc);
+	if (!crtc_state)
+		return -EINVAL;
+
+	if (old_conn_state->tv.mode != new_conn_state->tv.mode)
+		crtc_state->mode_changed = true;
+
+	if (old_conn_state->tv.margins.left != new_conn_state->tv.margins.left ||
+	    old_conn_state->tv.margins.right != new_conn_state->tv.margins.right ||
+	    old_conn_state->tv.margins.top != new_conn_state->tv.margins.top ||
+	    old_conn_state->tv.margins.bottom != new_conn_state->tv.margins.bottom ||
+	    old_conn_state->tv.mode != new_conn_state->tv.mode ||
+	    old_conn_state->tv.brightness != new_conn_state->tv.brightness ||
+	    old_conn_state->tv.contrast != new_conn_state->tv.contrast ||
+	    old_conn_state->tv.flicker_reduction != new_conn_state->tv.flicker_reduction ||
+	    old_conn_state->tv.overscan != new_conn_state->tv.overscan ||
+	    old_conn_state->tv.saturation != new_conn_state->tv.saturation ||
+	    old_conn_state->tv.hue != new_conn_state->tv.hue)
+		crtc_state->connectors_changed = true;
+
+	return 0;
+}
+EXPORT_SYMBOL(drm_atomic_helper_connector_tv_check);
 
 /**
  * __drm_atomic_helper_connector_duplicate_state - copy atomic connector state
@@ -521,7 +666,7 @@ drm_atomic_helper_connector_duplicate_state(struct drm_connector *connector)
 	if (WARN_ON(!connector->state))
 		return NULL;
 
-	state = kmalloc(sizeof(*state), GFP_KERNEL);
+	state = kmalloc_obj(*state);
 	if (state)
 		__drm_atomic_helper_connector_duplicate_state(connector, state);
 
@@ -568,6 +713,28 @@ void drm_atomic_helper_connector_destroy_state(struct drm_connector *connector,
 	kfree(state);
 }
 EXPORT_SYMBOL(drm_atomic_helper_connector_destroy_state);
+
+/**
+ * __drm_atomic_helper_private_obj_create_state - initializes private object state
+ * @obj: private object
+ * @state: new state to initialize
+ *
+ * Initializes the newly allocated @state, usually required when
+ * initializing the drivers.
+ *
+ * @obj is assumed to be zeroed.
+ *
+ * This is useful for drivers that use private states.
+ */
+void __drm_atomic_helper_private_obj_create_state(struct drm_private_obj *obj,
+						  struct drm_private_state *state)
+{
+	if (state)
+		state->obj = obj;
+
+	obj->state = state;
+}
+EXPORT_SYMBOL(__drm_atomic_helper_private_obj_create_state);
 
 /**
  * __drm_atomic_helper_private_obj_duplicate_state - copy atomic private state
@@ -618,7 +785,7 @@ drm_atomic_helper_bridge_duplicate_state(struct drm_bridge *bridge)
 	if (WARN_ON(!bridge->base.state))
 		return NULL;
 
-	new = kzalloc(sizeof(*new), GFP_KERNEL);
+	new = kzalloc_obj(*new);
 	if (new)
 		__drm_atomic_helper_bridge_duplicate_state(bridge, new);
 
@@ -658,6 +825,7 @@ void __drm_atomic_helper_bridge_reset(struct drm_bridge *bridge,
 				      struct drm_bridge_state *state)
 {
 	memset(state, 0, sizeof(*state));
+	__drm_atomic_helper_private_obj_create_state(&bridge->base, &state->base);
 	state->bridge = bridge;
 }
 EXPORT_SYMBOL(__drm_atomic_helper_bridge_reset);
@@ -676,7 +844,7 @@ drm_atomic_helper_bridge_reset(struct drm_bridge *bridge)
 {
 	struct drm_bridge_state *bridge_state;
 
-	bridge_state = kzalloc(sizeof(*bridge_state), GFP_KERNEL);
+	bridge_state = kzalloc_obj(*bridge_state);
 	if (!bridge_state)
 		return ERR_PTR(-ENOMEM);
 

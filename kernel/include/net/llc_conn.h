@@ -1,15 +1,9 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef LLC_CONN_H
 #define LLC_CONN_H
 /*
  * Copyright (c) 1997 by Procom Technology, Inc.
  * 		 2001, 2002 by Arnaldo Carvalho de Melo <acme@conectiva.com.br>
- *
- * This program can be redistributed or modified under the terms of the
- * GNU General Public License as published by the Free Software Foundation.
- * This program is distributed without any warranty or implied warranty
- * of merchantability or fitness for a particular purpose.
- *
- * See the GNU General Public License for more details.
  */
 #include <linux/timer.h>
 #include <net/llc_if.h>
@@ -111,7 +105,7 @@ void llc_conn_resend_i_pdu_as_cmd(struct sock *sk, u8 nr, u8 first_p_bit);
 void llc_conn_resend_i_pdu_as_rsp(struct sock *sk, u8 nr, u8 first_f_bit);
 int llc_conn_remove_acked_pdus(struct sock *conn, u8 nr, u16 *how_many_unacked);
 struct sock *llc_lookup_established(struct llc_sap *sap, struct llc_addr *daddr,
-				    struct llc_addr *laddr);
+				    struct llc_addr *laddr, const struct net *net);
 void llc_sap_add_socket(struct llc_sap *sap, struct sock *sk);
 void llc_sap_remove_socket(struct llc_sap *sap, struct sock *sk);
 

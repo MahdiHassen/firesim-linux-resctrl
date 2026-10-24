@@ -529,13 +529,16 @@ void bnx2x_vfpf_close_vf(struct bnx2x *bp)
 	bnx2x_vfpf_finalize(bp, &req->first_tlv);
 
 free_irq:
-	/* Disable HW interrupts, NAPI */
-	bnx2x_netif_stop(bp, 0);
-	/* Delete all NAPI objects */
-	bnx2x_del_all_napi(bp);
+	if (!bp->nic_stopped) {
+		/* Disable HW interrupts, NAPI */
+		bnx2x_netif_stop(bp, 0);
+		/* Delete all NAPI objects */
+		bnx2x_del_all_napi(bp);
 
-	/* Release IRQs */
-	bnx2x_free_irq(bp);
+		/* Release IRQs */
+		bnx2x_free_irq(bp);
+		bp->nic_stopped = true;
+	}
 }
 
 static void bnx2x_leading_vfq_init(struct bnx2x *bp, struct bnx2x_virtf *vf,
@@ -1651,8 +1654,7 @@ static int bnx2x_vf_mbx_macvlan_list(struct bnx2x *bp,
 	int i, j;
 	struct bnx2x_vf_mac_vlan_filters *fl = NULL;
 
-	fl = kzalloc(struct_size(fl, filters, tlv->n_mac_vlan_filters),
-		     GFP_KERNEL);
+	fl = kzalloc_flex(*fl, filters, tlv->n_mac_vlan_filters);
 	if (!fl)
 		return -ENOMEM;
 

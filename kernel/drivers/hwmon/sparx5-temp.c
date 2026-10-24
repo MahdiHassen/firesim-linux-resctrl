@@ -9,7 +9,6 @@
 #include <linux/hwmon.h>
 #include <linux/init.h>
 #include <linux/io.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 
@@ -86,7 +85,7 @@ static umode_t s5_is_visible(const void *_data, enum hwmon_sensor_types type,
 	}
 }
 
-static const struct hwmon_channel_info *s5_info[] = {
+static const struct hwmon_channel_info * const s5_info[] = {
 	HWMON_CHANNEL_INFO(chip, HWMON_C_REGISTER_TZ),
 	HWMON_CHANNEL_INFO(temp, HWMON_T_INPUT),
 	NULL

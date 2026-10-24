@@ -185,7 +185,8 @@ static inline int hw_breakpoint_slots_cached(int type)
 static __init bool
 bp_slots_histogram_alloc(struct bp_slots_histogram *hist, enum bp_type_idx type)
 {
-	hist->count = kcalloc(hw_breakpoint_slots_cached(type), sizeof(*hist->count), GFP_KERNEL);
+	hist->count = kzalloc_objs(*hist->count,
+				   hw_breakpoint_slots_cached(type));
 	return hist->count;
 }
 
@@ -523,26 +524,6 @@ toggle_bp_slot(struct perf_event *bp, bool enable, enum bp_type_idx type, int we
 	return 0;
 }
 
-__weak int arch_reserve_bp_slot(struct perf_event *bp)
-{
-	return 0;
-}
-
-__weak void arch_release_bp_slot(struct perf_event *bp)
-{
-}
-
-/*
- * Function to perform processor-specific cleanup during unregistration
- */
-__weak void arch_unregister_hw_breakpoint(struct perf_event *bp)
-{
-	/*
-	 * A weak stub function here for those archs that don't define
-	 * it inside arch/.../kernel/hw_breakpoint.c
-	 */
-}
-
 /*
  * Constraints to check before allowing this new breakpoint counter.
  *
@@ -594,7 +575,6 @@ static int __reserve_bp_slot(struct perf_event *bp, u64 bp_type)
 	enum bp_type_idx type;
 	int max_pinned_slots;
 	int weight;
-	int ret;
 
 	/* We couldn't initialize breakpoint constraints on boot */
 	if (!constraints_initialized)
@@ -613,10 +593,6 @@ static int __reserve_bp_slot(struct perf_event *bp, u64 bp_type)
 	if (max_pinned_slots > hw_breakpoint_slots_cached(type))
 		return -ENOSPC;
 
-	ret = arch_reserve_bp_slot(bp);
-	if (ret)
-		return ret;
-
 	return toggle_bp_slot(bp, true, type, weight);
 }
 
@@ -634,8 +610,6 @@ static void __release_bp_slot(struct perf_event *bp, u64 bp_type)
 	enum bp_type_idx type;
 	int weight;
 
-	arch_release_bp_slot(bp);
-
 	type = find_slot_idx(bp_type);
 	weight = hw_breakpoint_weight(bp);
 	WARN_ON(toggle_bp_slot(bp, false, type, weight));
@@ -645,7 +619,6 @@ void release_bp_slot(struct perf_event *bp)
 {
 	struct mutex *mtx = bp_constraints_lock(bp);
 
-	arch_unregister_hw_breakpoint(bp);
 	__release_bp_slot(bp, bp->attr.bp_type);
 	bp_constraints_unlock(mtx);
 }
@@ -877,7 +850,7 @@ register_wide_hw_breakpoint(struct perf_event_attr *attr,
 
 	cpu_events = alloc_percpu(typeof(*cpu_events));
 	if (!cpu_events)
-		return (void __percpu __force *)ERR_PTR(-ENOMEM);
+		return ERR_PTR_PCPU(-ENOMEM);
 
 	cpus_read_lock();
 	for_each_online_cpu(cpu) {
@@ -896,7 +869,7 @@ register_wide_hw_breakpoint(struct perf_event_attr *attr,
 		return cpu_events;
 
 	unregister_wide_hw_breakpoint(cpu_events);
-	return (void __percpu __force *)ERR_PTR(err);
+	return ERR_PTR_PCPU(err);
 }
 EXPORT_SYMBOL_GPL(register_wide_hw_breakpoint);
 
@@ -978,9 +951,10 @@ static int hw_breakpoint_event_init(struct perf_event *bp)
 		return -ENOENT;
 
 	/*
-	 * no branch sampling for breakpoint events
+	 * Check if breakpoint type is supported before proceeding.
+	 * Also, no branch sampling for breakpoint events.
 	 */
-	if (has_branch_stack(bp))
+	if (!hw_breakpoint_slots_cached(find_slot_idx(bp->attr.bp_type)) || has_branch_stack(bp))
 		return -EOPNOTSUPP;
 
 	err = register_perf_hw_breakpoint(bp);

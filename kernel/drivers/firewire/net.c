@@ -19,7 +19,6 @@
 #include <linux/in.h>
 #include <linux/ip.h>
 #include <linux/jiffies.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/mutex.h>
@@ -28,7 +27,7 @@
 #include <linux/slab.h>
 #include <linux/spinlock.h>
 
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 #include <net/arp.h>
 #include <net/firewire.h>
 
@@ -257,9 +256,10 @@ static void fwnet_header_cache_update(struct hh_cache *hh,
 	memcpy((u8 *)hh->hh_data + HH_DATA_OFF(FWNET_HLEN), haddr, net->addr_len);
 }
 
-static int fwnet_header_parse(const struct sk_buff *skb, unsigned char *haddr)
+static int fwnet_header_parse(const struct sk_buff *skb, const struct net_device *dev,
+			      unsigned char *haddr)
 {
-	memcpy(haddr, skb->dev->dev_addr, FWNET_ALEN);
+	memcpy(haddr, dev->dev_addr, FWNET_ALEN);
 
 	return FWNET_ALEN;
 }
@@ -297,31 +297,34 @@ static struct fwnet_fragment_info *fwnet_frag_new(
 		if (fi->offset + fi->len == offset) {
 			/* The new fragment can be tacked on to the end */
 			/* Did the new fragment plug a hole? */
-			fi2 = list_entry(fi->fi_link.next,
-					 struct fwnet_fragment_info, fi_link);
-			if (fi->offset + fi->len == fi2->offset) {
-				/* glue fragments together */
-				fi->len += len + fi2->len;
-				list_del(&fi2->fi_link);
-				kfree(fi2);
-			} else {
-				fi->len += len;
+			if (!list_is_last(&fi->fi_link, &pd->fi_list)) {
+				fi2 = list_next_entry(fi, fi_link);
+				if (offset + len == fi2->offset) {
+					/* glue fragments together */
+					fi->len += len + fi2->len;
+					list_del(&fi2->fi_link);
+					kfree(fi2);
+
+					return fi;
+				}
 			}
+			fi->len += len;
 
 			return fi;
 		}
 		if (offset + len == fi->offset) {
 			/* The new fragment can be tacked on to the beginning */
 			/* Did the new fragment plug a hole? */
-			fi2 = list_entry(fi->fi_link.prev,
-					 struct fwnet_fragment_info, fi_link);
-			if (fi2->offset + fi2->len == fi->offset) {
-				/* glue fragments together */
-				fi2->len += fi->len + len;
-				list_del(&fi->fi_link);
-				kfree(fi);
+			if (!list_is_first(&fi->fi_link, &pd->fi_list)) {
+				fi2 = list_prev_entry(fi, fi_link);
+				if (fi2->offset + fi2->len == offset) {
+					/* glue fragments together */
+					fi2->len += fi->len + len;
+					list_del(&fi->fi_link);
+					kfree(fi);
 
-				return fi2;
+					return fi2;
+				}
 			}
 			fi->offset = offset;
 			fi->len += len;
@@ -338,7 +341,7 @@ static struct fwnet_fragment_info *fwnet_frag_new(
 		}
 	}
 
-	new = kmalloc(sizeof(*new), GFP_ATOMIC);
+	new = kmalloc_obj(*new, GFP_ATOMIC);
 	if (!new)
 		return NULL;
 
@@ -356,7 +359,7 @@ static struct fwnet_partial_datagram *fwnet_pd_new(struct net_device *net,
 	struct fwnet_partial_datagram *new;
 	struct fwnet_fragment_info *fi;
 
-	new = kmalloc(sizeof(*new), GFP_ATOMIC);
+	new = kmalloc_obj(*new, GFP_ATOMIC);
 	if (!new)
 		goto fail;
 
@@ -479,7 +482,7 @@ static int fwnet_finish_incoming_packet(struct net_device *net,
 					struct sk_buff *skb, u16 source_node_id,
 					bool is_broadcast, u16 ether_type)
 {
-	int status;
+	int status, len;
 
 	switch (ether_type) {
 	case ETH_P_ARP:
@@ -533,13 +536,15 @@ static int fwnet_finish_incoming_packet(struct net_device *net,
 		}
 		skb->protocol = protocol;
 	}
+
+	len = skb->len;
 	status = netif_rx(skb);
 	if (status == NET_RX_DROP) {
 		net->stats.rx_errors++;
 		net->stats.rx_dropped++;
 	} else {
 		net->stats.rx_packets++;
-		net->stats.rx_bytes += skb->len;
+		net->stats.rx_bytes += len;
 	}
 
 	return 0;
@@ -706,21 +711,22 @@ static void fwnet_receive_packet(struct fw_card *card, struct fw_request *r,
 	int rcode;
 
 	if (destination == IEEE1394_ALL_NODES) {
-		kfree(r);
-
-		return;
-	}
-
-	if (offset != dev->handler.offset)
+		// Although the response to the broadcast packet is not necessarily required, the
+		// fw_send_response() function should still be called to maintain the reference
+		// counting of the object. In the case, the call of function just releases the
+		// object as a result to decrease the reference counting.
+		rcode = RCODE_COMPLETE;
+	} else if (offset != dev->handler.offset) {
 		rcode = RCODE_ADDRESS_ERROR;
-	else if (tcode != TCODE_WRITE_BLOCK_REQUEST)
+	} else if (tcode != TCODE_WRITE_BLOCK_REQUEST) {
 		rcode = RCODE_TYPE_ERROR;
-	else if (fwnet_incoming_packet(dev, payload, length,
-				       source, generation, false) != 0) {
+	} else if (fwnet_incoming_packet(dev, payload, length,
+					 source, generation, false) != 0) {
 		dev_err(&dev->netdev->dev, "incoming packet failure\n");
 		rcode = RCODE_CONFLICT_ERROR;
-	} else
+	} else {
 		rcode = RCODE_COMPLETE;
+	}
 
 	fw_send_response(card, r, rcode);
 }
@@ -1004,7 +1010,7 @@ static int fwnet_send_packet(struct fwnet_packet_task *ptask)
 
 		spin_lock_irqsave(&dev->lock, flags);
 
-		/* If the AT tasklet already ran, we may be last user. */
+		/* If the AT work item already ran, we may be last user. */
 		free = (ptask->outstanding_pkts == 0 && !ptask->enqueued);
 		if (!free)
 			ptask->enqueued = true;
@@ -1023,7 +1029,7 @@ static int fwnet_send_packet(struct fwnet_packet_task *ptask)
 
 	spin_lock_irqsave(&dev->lock, flags);
 
-	/* If the AT tasklet already ran, we may be last user. */
+	/* If the AT work item already ran, we may be last user. */
 	free = (ptask->outstanding_pkts == 0 && !ptask->enqueued);
 	if (!free)
 		ptask->enqueued = true;
@@ -1399,7 +1405,7 @@ static int fwnet_add_peer(struct fwnet_device *dev,
 {
 	struct fwnet_peer *peer;
 
-	peer = kmalloc(sizeof(*peer), GFP_KERNEL);
+	peer = kmalloc_obj(*peer);
 	if (!peer)
 		return -ENOMEM;
 

@@ -57,11 +57,9 @@ static void dw_mci_hi3798cv200_set_ios(struct dw_mci *host, struct mmc_ios *ios)
 		clk_set_phase(priv->drive_clk, 135);
 }
 
-static int dw_mci_hi3798cv200_execute_tuning(struct dw_mci_slot *slot,
-					     u32 opcode)
+static int dw_mci_hi3798cv200_execute_tuning(struct dw_mci *host, u32 opcode)
 {
 	static const int degrees[] = { 0, 45, 90, 135, 180, 225, 270, 315 };
-	struct dw_mci *host = slot->host;
 	struct hi3798cv200_priv *priv = host->priv;
 	int raise_point = -1, fall_point = -1;
 	int err, prev_err = -1;
@@ -72,7 +70,7 @@ static int dw_mci_hi3798cv200_execute_tuning(struct dw_mci_slot *slot,
 		clk_set_phase(priv->sample_clk, degrees[i]);
 		mci_writel(host, RINTSTS, ALL_INT_CLR);
 
-		err = mmc_send_tuning(slot->mmc, opcode, NULL);
+		err = mmc_send_tuning(host->mmc, opcode, NULL);
 		if (!err)
 			found = 1;
 
@@ -87,7 +85,6 @@ static int dw_mci_hi3798cv200_execute_tuning(struct dw_mci_slot *slot,
 			goto tuning_out;
 
 		prev_err = err;
-		err = 0;
 	}
 
 tuning_out:
@@ -171,7 +168,7 @@ static int dw_mci_hi3798cv200_probe(struct platform_device *pdev)
 	return dw_mci_pltfm_register(pdev, &hi3798cv200_data);
 }
 
-static int dw_mci_hi3798cv200_remove(struct platform_device *pdev)
+static void dw_mci_hi3798cv200_remove(struct platform_device *pdev)
 {
 	struct dw_mci *host = platform_get_drvdata(pdev);
 	struct hi3798cv200_priv *priv = host->priv;
@@ -180,8 +177,6 @@ static int dw_mci_hi3798cv200_remove(struct platform_device *pdev)
 	clk_disable_unprepare(priv->sample_clk);
 
 	dw_mci_pltfm_remove(pdev);
-
-	return 0;
 }
 
 static const struct of_device_id dw_mci_hi3798cv200_match[] = {
@@ -203,4 +198,3 @@ module_platform_driver(dw_mci_hi3798cv200_driver);
 
 MODULE_DESCRIPTION("HiSilicon Hi3798CV200 Specific DW-MSHC Driver Extension");
 MODULE_LICENSE("GPL v2");
-MODULE_ALIAS("platform:dwmmc_hi3798cv200");

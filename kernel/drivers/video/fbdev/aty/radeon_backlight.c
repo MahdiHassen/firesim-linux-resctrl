@@ -59,7 +59,7 @@ static int radeon_bl_update_status(struct backlight_device *bd)
 	 */
 	level = backlight_get_brightness(bd);
 
-	del_timer_sync(&rinfo->lvds_timer);
+	timer_delete_sync(&rinfo->lvds_timer);
 	radeon_engine_idle();
 
 	lvds_gen_cntl = INREG(LVDS_GEN_CNTL);
@@ -136,7 +136,7 @@ void radeonfb_bl_init(struct radeonfb_info *rinfo)
 		return;
 #endif
 
-	pdata = kmalloc(sizeof(struct radeon_bl_privdata), GFP_KERNEL);
+	pdata = kmalloc_obj(struct radeon_bl_privdata);
 	if (!pdata) {
 		printk("radeonfb: Memory allocation failed\n");
 		goto error;
@@ -147,7 +147,7 @@ void radeonfb_bl_init(struct radeonfb_info *rinfo)
 	memset(&props, 0, sizeof(struct backlight_properties));
 	props.type = BACKLIGHT_RAW;
 	props.max_brightness = FB_BACKLIGHT_LEVELS - 1;
-	bd = backlight_device_register(name, rinfo->info->dev, pdata,
+	bd = backlight_device_register(name, rinfo->info->device, pdata,
 				       &radeon_bl_data, &props);
 	if (IS_ERR(bd)) {
 		rinfo->info->bl_dev = NULL;
@@ -179,7 +179,7 @@ void radeonfb_bl_init(struct radeonfb_info *rinfo)
 		217 * FB_BACKLIGHT_MAX / MAX_RADEON_LEVEL);
 
 	bd->props.brightness = bd->props.max_brightness;
-	bd->props.power = FB_BLANK_UNBLANK;
+	bd->props.power = BACKLIGHT_POWER_ON;
 	backlight_update_status(bd);
 
 	printk("radeonfb: Backlight initialized (%s)\n", name);

@@ -396,9 +396,9 @@ static const struct regmap_config lm355x_regmap = {
 };
 
 /* module initialize */
-static int lm355x_probe(struct i2c_client *client,
-				  const struct i2c_device_id *id)
+static int lm355x_probe(struct i2c_client *client)
 {
+	const struct i2c_device_id *id = i2c_client_get_device_id(client);
 	struct lm355x_platform_data *pdata = dev_get_platdata(&client->dev);
 	struct lm355x_chip_data *chip;
 
@@ -504,9 +504,9 @@ static void lm355x_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id lm355x_id[] = {
-	{LM3554_NAME, CHIP_LM3554},
-	{LM3556_NAME, CHIP_LM3556},
-	{}
+	{ .name = LM3554_NAME, .driver_data = CHIP_LM3554 },
+	{ .name = LM3556_NAME, .driver_data = CHIP_LM3556 },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(i2c, lm355x_id);

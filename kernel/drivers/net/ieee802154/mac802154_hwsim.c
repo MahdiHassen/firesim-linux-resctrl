@@ -98,7 +98,7 @@ static int hwsim_update_pib(struct ieee802154_hw *hw, u8 page, u8 channel,
 	struct hwsim_phy *phy = hw->priv;
 	struct hwsim_pib *pib, *pib_old;
 
-	pib = kzalloc(sizeof(*pib), GFP_ATOMIC);
+	pib = kzalloc_obj(*pib, GFP_ATOMIC);
 	if (!pib)
 		return -ENOMEM;
 
@@ -545,11 +545,11 @@ static struct hwsim_edge *hwsim_alloc_edge(struct hwsim_phy *endpoint, u8 lqi)
 	struct hwsim_edge_info *einfo;
 	struct hwsim_edge *e;
 
-	e = kzalloc(sizeof(*e), GFP_KERNEL);
+	e = kzalloc_obj(*e);
 	if (!e)
 		return NULL;
 
-	einfo = kzalloc(sizeof(*einfo), GFP_KERNEL);
+	einfo = kzalloc_obj(*einfo);
 	if (!einfo) {
 		kfree(e);
 		return NULL;
@@ -685,7 +685,7 @@ static int hwsim_del_edge_nl(struct sk_buff *msg, struct genl_info *info)
 static int hwsim_set_edge_lqi(struct sk_buff *msg, struct genl_info *info)
 {
 	struct nlattr *edge_attrs[MAC802154_HWSIM_EDGE_ATTR_MAX + 1];
-	struct hwsim_edge_info *einfo;
+	struct hwsim_edge_info *einfo, *einfo_old;
 	struct hwsim_phy *phy_v0;
 	struct hwsim_edge *e;
 	u32 v0, v1;
@@ -713,7 +713,7 @@ static int hwsim_set_edge_lqi(struct sk_buff *msg, struct genl_info *info)
 		return -ENOENT;
 	}
 
-	einfo = kzalloc(sizeof(*einfo), GFP_KERNEL);
+	einfo = kzalloc_obj(*einfo);
 	if (!einfo) {
 		mutex_unlock(&hwsim_phys_lock);
 		return -ENOMEM;
@@ -723,8 +723,10 @@ static int hwsim_set_edge_lqi(struct sk_buff *msg, struct genl_info *info)
 	list_for_each_entry_rcu(e, &phy_v0->edges, list) {
 		if (e->endpoint->idx == v1) {
 			einfo->lqi = lqi;
-			rcu_assign_pointer(e->info, einfo);
+			einfo_old = rcu_replace_pointer(e->info, einfo,
+							lockdep_is_held(&hwsim_phys_lock));
 			rcu_read_unlock();
+			kfree_rcu(einfo_old, rcu);
 			mutex_unlock(&hwsim_phys_lock);
 			return 0;
 		}
@@ -944,7 +946,7 @@ static int hwsim_add_one(struct genl_info *info, struct device *dev,
 
 	/* hwsim phy channel 13 as default */
 	hw->phy->current_channel = 13;
-	pib = kzalloc(sizeof(*pib), GFP_KERNEL);
+	pib = kzalloc_obj(*pib);
 	if (!pib) {
 		err = -ENOMEM;
 		goto err_pib;
@@ -1033,7 +1035,7 @@ err_slave:
 	return err;
 }
 
-static int hwsim_remove(struct platform_device *pdev)
+static void hwsim_remove(struct platform_device *pdev)
 {
 	struct hwsim_phy *phy, *tmp;
 
@@ -1041,8 +1043,6 @@ static int hwsim_remove(struct platform_device *pdev)
 	list_for_each_entry_safe(phy, tmp, &hwsim_phys, list)
 		hwsim_del(phy);
 	mutex_unlock(&hwsim_phys_lock);
-
-	return 0;
 }
 
 static struct platform_driver mac802154hwsim_driver = {

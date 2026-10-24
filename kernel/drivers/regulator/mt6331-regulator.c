@@ -487,14 +487,15 @@ static int mt6331_regulator_probe(struct platform_device *pdev)
 }
 
 static const struct platform_device_id mt6331_platform_ids[] = {
-	{"mt6331-regulator", 0},
-	{ /* sentinel */ },
+	{ .name = "mt6331-regulator" },
+	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(platform, mt6331_platform_ids);
 
 static struct platform_driver mt6331_regulator_driver = {
 	.driver = {
 		.name = "mt6331-regulator",
+		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
 	},
 	.probe = mt6331_regulator_probe,
 	.id_table = mt6331_platform_ids,

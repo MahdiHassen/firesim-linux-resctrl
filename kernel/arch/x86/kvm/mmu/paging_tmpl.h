@@ -62,7 +62,7 @@
 #endif
 
 /* Common logic, but per-type values.  These also need to be undefined. */
-#define PT_BASE_ADDR_MASK	((pt_element_t)(((1ULL << 52) - 1) & ~(u64)(PAGE_SIZE-1)))
+#define PT_BASE_ADDR_MASK	((pt_element_t)__PT_BASE_ADDR_MASK)
 #define PT_LVL_ADDR_MASK(lvl)	__PT_LVL_ADDR_MASK(PT_BASE_ADDR_MASK, lvl, PT_LEVEL_BITS)
 #define PT_LVL_OFFSET_MASK(lvl)	__PT_LVL_OFFSET_MASK(PT_BASE_ADDR_MASK, lvl, PT_LEVEL_BITS)
 #define PT_INDEX(addr, lvl)	__PT_INDEX(addr, lvl, PT_LEVEL_BITS)
@@ -124,12 +124,17 @@ static inline void FNAME(protect_clean_gpte)(struct kvm_mmu *mmu, unsigned *acce
 	*access &= mask;
 }
 
-static inline int FNAME(is_present_gpte)(unsigned long pte)
+static inline int FNAME(is_present_gpte)(struct kvm_mmu *mmu,
+					 unsigned long pte)
 {
 #if PTTYPE != PTTYPE_EPT
 	return pte & PT_PRESENT_MASK;
 #else
-	return pte & 7;
+	/*
+	 * For EPT, an entry is present if any of bits 2:0 are set.
+	 * With mode-based execute control, bit 10 also indicates presence.
+	 */
+	return pte & (7 | (mmu_has_mbec(mmu) ? VMX_EPT_USER_EXECUTABLE_MASK : 0));
 #endif
 }
 
@@ -152,7 +157,7 @@ static bool FNAME(prefetch_invalid_gpte)(struct kvm_vcpu *vcpu,
 				  struct kvm_mmu_page *sp, u64 *spte,
 				  u64 gpte)
 {
-	if (!FNAME(is_present_gpte)(gpte))
+	if (!FNAME(is_present_gpte)(vcpu->arch.mmu, gpte))
 		goto no_present;
 
 	/* Prefetch only accessed entries (unless A/D bits are disabled). */
@@ -170,25 +175,31 @@ no_present:
 	return true;
 }
 
-/*
- * For PTTYPE_EPT, a page table can be executable but not readable
- * on supported processors. Therefore, set_spte does not automatically
- * set bit 0 if execute only is supported. Here, we repurpose ACC_USER_MASK
- * to signify readability since it isn't used in the EPT case
- */
 static inline unsigned FNAME(gpte_access)(u64 gpte)
 {
 	unsigned access;
+	/*
+	 * Set bits in ACC_*_MASK even if they might not be used in the
+	 * actual checks.  For example, if EFER.NX is clear permission_fault()
+	 * will ignore ACC_EXEC_MASK, and if MBEC is disabled it will
+	 * ignore ACC_USER_EXEC_MASK.
+	 */
 #if PTTYPE == PTTYPE_EPT
 	access = ((gpte & VMX_EPT_WRITABLE_MASK) ? ACC_WRITE_MASK : 0) |
 		((gpte & VMX_EPT_EXECUTABLE_MASK) ? ACC_EXEC_MASK : 0) |
-		((gpte & VMX_EPT_READABLE_MASK) ? ACC_USER_MASK : 0);
+		((gpte & VMX_EPT_READABLE_MASK) ? ACC_READ_MASK : 0) |
+		((gpte & VMX_EPT_USER_EXECUTABLE_MASK) ? ACC_USER_EXEC_MASK : 0);
 #else
-	BUILD_BUG_ON(ACC_EXEC_MASK != PT_PRESENT_MASK);
-	BUILD_BUG_ON(ACC_EXEC_MASK != 1);
+	/*
+	 * P is set here, so the page is always readable and W/U/!NX represent
+	 * allowed accesses.
+	 */
+	BUILD_BUG_ON(ACC_READ_MASK != PT_PRESENT_MASK);
+	BUILD_BUG_ON(ACC_WRITE_MASK != PT_WRITABLE_MASK);
+	BUILD_BUG_ON(ACC_USER_MASK != PT_USER_MASK);
+	BUILD_BUG_ON(ACC_EXEC_MASK & (PT_WRITABLE_MASK | PT_USER_MASK | PT_PRESENT_MASK));
 	access = gpte & (PT_WRITABLE_MASK | PT_USER_MASK | PT_PRESENT_MASK);
-	/* Combine NX with P (which is set here) to get ACC_EXEC_MASK.  */
-	access ^= (gpte >> PT64_NX_SHIFT);
+	access |= gpte & PT64_NX_MASK ? 0 : ACC_EXEC_MASK;
 #endif
 
 	return access;
@@ -317,6 +328,12 @@ static int FNAME(walk_addr_generic)(struct guest_walker *walker,
 	const int write_fault = access & PFERR_WRITE_MASK;
 	const int user_fault  = access & PFERR_USER_MASK;
 	const int fetch_fault = access & PFERR_FETCH_MASK;
+	/*
+	 * Note! Track the error_code that's common to legacy shadow paging
+	 * and NPT shadow paging as a u16 to guard against unintentionally
+	 * setting any of bits 63:16.  Architecturally, the #PF error code is
+	 * 32 bits, and Intel CPUs don't support settings bits 31:16.
+	 */
 	u16 errcode = 0;
 	gpa_t real_gpa;
 	gfn_t gfn;
@@ -324,7 +341,7 @@ static int FNAME(walk_addr_generic)(struct guest_walker *walker,
 	trace_kvm_mmu_pagetable_walk(addr, access);
 retry_walk:
 	walker->level = mmu->cpu_role.base.level;
-	pte           = mmu->get_guest_pgd(vcpu);
+	pte           = kvm_mmu_get_guest_pgd(vcpu, mmu);
 	have_ad       = PT_HAVE_ACCESSED_DIRTY(mmu);
 
 #if PTTYPE == 64
@@ -332,13 +349,12 @@ retry_walk:
 	if (walker->level == PT32E_ROOT_LEVEL) {
 		pte = mmu->get_pdptr(vcpu, (addr >> 30) & 3);
 		trace_kvm_mmu_paging_element(pte, walker->level);
-		if (!FNAME(is_present_gpte)(pte))
+		if (!FNAME(is_present_gpte)(mmu, pte))
 			goto error;
 		--walker->level;
 	}
 #endif
 	walker->max_level = walker->level;
-	ASSERT(!(is_long_mode(vcpu) && !is_pae(vcpu)));
 
 	/*
 	 * FIXME: on Intel processors, loads of the PDPTE registers for PAE paging
@@ -348,9 +364,21 @@ retry_walk:
 	nested_access = (have_ad ? PFERR_WRITE_MASK : 0) | PFERR_USER_MASK;
 
 	pte_access = ~0;
+
+	/*
+	 * Queue a page fault for injection if this assertion fails, as callers
+	 * assume that walker.fault contains sane info on a walk failure.  I.e.
+	 * avoid making the situation worse by inducing even worse badness
+	 * between when the assertion fails and when KVM kicks the vCPU out to
+	 * userspace (because the VM is bugged).
+	 */
+	if (KVM_BUG_ON(is_long_mode(vcpu) && !is_pae(vcpu), vcpu->kvm))
+		goto error;
+
 	++walker->level;
 
 	do {
+		struct kvm_memory_slot *slot;
 		unsigned long host_addr;
 
 		pt_access = pte_access;
@@ -366,28 +394,23 @@ retry_walk:
 		walker->pte_gpa[walker->level - 1] = pte_gpa;
 
 		real_gpa = kvm_translate_gpa(vcpu, mmu, gfn_to_gpa(table_gfn),
-					     nested_access, &walker->fault);
+					     nested_access | PFERR_GUEST_PAGE_MASK,
+					     &walker->fault, 0);
 
-		/*
-		 * FIXME: This can happen if emulation (for of an INS/OUTS
-		 * instruction) triggers a nested page fault.  The exit
-		 * qualification / exit info field will incorrectly have
-		 * "guest page access" as the nested page fault's cause,
-		 * instead of "guest page structure access".  To fix this,
-		 * the x86_exception struct should be augmented with enough
-		 * information to fix the exit_qualification or exit_info_1
-		 * fields.
-		 */
 		if (unlikely(real_gpa == INVALID_GPA))
 			return 0;
 
-		host_addr = kvm_vcpu_gfn_to_hva_prot(vcpu, gpa_to_gfn(real_gpa),
+		slot = kvm_vcpu_gfn_to_memslot(vcpu, gpa_to_gfn(real_gpa));
+		if (!kvm_is_visible_memslot(slot))
+			goto error;
+
+		host_addr = gfn_to_hva_memslot_prot(slot, gpa_to_gfn(real_gpa),
 					    &walker->pte_writable[walker->level - 1]);
 		if (unlikely(kvm_is_error_hva(host_addr)))
 			goto error;
 
 		ptep_user = (pt_element_t __user *)((void *)host_addr + offset);
-		if (unlikely(__get_user(pte, ptep_user)))
+		if (unlikely(get_user(pte, ptep_user)))
 			goto error;
 		walker->ptep_user[walker->level - 1] = ptep_user;
 
@@ -399,7 +422,7 @@ retry_walk:
 		 */
 		pte_access = pt_access & (pte ^ walk_nx_mask);
 
-		if (unlikely(!FNAME(is_present_gpte)(pte)))
+		if (unlikely(!FNAME(is_present_gpte)(mmu, pte)))
 			goto error;
 
 		if (unlikely(FNAME(is_rsvd_bits_set)(mmu, pte, walker->level))) {
@@ -430,7 +453,9 @@ retry_walk:
 		gfn += pse36_gfn_delta(pte);
 #endif
 
-	real_gpa = kvm_translate_gpa(vcpu, mmu, gfn_to_gpa(gfn), access, &walker->fault);
+	real_gpa = kvm_translate_gpa(vcpu, mmu, gfn_to_gpa(gfn),
+				     access | PFERR_GUEST_FINAL_MASK,
+				     &walker->fault, walker->pte_access);
 	if (real_gpa == INVALID_GPA)
 		return 0;
 
@@ -456,14 +481,11 @@ retry_walk:
 			goto retry_walk;
 	}
 
-	pgprintk("%s: pte %llx pte_access %x pt_access %x\n",
-		 __func__, (u64)pte, walker->pte_access,
-		 walker->pt_access[walker->level - 1]);
 	return 1;
 
 error:
 	errcode |= write_fault | user_fault;
-	if (fetch_fault && (is_efer_nx(mmu) || is_cr4_smep(mmu)))
+	if (fetch_fault && has_pferr_fetch(mmu))
 		errcode |= PFERR_FETCH_MASK;
 
 	walker->fault.vector = PF_VECTOR;
@@ -480,31 +502,57 @@ error:
 	 * [2:0] - Derive from the access bits. The exit_qualification might be
 	 *         out of date if it is serving an EPT misconfiguration.
 	 * [5:3] - Calculated by the page walk of the guest EPT page tables
-	 * [7:8] - Derived from [7:8] of real exit_qualification
+	 * [7:8] - Derived from "fault stage" access bits
+	 * [9:11] - Derived from [9:11] of real exit_qualification
 	 *
 	 * The other bits are set to 0.
 	 */
 	if (!(errcode & PFERR_RSVD_MASK)) {
-		vcpu->arch.exit_qualification &= (EPT_VIOLATION_GVA_IS_VALID |
-						  EPT_VIOLATION_GVA_TRANSLATED);
+		walker->fault.exit_qualification = 0;
+
 		if (write_fault)
-			vcpu->arch.exit_qualification |= EPT_VIOLATION_ACC_WRITE;
-		if (user_fault)
-			vcpu->arch.exit_qualification |= EPT_VIOLATION_ACC_READ;
-		if (fetch_fault)
-			vcpu->arch.exit_qualification |= EPT_VIOLATION_ACC_INSTR;
+			walker->fault.exit_qualification |= EPT_VIOLATION_ACC_WRITE;
+		else if (fetch_fault)
+			walker->fault.exit_qualification |= EPT_VIOLATION_ACC_INSTR;
+		else
+			walker->fault.exit_qualification |= EPT_VIOLATION_ACC_READ;
+
+		/*
+		 * KVM doesn't emulate features that access GPAs directly, e.g.
+		 * Intel Processor Trace.  Assume the GVA is always valid; when
+		 * propagating faults from hardware, KVM will discard this info
+		 * and use the EXIT_QUALIFICATION bits from the VMCS.
+		 */
+		walker->fault.exit_qualification |= EPT_VIOLATION_GVA_IS_VALID;
+
+		/*
+		 * Accesses to guest paging structures are either "reads" or
+		 * "read+write" accesses, so consider them the latter if write_fault
+		 * is true.
+		 */
+		if (access & PFERR_GUEST_PAGE_MASK)
+			walker->fault.exit_qualification |= EPT_VIOLATION_ACC_READ;
+		else
+			walker->fault.exit_qualification |= EPT_VIOLATION_GVA_TRANSLATED;
 
 		/*
 		 * Note, pte_access holds the raw RWX bits from the EPTE, not
 		 * ACC_*_MASK flags!
 		 */
-		vcpu->arch.exit_qualification |= (pte_access & VMX_EPT_RWX_MASK) <<
-						 EPT_VIOLATION_RWX_SHIFT;
+		walker->fault.exit_qualification |= EPT_VIOLATION_RWX_TO_PROT(pte_access);
+		if (mmu_has_mbec(mmu))
+			walker->fault.exit_qualification |=
+				EPT_VIOLATION_USER_EXEC_TO_PROT(pte_access);
 	}
 #endif
 	walker->fault.address = addr;
 	walker->fault.nested_page_fault = mmu != vcpu->arch.walk_mmu;
 	walker->fault.async_page_fault = false;
+
+#if PTTYPE != PTTYPE_EPT
+	if (walker->fault.nested_page_fault)
+		walker->fault.error_code |= access & PFERR_GUEST_FAULT_STAGE_MASK;
+#endif
 
 	trace_kvm_mmu_walker_error(walker->fault.error_code);
 	return 0;
@@ -519,34 +567,19 @@ static int FNAME(walk_addr)(struct guest_walker *walker,
 
 static bool
 FNAME(prefetch_gpte)(struct kvm_vcpu *vcpu, struct kvm_mmu_page *sp,
-		     u64 *spte, pt_element_t gpte, bool no_dirty_log)
+		     u64 *spte, pt_element_t gpte)
 {
-	struct kvm_memory_slot *slot;
 	unsigned pte_access;
 	gfn_t gfn;
-	kvm_pfn_t pfn;
 
 	if (FNAME(prefetch_invalid_gpte)(vcpu, sp, spte, gpte))
 		return false;
-
-	pgprintk("%s: gpte %llx spte %p\n", __func__, (u64)gpte, spte);
 
 	gfn = gpte_to_gfn(gpte);
 	pte_access = sp->role.access & FNAME(gpte_access)(gpte);
 	FNAME(protect_clean_gpte)(vcpu->arch.mmu, &pte_access, gpte);
 
-	slot = gfn_to_memslot_dirty_bitmap(vcpu, gfn,
-			no_dirty_log && (pte_access & ACC_WRITE_MASK));
-	if (!slot)
-		return false;
-
-	pfn = gfn_to_pfn_memslot_atomic(slot, gfn);
-	if (is_error_pfn(pfn))
-		return false;
-
-	mmu_set_spte(vcpu, slot, spte, pte_access, gfn, pfn, NULL);
-	kvm_release_pfn_clean(pfn);
-	return true;
+	return kvm_mmu_prefetch_sptes(vcpu, gfn, spte, 1, pte_access);
 }
 
 static bool FNAME(gpte_changed)(struct kvm_vcpu *vcpu,
@@ -605,7 +638,7 @@ static void FNAME(pte_prefetch)(struct kvm_vcpu *vcpu, struct guest_walker *gw,
 		if (is_shadow_present_pte(*spte))
 			continue;
 
-		if (!FNAME(prefetch_gpte)(vcpu, sp, spte, gptep[i], true))
+		if (!FNAME(prefetch_gpte)(vcpu, sp, spte, gptep[i]))
 			break;
 	}
 }
@@ -637,63 +670,85 @@ static int FNAME(fetch)(struct kvm_vcpu *vcpu, struct kvm_page_fault *fault,
 	 * really care if it changes underneath us after this point).
 	 */
 	if (FNAME(gpte_changed)(vcpu, gw, top_level))
-		goto out_gpte_changed;
+		return RET_PF_RETRY;
 
-	if (WARN_ON(!VALID_PAGE(vcpu->arch.mmu->root.hpa)))
-		goto out_gpte_changed;
+	if (WARN_ON_ONCE(!VALID_PAGE(vcpu->arch.mmu->root.hpa)))
+		return RET_PF_RETRY;
 
-	for (shadow_walk_init(&it, vcpu, fault->addr);
-	     shadow_walk_okay(&it) && it.level > gw->level;
-	     shadow_walk_next(&it)) {
+	/*
+	 * Load a new root and retry the faulting instruction in the extremely
+	 * unlikely scenario that the guest root gfn became visible between
+	 * loading a dummy root and handling the resulting page fault, e.g. if
+	 * userspace create a memslot in the interim.
+	 */
+	if (unlikely(kvm_mmu_is_dummy_root(vcpu->arch.mmu->root.hpa))) {
+		kvm_make_request(KVM_REQ_MMU_FREE_OBSOLETE_ROOTS, vcpu);
+		return RET_PF_RETRY;
+	}
+
+	for_each_shadow_entry(vcpu, fault->addr, it) {
 		gfn_t table_gfn;
 
 		clear_sp_write_flooding_count(it.sptep);
+		if (it.level == gw->level)
+			break;
 
 		table_gfn = gw->table_gfn[it.level - 2];
 		access = gw->pt_access[it.level - 2];
 		sp = kvm_mmu_get_child_sp(vcpu, it.sptep, table_gfn,
 					  false, access);
 
-		if (sp != ERR_PTR(-EEXIST)) {
-			/*
-			 * We must synchronize the pagetable before linking it
-			 * because the guest doesn't need to flush tlb when
-			 * the gpte is changed from non-present to present.
-			 * Otherwise, the guest may use the wrong mapping.
-			 *
-			 * For PG_LEVEL_4K, kvm_mmu_get_page() has already
-			 * synchronized it transiently via kvm_sync_page().
-			 *
-			 * For higher level pagetable, we synchronize it via
-			 * the slower mmu_sync_children().  If it needs to
-			 * break, some progress has been made; return
-			 * RET_PF_RETRY and retry on the next #PF.
-			 * KVM_REQ_MMU_SYNC is not necessary but it
-			 * expedites the process.
-			 */
-			if (sp->unsync_children &&
-			    mmu_sync_children(vcpu, sp, false))
-				return RET_PF_RETRY;
-		}
+		/*
+		 * Synchronize the new page before linking it, as the CPU (KVM)
+		 * is architecturally disallowed from inserting non-present
+		 * entries into the TLB, i.e. the guest isn't required to flush
+		 * the TLB when changing the gPTE from non-present to present.
+		 *
+		 * For PG_LEVEL_4K, kvm_mmu_find_shadow_page() has already
+		 * synchronized the page via kvm_sync_page().
+		 *
+		 * For higher level pages, which cannot be unsync themselves
+		 * but can have unsync children, synchronize via the slower
+		 * mmu_sync_children().  If KVM needs to drop mmu_lock due to
+		 * contention or to reschedule, instruct the caller to retry
+		 * the #PF (mmu_sync_children() ensures forward progress will
+		 * be made).
+		 */
+		if (sp != ERR_PTR(-EEXIST) && sp->unsync_children &&
+		    mmu_sync_children(vcpu, sp, false))
+			return RET_PF_RETRY;
 
 		/*
-		 * Verify that the gpte in the page we've just write
-		 * protected is still there.
+		 * Verify that the gpte in the page, which is now either
+		 * write-protected or unsync, wasn't modified between the fault
+		 * and acquiring mmu_lock.  This needs to be done even when
+		 * reusing an existing shadow page to ensure the information
+		 * gathered by the walker matches the information stored in the
+		 * shadow page (which could have been modified by a different
+		 * vCPU even if the page was already linked).  Holding mmu_lock
+		 * prevents the shadow page from changing after this point.
 		 */
 		if (FNAME(gpte_changed)(vcpu, gw, it.level - 1))
-			goto out_gpte_changed;
+			return RET_PF_RETRY;
 
 		if (sp != ERR_PTR(-EEXIST))
 			link_shadow_page(vcpu, it.sptep, sp);
+
+		if (fault->write && table_gfn == fault->gfn)
+			fault->write_fault_to_shadow_pgtable = true;
 	}
 
+	/*
+	 * Adjust the hugepage size _after_ resolving indirect shadow pages.
+	 * KVM doesn't support mapping hugepages into the guest for gfns that
+	 * are being shadowed by KVM, i.e. allocating a new shadow page may
+	 * affect the allowed hugepage size.
+	 */
 	kvm_mmu_hugepage_adjust(vcpu, fault);
 
-	trace_kvm_mmu_spte_requested(fault);
+	trace_kvm_mmu_spte_requested(fault, gw->pte_access);
 
 	for (; shadow_walk_okay(&it); shadow_walk_next(&it)) {
-		clear_sp_write_flooding_count(it.sptep);
-
 		/*
 		 * We cannot overwrite existing page tables with an NX
 		 * large page, as the leaf could be executable.
@@ -701,7 +756,7 @@ static int FNAME(fetch)(struct kvm_vcpu *vcpu, struct kvm_page_fault *fault,
 		if (fault->nx_huge_page_workaround_enabled)
 			disallowed_hugepage_adjust(fault, *it.sptep, it.level);
 
-		base_gfn = fault->gfn & ~(KVM_PAGES_PER_HPAGE(it.level) - 1);
+		base_gfn = gfn_round_for_level(fault->gfn, it.level);
 		if (it.level == fault->goal_level)
 			break;
 
@@ -728,49 +783,6 @@ static int FNAME(fetch)(struct kvm_vcpu *vcpu, struct kvm_page_fault *fault,
 
 	FNAME(pte_prefetch)(vcpu, gw, it.sptep);
 	return ret;
-
-out_gpte_changed:
-	return RET_PF_RETRY;
-}
-
- /*
- * To see whether the mapped gfn can write its page table in the current
- * mapping.
- *
- * It is the helper function of FNAME(page_fault). When guest uses large page
- * size to map the writable gfn which is used as current page table, we should
- * force kvm to use small page size to map it because new shadow page will be
- * created when kvm establishes shadow page table that stop kvm using large
- * page size. Do it early can avoid unnecessary #PF and emulation.
- *
- * @write_fault_to_shadow_pgtable will return true if the fault gfn is
- * currently used as its page table.
- *
- * Note: the PDPT page table is not checked for PAE-32 bit guest. It is ok
- * since the PDPT is always shadowed, that means, we can not use large page
- * size to map the gfn which is used as PDPT.
- */
-static bool
-FNAME(is_self_change_mapping)(struct kvm_vcpu *vcpu,
-			      struct guest_walker *walker, bool user_fault,
-			      bool *write_fault_to_shadow_pgtable)
-{
-	int level;
-	gfn_t mask = ~(KVM_PAGES_PER_HPAGE(walker->level) - 1);
-	bool self_changed = false;
-
-	if (!(walker->pte_access & ACC_WRITE_MASK ||
-	    (!is_cr0_wp(vcpu->arch.mmu) && !user_fault)))
-		return false;
-
-	for (level = walker->level; level <= walker->max_level; level++) {
-		gfn_t gfn = walker->gfn ^ walker->table_gfn[level - 1];
-
-		self_changed |= !(gfn & mask);
-		*write_fault_to_shadow_pgtable |= !gfn;
-	}
-
-	return self_changed;
 }
 
 /*
@@ -791,10 +803,7 @@ static int FNAME(page_fault)(struct kvm_vcpu *vcpu, struct kvm_page_fault *fault
 {
 	struct guest_walker walker;
 	int r;
-	unsigned long mmu_seq;
-	bool is_self_change_mapping;
 
-	pgprintk("%s: addr %lx err %x\n", __func__, fault->addr, fault->error_code);
 	WARN_ON_ONCE(fault->is_tdp);
 
 	/*
@@ -809,49 +818,35 @@ static int FNAME(page_fault)(struct kvm_vcpu *vcpu, struct kvm_page_fault *fault
 	 * The page is not mapped by the guest.  Let the guest handle it.
 	 */
 	if (!r) {
-		pgprintk("%s: guest page fault\n", __func__);
 		if (!fault->prefetch)
-			kvm_inject_emulated_page_fault(vcpu, &walker.fault);
+			__kvm_inject_emulated_page_fault(vcpu, &walker.fault, true);
 
 		return RET_PF_RETRY;
 	}
 
 	fault->gfn = walker.gfn;
+	fault->max_level = walker.level;
 	fault->slot = kvm_vcpu_gfn_to_memslot(vcpu, fault->gfn);
 
 	if (page_fault_handle_page_track(vcpu, fault)) {
 		shadow_page_table_clear_flood(vcpu, fault->addr);
-		return RET_PF_EMULATE;
+		return RET_PF_WRITE_PROTECTED;
 	}
 
 	r = mmu_topup_memory_caches(vcpu, true);
 	if (r)
 		return r;
 
-	vcpu->arch.write_fault_to_shadow_pgtable = false;
-
-	is_self_change_mapping = FNAME(is_self_change_mapping)(vcpu,
-	      &walker, fault->user, &vcpu->arch.write_fault_to_shadow_pgtable);
-
-	if (is_self_change_mapping)
-		fault->max_level = PG_LEVEL_4K;
-	else
-		fault->max_level = walker.level;
-
-	mmu_seq = vcpu->kvm->mmu_invalidate_seq;
-	smp_rmb();
-
-	r = kvm_faultin_pfn(vcpu, fault);
+	r = kvm_mmu_faultin_pfn(vcpu, fault, walker.pte_access);
 	if (r != RET_PF_CONTINUE)
 		return r;
 
-	r = handle_abnormal_pfn(vcpu, fault, walker.pte_access);
-	if (r != RET_PF_CONTINUE)
-		return r;
-
+#if PTTYPE != PTTYPE_EPT
 	/*
-	 * Do not change pte_access if the pfn is a mmio page, otherwise
-	 * we will cache the incorrect access into mmio spte.
+	 * Treat the guest PTE protections as writable, supervisor-only if this
+	 * is a supervisor write fault and CR0.WP=0 (supervisor accesses ignore
+	 * PTE.W if CR0.WP=0).  Don't change the access type for emulated MMIO,
+	 * otherwise KVM will cache incorrect access information in the SPTE.
 	 */
 	if (fault->write && !(walker.pte_access & ACC_WRITE_MASK) &&
 	    !is_cr0_wp(vcpu->arch.mmu) && !fault->user && fault->slot) {
@@ -867,21 +862,24 @@ static int FNAME(page_fault)(struct kvm_vcpu *vcpu, struct kvm_page_fault *fault
 		if (is_cr4_smep(vcpu->arch.mmu))
 			walker.pte_access &= ~ACC_EXEC_MASK;
 	}
+#endif
 
-	r = RET_PF_RETRY;
 	write_lock(&vcpu->kvm->mmu_lock);
-
-	if (is_page_fault_stale(vcpu, fault, mmu_seq))
-		goto out_unlock;
 
 	r = make_mmu_pages_available(vcpu);
 	if (r)
 		goto out_unlock;
+
+	if (is_page_fault_stale(vcpu, fault)) {
+		r = RET_PF_RETRY;
+		goto out_unlock;
+	}
+
 	r = FNAME(fetch)(vcpu, fault, &walker);
 
 out_unlock:
+	kvm_mmu_finish_page_fault(vcpu, fault, r);
 	write_unlock(&vcpu->kvm->mmu_lock);
-	kvm_release_pfn_clean(fault->pfn);
 	return r;
 }
 
@@ -889,71 +887,12 @@ static gpa_t FNAME(get_level1_sp_gpa)(struct kvm_mmu_page *sp)
 {
 	int offset = 0;
 
-	WARN_ON(sp->role.level != PG_LEVEL_4K);
+	WARN_ON_ONCE(sp->role.level != PG_LEVEL_4K);
 
 	if (PTTYPE == 32)
 		offset = sp->role.quadrant << SPTE_LEVEL_BITS;
 
 	return gfn_to_gpa(sp->gfn) + offset * sizeof(pt_element_t);
-}
-
-static void FNAME(invlpg)(struct kvm_vcpu *vcpu, gva_t gva, hpa_t root_hpa)
-{
-	struct kvm_shadow_walk_iterator iterator;
-	struct kvm_mmu_page *sp;
-	u64 old_spte;
-	int level;
-	u64 *sptep;
-
-	vcpu_clear_mmio_info(vcpu, gva);
-
-	/*
-	 * No need to check return value here, rmap_can_add() can
-	 * help us to skip pte prefetch later.
-	 */
-	mmu_topup_memory_caches(vcpu, true);
-
-	if (!VALID_PAGE(root_hpa)) {
-		WARN_ON(1);
-		return;
-	}
-
-	write_lock(&vcpu->kvm->mmu_lock);
-	for_each_shadow_entry_using_root(vcpu, root_hpa, gva, iterator) {
-		level = iterator.level;
-		sptep = iterator.sptep;
-
-		sp = sptep_to_sp(sptep);
-		old_spte = *sptep;
-		if (is_last_spte(old_spte, level)) {
-			pt_element_t gpte;
-			gpa_t pte_gpa;
-
-			if (!sp->unsync)
-				break;
-
-			pte_gpa = FNAME(get_level1_sp_gpa)(sp);
-			pte_gpa += spte_index(sptep) * sizeof(pt_element_t);
-
-			mmu_page_zap_pte(vcpu->kvm, sp, sptep, NULL);
-			if (is_shadow_present_pte(old_spte))
-				kvm_flush_remote_tlbs_with_address(vcpu->kvm,
-					sp->gfn, KVM_PAGES_PER_HPAGE(sp->role.level));
-
-			if (!rmap_can_add(vcpu))
-				break;
-
-			if (kvm_vcpu_read_guest_atomic(vcpu, pte_gpa, &gpte,
-						       sizeof(pt_element_t)))
-				break;
-
-			FNAME(prefetch_gpte)(vcpu, sp, sptep, gpte, false);
-		}
-
-		if (!sp->unsync_children)
-			break;
-	}
-	write_unlock(&vcpu->kvm->mmu_lock);
 }
 
 /* Note, @addr is a GPA when gva_to_gpa() translates an L2 GPA to an L1 GPA. */
@@ -983,119 +922,86 @@ static gpa_t FNAME(gva_to_gpa)(struct kvm_vcpu *vcpu, struct kvm_mmu *mmu,
 
 /*
  * Using the information in sp->shadowed_translation (kvm_mmu_page_get_gfn()) is
- * safe because:
- * - The spte has a reference to the struct page, so the pfn for a given gfn
- *   can't change unless all sptes pointing to it are nuked first.
+ * safe because SPTEs are protected by mmu_notifiers and memslot generations, so
+ * the pfn for a given gfn can't change unless all SPTEs pointing to the gfn are
+ * nuked first.
  *
  * Returns
- * < 0: the sp should be zapped
- *   0: the sp is synced and no tlb flushing is required
- * > 0: the sp is synced and tlb flushing is required
+ * < 0: failed to sync spte
+ *   0: the spte is synced and no tlb flushing is required
+ * > 0: the spte is synced and tlb flushing is required
  */
-static int FNAME(sync_page)(struct kvm_vcpu *vcpu, struct kvm_mmu_page *sp)
+static int FNAME(sync_spte)(struct kvm_vcpu *vcpu, struct kvm_mmu_page *sp, int i)
 {
-	union kvm_mmu_page_role root_role = vcpu->arch.mmu->root_role;
-	int i;
 	bool host_writable;
 	gpa_t first_pte_gpa;
-	bool flush = false;
+	u64 *sptep, spte;
+	struct kvm_memory_slot *slot;
+	unsigned pte_access;
+	pt_element_t gpte;
+	gpa_t pte_gpa;
+	gfn_t gfn;
 
-	/*
-	 * Ignore various flags when verifying that it's safe to sync a shadow
-	 * page using the current MMU context.
-	 *
-	 *  - level: not part of the overall MMU role and will never match as the MMU's
-	 *           level tracks the root level
-	 *  - access: updated based on the new guest PTE
-	 *  - quadrant: not part of the overall MMU role (similar to level)
-	 */
-	const union kvm_mmu_page_role sync_role_ign = {
-		.level = 0xf,
-		.access = 0x7,
-		.quadrant = 0x3,
-		.passthrough = 0x1,
-	};
-
-	/*
-	 * Direct pages can never be unsync, and KVM should never attempt to
-	 * sync a shadow page for a different MMU context, e.g. if the role
-	 * differs then the memslot lookup (SMM vs. non-SMM) will be bogus, the
-	 * reserved bits checks will be wrong, etc...
-	 */
-	if (WARN_ON_ONCE(sp->role.direct ||
-			 (sp->role.word ^ root_role.word) & ~sync_role_ign.word))
-		return -1;
+	if (WARN_ON_ONCE(sp->spt[i] == SHADOW_NONPRESENT_VALUE ||
+			 !sp->shadowed_translation))
+		return 0;
 
 	first_pte_gpa = FNAME(get_level1_sp_gpa)(sp);
+	pte_gpa = first_pte_gpa + i * sizeof(pt_element_t);
 
-	for (i = 0; i < SPTE_ENT_PER_PAGE; i++) {
-		u64 *sptep, spte;
-		struct kvm_memory_slot *slot;
-		unsigned pte_access;
-		pt_element_t gpte;
-		gpa_t pte_gpa;
-		gfn_t gfn;
+	if (kvm_vcpu_read_guest_atomic(vcpu, pte_gpa, &gpte,
+				       sizeof(pt_element_t)))
+		return -1;
 
-		if (!sp->spt[i])
-			continue;
+	if (FNAME(prefetch_invalid_gpte)(vcpu, sp, &sp->spt[i], gpte))
+		return 1;
 
-		pte_gpa = first_pte_gpa + i * sizeof(pt_element_t);
+	gfn = gpte_to_gfn(gpte);
+	pte_access = sp->role.access;
+	pte_access &= FNAME(gpte_access)(gpte);
+	FNAME(protect_clean_gpte)(vcpu->arch.mmu, &pte_access, gpte);
 
-		if (kvm_vcpu_read_guest_atomic(vcpu, pte_gpa, &gpte,
-					       sizeof(pt_element_t)))
-			return -1;
-
-		if (FNAME(prefetch_invalid_gpte)(vcpu, sp, &sp->spt[i], gpte)) {
-			flush = true;
-			continue;
-		}
-
-		gfn = gpte_to_gfn(gpte);
-		pte_access = sp->role.access;
-		pte_access &= FNAME(gpte_access)(gpte);
-		FNAME(protect_clean_gpte)(vcpu->arch.mmu, &pte_access, gpte);
-
-		if (sync_mmio_spte(vcpu, &sp->spt[i], gfn, pte_access))
-			continue;
-
-		/*
-		 * Drop the SPTE if the new protections would result in a RWX=0
-		 * SPTE or if the gfn is changing.  The RWX=0 case only affects
-		 * EPT with execute-only support, i.e. EPT without an effective
-		 * "present" bit, as all other paging modes will create a
-		 * read-only SPTE if pte_access is zero.
-		 */
-		if ((!pte_access && !shadow_present_mask) ||
-		    gfn != kvm_mmu_page_get_gfn(sp, i)) {
-			drop_spte(vcpu->kvm, &sp->spt[i]);
-			flush = true;
-			continue;
-		}
-
-		/* Update the shadowed access bits in case they changed. */
-		kvm_mmu_page_set_access(sp, i, pte_access);
-
-		sptep = &sp->spt[i];
-		spte = *sptep;
-		host_writable = spte & shadow_host_writable_mask;
-		slot = kvm_vcpu_gfn_to_memslot(vcpu, gfn);
-		make_spte(vcpu, sp, slot, pte_access, gfn,
-			  spte_to_pfn(spte), spte, true, false,
-			  host_writable, &spte);
-
-		flush |= mmu_spte_update(sptep, spte);
-	}
+	if (sync_mmio_spte(vcpu, &sp->spt[i], gfn, pte_access))
+		return 0;
 
 	/*
-	 * Note, any flush is purely for KVM's correctness, e.g. when dropping
-	 * an existing SPTE or clearing W/A/D bits to ensure an mmu_notifier
-	 * unmap or dirty logging event doesn't fail to flush.  The guest is
-	 * responsible for flushing the TLB to ensure any changes in protection
-	 * bits are recognized, i.e. until the guest flushes or page faults on
-	 * a relevant address, KVM is architecturally allowed to let vCPUs use
-	 * cached translations with the old protection bits.
+	 * Drop the SPTE if the new protections result in no effective
+	 * "present" bit or if the gfn is changing.  The former case
+	 * only affects EPT with execute-only support with pte_access==0;
+	 * all other paging modes will create a read-only SPTE if
+	 * pte_access is zero.
 	 */
-	return flush;
+	if ((pte_access | shadow_present_mask) == SHADOW_NONPRESENT_VALUE ||
+	    gfn != kvm_mmu_page_get_gfn(sp, i)) {
+		drop_spte(vcpu->kvm, &sp->spt[i]);
+		return 1;
+	}
+	/*
+	 * Do nothing if the permissions are unchanged.  The existing SPTE is
+	 * still, and prefetch_invalid_gpte() has verified that the A/D bits
+	 * are set in the "new" gPTE, i.e. there is no danger of missing an A/D
+	 * update due to A/D bits being set in the SPTE but not the gPTE.
+	 */
+	if (kvm_mmu_page_get_access(sp, i) == pte_access)
+		return 0;
+
+	/* Update the shadowed access bits in case they changed. */
+	kvm_mmu_page_set_access(sp, i, pte_access);
+
+	sptep = &sp->spt[i];
+	spte = *sptep;
+	host_writable = spte & shadow_host_writable_mask;
+	slot = kvm_vcpu_gfn_to_memslot(vcpu, gfn);
+	make_spte(vcpu, sp, slot, pte_access, gfn,
+		  spte_to_pfn(spte), spte, true, true,
+		  host_writable, &spte);
+
+	/*
+	 * There is no need to mark the pfn dirty, as the new protections must
+	 * be a subset of the old protections, i.e. synchronizing a SPTE cannot
+	 * change the SPTE from read-only to writable.
+	 */
+	return mmu_spte_update(sptep, spte);
 }
 
 #undef pt_element_t

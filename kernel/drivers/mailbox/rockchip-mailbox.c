@@ -8,8 +8,8 @@
 #include <linux/io.h>
 #include <linux/kernel.h>
 #include <linux/mailbox_controller.h>
+#include <linux/of.h>
 #include <linux/module.h>
-#include <linux/of_device.h>
 #include <linux/platform_device.h>
 
 #define MAILBOX_A2B_INTEN		0x00
@@ -46,7 +46,7 @@ struct rockchip_mbox {
 	/* The maximum size of buf for each channel */
 	u32 buf_size;
 
-	struct rockchip_mbox_chan *chans;
+	struct rockchip_mbox_chan chans[];
 };
 
 static int rockchip_mbox_send_data(struct mbox_chan *chan, void *data)
@@ -159,7 +159,7 @@ static const struct of_device_id rockchip_mbox_of_match[] = {
 	{ .compatible = "rockchip,rk3368-mailbox", .data = &rk3368_drv_data},
 	{ },
 };
-MODULE_DEVICE_TABLE(of, rockchp_mbox_of_match);
+MODULE_DEVICE_TABLE(of, rockchip_mbox_of_match);
 
 static int rockchip_mbox_probe(struct platform_device *pdev)
 {
@@ -173,13 +173,8 @@ static int rockchip_mbox_probe(struct platform_device *pdev)
 
 	drv_data = (const struct rockchip_mbox_data *) device_get_match_data(&pdev->dev);
 
-	mb = devm_kzalloc(&pdev->dev, sizeof(*mb), GFP_KERNEL);
+	mb = devm_kzalloc(&pdev->dev, struct_size(mb, chans, drv_data->num_chans), GFP_KERNEL);
 	if (!mb)
-		return -ENOMEM;
-
-	mb->chans = devm_kcalloc(&pdev->dev, drv_data->num_chans,
-				 sizeof(*mb->chans), GFP_KERNEL);
-	if (!mb->chans)
 		return -ENOMEM;
 
 	mb->mbox.chans = devm_kcalloc(&pdev->dev, drv_data->num_chans,
@@ -194,11 +189,7 @@ static int rockchip_mbox_probe(struct platform_device *pdev)
 	mb->mbox.ops = &rockchip_mbox_chan_ops;
 	mb->mbox.txdone_irq = true;
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	if (!res)
-		return -ENODEV;
-
-	mb->mbox_base = devm_ioremap_resource(&pdev->dev, res);
+	mb->mbox_base = devm_platform_get_and_ioremap_resource(pdev, 0, &res);
 	if (IS_ERR(mb->mbox_base))
 		return PTR_ERR(mb->mbox_base);
 
@@ -248,13 +239,12 @@ static struct platform_driver rockchip_mbox_driver = {
 	.probe	= rockchip_mbox_probe,
 	.driver = {
 		.name = "rockchip-mailbox",
-		.of_match_table = of_match_ptr(rockchip_mbox_of_match),
+		.of_match_table = rockchip_mbox_of_match,
 	},
 };
 
 module_platform_driver(rockchip_mbox_driver);
 
-MODULE_LICENSE("GPL v2");
 MODULE_DESCRIPTION("Rockchip mailbox: communicate between CPU cores and MCU");
 MODULE_AUTHOR("Addy Ke <addy.ke@rock-chips.com>");
 MODULE_AUTHOR("Caesar Wang <wxt@rock-chips.com>");

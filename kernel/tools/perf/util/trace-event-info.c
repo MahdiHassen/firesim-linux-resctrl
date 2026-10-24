@@ -313,7 +313,8 @@ static int record_event_files(struct tracepoint_path *tps)
 	}
 	err = 0;
 out:
-	closedir(dir);
+	if (dir)
+		closedir(dir);
 	put_tracing_file(path);
 
 	return err;
@@ -466,10 +467,22 @@ next:
 	return NULL;
 }
 
+char *tracepoint_id_to_name(u64 config)
+{
+	struct tracepoint_path *path = tracepoint_id_to_path(config);
+	char *buf = NULL;
+
+	if (path && asprintf(&buf, "%s:%s", path->system, path->name) < 0)
+		buf = NULL;
+
+	put_tracepoints_path(path);
+	return buf;
+}
+
 static struct tracepoint_path *tracepoint_name_to_path(const char *name)
 {
 	struct tracepoint_path *path = zalloc(sizeof(*path));
-	char *str = strchr(name, ':');
+	const char *str = strchr(name, ':');
 
 	if (path == NULL || str == NULL) {
 		free(path);

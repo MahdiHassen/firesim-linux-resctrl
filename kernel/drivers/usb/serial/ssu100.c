@@ -9,14 +9,12 @@
 #include <linux/errno.h>
 #include <linux/slab.h>
 #include <linux/tty.h>
-#include <linux/tty_driver.h>
 #include <linux/tty_flip.h>
 #include <linux/module.h>
 #include <linux/serial.h>
 #include <linux/usb.h>
 #include <linux/usb/serial.h>
 #include <linux/serial_reg.h>
-#include <linux/uaccess.h>
 
 #define QT_OPEN_CLOSE_CHANNEL       0xca
 #define QT_SET_GET_DEVICE           0xc2
@@ -326,7 +324,7 @@ static int ssu100_port_probe(struct usb_serial_port *port)
 {
 	struct ssu100_port_private *priv;
 
-	priv = kzalloc(sizeof(*priv), GFP_KERNEL);
+	priv = kzalloc_obj(*priv);
 	if (!priv)
 		return -ENOMEM;
 
@@ -500,7 +498,6 @@ static void ssu100_process_read_urb(struct urb *urb)
 
 static struct usb_serial_driver ssu100_device = {
 	.driver = {
-		.owner = THIS_MODULE,
 		.name = "ssu100",
 	},
 	.description	     = DRIVER_DESC,

@@ -7,6 +7,8 @@
 
 #include <linux/module.h>
 #include <linux/platform_device.h>
+#include <linux/property.h>
+#include <linux/of.h>
 #include <linux/of_platform.h>
 #include <linux/io.h>
 #include <linux/interrupt.h>
@@ -322,6 +324,7 @@ static const struct qcom_rpm_resource msm8960_rpm_resource_table[] = {
 	[QCOM_RPM_USB_OTG_SWITCH] =		{ 205, 119, 82, 1 },
 	[QCOM_RPM_HDMI_SWITCH] =		{ 206, 120, 83, 1 },
 	[QCOM_RPM_DDR_DMM] =			{ 207, 121, 84, 2 },
+	[QCOM_RPM_QDSS_CLK] =			{ 209, ~0, 7, 1 },
 };
 
 static const struct qcom_rpm_data msm8960_template = {
@@ -528,9 +531,7 @@ static irqreturn_t qcom_rpm_wakeup_interrupt(int irq, void *dev)
 
 static int qcom_rpm_probe(struct platform_device *pdev)
 {
-	const struct of_device_id *match;
 	struct device_node *syscon_np;
-	struct resource *res;
 	struct qcom_rpm *rpm;
 	u32 fw_version[3];
 	int irq_wakeup;
@@ -571,13 +572,11 @@ static int qcom_rpm_probe(struct platform_device *pdev)
 	if (irq_wakeup < 0)
 		return irq_wakeup;
 
-	match = of_match_device(qcom_rpm_of_match, &pdev->dev);
-	if (!match)
+	rpm->data = device_get_match_data(&pdev->dev);
+	if (!rpm->data)
 		return -ENODEV;
-	rpm->data = match->data;
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	rpm->status_regs = devm_ioremap_resource(&pdev->dev, res);
+	rpm->status_regs = devm_platform_get_and_ioremap_resource(pdev, 0, NULL);
 	if (IS_ERR(rpm->status_regs))
 		return PTR_ERR(rpm->status_regs);
 	rpm->ctrl_regs = rpm->status_regs + 0x400;

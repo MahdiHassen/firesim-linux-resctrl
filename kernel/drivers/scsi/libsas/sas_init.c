@@ -39,7 +39,7 @@ struct sas_task *sas_alloc_task(gfp_t flags)
 struct sas_task *sas_alloc_slow_task(gfp_t flags)
 {
 	struct sas_task *task = sas_alloc_task(flags);
-	struct sas_task_slow *slow = kmalloc(sizeof(*slow), flags);
+	struct sas_task_slow *slow = kmalloc_obj(*slow, flags);
 
 	if (!task || !slow) {
 		if (task)
@@ -122,12 +122,12 @@ int sas_register_ha(struct sas_ha_struct *sas_ha)
 
 	error = -ENOMEM;
 	snprintf(name, sizeof(name), "%s_event_q", dev_name(sas_ha->dev));
-	sas_ha->event_q = create_singlethread_workqueue(name);
+	sas_ha->event_q = alloc_ordered_workqueue("%s", WQ_MEM_RECLAIM, name);
 	if (!sas_ha->event_q)
 		goto Undo_ports;
 
 	snprintf(name, sizeof(name), "%s_disco_q", dev_name(sas_ha->dev));
-	sas_ha->disco_q = create_singlethread_workqueue(name);
+	sas_ha->disco_q = alloc_ordered_workqueue("%s", WQ_MEM_RECLAIM, name);
 	if (!sas_ha->disco_q)
 		goto Undo_event_q;
 
@@ -141,6 +141,7 @@ Undo_event_q:
 Undo_ports:
 	sas_unregister_ports(sas_ha);
 Undo_phys:
+	sas_unregister_phys(sas_ha);
 
 	return error;
 }
@@ -183,7 +184,7 @@ static int sas_get_linkerrors(struct sas_phy *phy)
 		struct sas_ha_struct *sas_ha = SHOST_TO_SAS_HA(shost);
 		struct asd_sas_phy *asd_phy = sas_ha->sas_phy[phy->number];
 		struct sas_internal *i =
-			to_sas_internal(sas_ha->core.shost->transportt);
+			to_sas_internal(sas_ha->shost->transportt);
 
 		return i->dft->lldd_control_phy(asd_phy, PHY_FUNC_GET_EVENTS, NULL);
 	}
@@ -232,7 +233,7 @@ static int transport_sas_phy_reset(struct sas_phy *phy, int hard_reset)
 		struct sas_ha_struct *sas_ha = SHOST_TO_SAS_HA(shost);
 		struct asd_sas_phy *asd_phy = sas_ha->sas_phy[phy->number];
 		struct sas_internal *i =
-			to_sas_internal(sas_ha->core.shost->transportt);
+			to_sas_internal(sas_ha->shost->transportt);
 
 		if (!hard_reset && sas_try_ata_reset(asd_phy) == 0)
 			return 0;
@@ -266,7 +267,7 @@ int sas_phy_enable(struct sas_phy *phy, int enable)
 		struct sas_ha_struct *sas_ha = SHOST_TO_SAS_HA(shost);
 		struct asd_sas_phy *asd_phy = sas_ha->sas_phy[phy->number];
 		struct sas_internal *i =
-			to_sas_internal(sas_ha->core.shost->transportt);
+			to_sas_internal(sas_ha->shost->transportt);
 
 		if (enable)
 			ret = transport_sas_phy_reset(phy, 0);
@@ -303,7 +304,7 @@ int sas_phy_reset(struct sas_phy *phy, int hard_reset)
 		struct sas_ha_struct *sas_ha = SHOST_TO_SAS_HA(shost);
 		struct asd_sas_phy *asd_phy = sas_ha->sas_phy[phy->number];
 		struct sas_internal *i =
-			to_sas_internal(sas_ha->core.shost->transportt);
+			to_sas_internal(sas_ha->shost->transportt);
 
 		ret = i->dft->lldd_control_phy(asd_phy, reset_type, NULL);
 	} else {
@@ -315,8 +316,8 @@ int sas_phy_reset(struct sas_phy *phy, int hard_reset)
 }
 EXPORT_SYMBOL_GPL(sas_phy_reset);
 
-int sas_set_phy_speed(struct sas_phy *phy,
-		      struct sas_phy_linkrates *rates)
+static int sas_set_phy_speed(struct sas_phy *phy,
+			     struct sas_phy_linkrates *rates)
 {
 	int ret;
 
@@ -339,7 +340,7 @@ int sas_set_phy_speed(struct sas_phy *phy,
 		struct sas_ha_struct *sas_ha = SHOST_TO_SAS_HA(shost);
 		struct asd_sas_phy *asd_phy = sas_ha->sas_phy[phy->number];
 		struct sas_internal *i =
-			to_sas_internal(sas_ha->core.shost->transportt);
+			to_sas_internal(sas_ha->shost->transportt);
 
 		ret = i->dft->lldd_control_phy(asd_phy, PHY_FUNC_SET_LINK_RATE,
 					       rates);
@@ -409,7 +410,7 @@ static void sas_resume_insert_broadcast_ha(struct sas_ha_struct *ha)
 	}
 }
 
-static void _sas_resume_ha(struct sas_ha_struct *ha, bool drain)
+void sas_resume_ha(struct sas_ha_struct *ha)
 {
 	const unsigned long tmo = msecs_to_jiffies(25000);
 	int i;
@@ -425,6 +426,23 @@ static void _sas_resume_ha(struct sas_ha_struct *ha, bool drain)
 		dev_info(ha->dev, "waiting up to 25 seconds for %d phy%s to resume\n",
 			 i, i > 1 ? "s" : "");
 	wait_event_timeout(ha->eh_wait_q, phys_suspended(ha) == 0, tmo);
+
+	/*
+	 * All phys are back up or timed out. Turn on I/O and drain
+	 * pending work.
+	 */
+	scsi_unblock_requests(ha->shost);
+	sas_drain_work(ha);
+
+	/*
+	 * Send PHYE_RESUME_TIMEOUT after sas_drain_work(). The handler
+	 * calls sas_deform_port() -> sas_destruct_devices(), which removes
+	 * SCSI devices and, for LLDDs using device_link() PM sync, waits
+	 * for the host to be runtime-active. Sending it before the drain
+	 * would deadlock: the drain waits for the handler, the handler
+	 * waits for host resume, and host resume waits for the drain to
+	 * finish.
+	 */
 	for (i = 0; i < ha->num_phys; i++) {
 		struct asd_sas_phy *phy = ha->sas_phy[i];
 
@@ -435,12 +453,6 @@ static void _sas_resume_ha(struct sas_ha_struct *ha, bool drain)
 		}
 	}
 
-	/* all phys are back up or timed out, turn on i/o so we can
-	 * flush out disks that did not return
-	 */
-	scsi_unblock_requests(ha->core.shost);
-	if (drain)
-		sas_drain_work(ha);
 	clear_bit(SAS_HA_RESUMING, &ha->state);
 
 	sas_queue_deferred_work(ha);
@@ -449,26 +461,14 @@ static void _sas_resume_ha(struct sas_ha_struct *ha, bool drain)
 	 */
 	sas_resume_insert_broadcast_ha(ha);
 }
-
-void sas_resume_ha(struct sas_ha_struct *ha)
-{
-	_sas_resume_ha(ha, true);
-}
 EXPORT_SYMBOL(sas_resume_ha);
-
-/* A no-sync variant, which does not call sas_drain_ha(). */
-void sas_resume_ha_no_sync(struct sas_ha_struct *ha)
-{
-	_sas_resume_ha(ha, false);
-}
-EXPORT_SYMBOL(sas_resume_ha_no_sync);
 
 void sas_suspend_ha(struct sas_ha_struct *ha)
 {
 	int i;
 
 	sas_disable_events(ha);
-	scsi_block_requests(ha->core.shost);
+	scsi_block_requests(ha->shost);
 	for (i = 0; i < ha->num_phys; i++) {
 		struct asd_sas_port *port = ha->sas_port[i];
 
@@ -504,7 +504,7 @@ static void phy_enable_work(struct work_struct *work)
 
 static int sas_phy_setup(struct sas_phy *phy)
 {
-	struct sas_phy_data *d = kzalloc(sizeof(*d), GFP_KERNEL);
+	struct sas_phy_data *d = kzalloc_obj(*d);
 
 	if (!d)
 		return -ENOMEM;
@@ -641,7 +641,7 @@ struct asd_sas_event *sas_alloc_event(struct asd_sas_phy *phy,
 	struct asd_sas_event *event;
 	struct sas_ha_struct *sas_ha = phy->ha;
 	struct sas_internal *i =
-		to_sas_internal(sas_ha->core.shost->transportt);
+		to_sas_internal(sas_ha->shost->transportt);
 
 	event = kmem_cache_zalloc(sas_event_cache, gfp_flags);
 	if (!event)

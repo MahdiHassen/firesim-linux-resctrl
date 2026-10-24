@@ -2,15 +2,6 @@
 /*
  * Support for Intel Camera Imaging ISP subsystem.
  * Copyright (c) 2015, Intel Corporation.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
  */
 
 #ifndef _IA_CSS_CIRCBUF_H
@@ -73,7 +64,7 @@ uint32_t ia_css_circbuf_pop(
 
 /**
  * @brief Extract a value out of the circular buffer.
- * Get a value at an arbitrary poistion in the circular
+ * Get a value at an arbitrary position in the circular
  * buffer. The user should call "ia_css_circbuf_is_empty()"
  * to avoid accessing to an empty buffer.
  *
@@ -148,21 +139,16 @@ static inline uint8_t ia_css_circbuf_get_pos_at_offset(
     u32 base,
     int offset)
 {
-	u8 dest;
-
 	OP___assert(cb);
 	OP___assert(cb->desc);
 	OP___assert(cb->desc->size > 0);
 
 	/* step 1: adjudst the offset  */
-	while (offset < 0) {
+	while (offset < 0)
 		offset += cb->desc->size;
-	}
 
 	/* step 2: shift and round by the upper limit */
-	dest = OP_std_modadd(base, offset, cb->desc->size);
-
-	return dest;
+	return (base + offset) % cb->desc->size;
 }
 
 /**

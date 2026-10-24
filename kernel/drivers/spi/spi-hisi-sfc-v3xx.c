@@ -11,7 +11,6 @@
 #include <linux/interrupt.h>
 #include <linux/iopoll.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
 #include <linux/spi/spi.h>
@@ -40,7 +39,7 @@
 /* Common definition of interrupt bit masks */
 #define HISI_SFC_V3XX_INT_MASK_ALL (0x1ff)	/* all the masks */
 #define HISI_SFC_V3XX_INT_MASK_CPLT BIT(0)	/* command execution complete */
-#define HISI_SFC_V3XX_INT_MASK_PP_ERR BIT(2)	/* page progrom error */
+#define HISI_SFC_V3XX_INT_MASK_PP_ERR BIT(2)	/* page program error */
 #define HISI_SFC_V3XX_INT_MASK_IACCES BIT(5)	/* error visiting inaccessible/
 						 * protected address
 						 */
@@ -152,7 +151,7 @@ static int hisi_sfc_v3xx_adjust_op_size(struct spi_mem *mem,
 	uintptr_t addr = (uintptr_t)op->data.buf.in;
 	int max_byte_count;
 
-	host = spi_controller_get_devdata(spi->master);
+	host = spi_controller_get_devdata(spi->controller);
 
 	max_byte_count = host->max_cmd_dword * 4;
 
@@ -174,7 +173,7 @@ static bool hisi_sfc_v3xx_supports_op(struct spi_mem *mem,
 	struct spi_device *spi = mem->spi;
 	struct hisi_sfc_v3xx_host *host;
 
-	host = spi_controller_get_devdata(spi->master);
+	host = spi_controller_get_devdata(spi->controller);
 
 	if (op->data.buswidth > 4 || op->dummy.buswidth > 4 ||
 	    op->addr.buswidth > 4 || op->cmd.buswidth > 4)
@@ -361,9 +360,9 @@ static int hisi_sfc_v3xx_exec_op(struct spi_mem *mem,
 {
 	struct hisi_sfc_v3xx_host *host;
 	struct spi_device *spi = mem->spi;
-	u8 chip_select = spi->chip_select;
+	u8 chip_select = spi_get_chipselect(spi, 0);
 
-	host = spi_controller_get_devdata(spi->master);
+	host = spi_controller_get_devdata(spi->controller);
 
 	return hisi_sfc_v3xx_generic_exec_op(host, op, chip_select);
 }
@@ -377,6 +376,11 @@ static const struct spi_controller_mem_ops hisi_sfc_v3xx_mem_ops = {
 static irqreturn_t hisi_sfc_v3xx_isr(int irq, void *data)
 {
 	struct hisi_sfc_v3xx_host *host = data;
+	u32 reg;
+
+	reg = readl(host->regbase + HISI_SFC_V3XX_INT_STAT);
+	if (!reg)
+		return IRQ_NONE;
 
 	hisi_sfc_v3xx_disable_int(host);
 
@@ -431,7 +435,7 @@ static int hisi_sfc_v3xx_probe(struct platform_device *pdev)
 	u32 version, glb_config;
 	int ret;
 
-	ctlr = spi_alloc_master(&pdev->dev, sizeof(*host));
+	ctlr = devm_spi_alloc_host(&pdev->dev, sizeof(*host));
 	if (!ctlr)
 		return -ENOMEM;
 
@@ -446,16 +450,12 @@ static int hisi_sfc_v3xx_probe(struct platform_device *pdev)
 	platform_set_drvdata(pdev, host);
 
 	host->regbase = devm_platform_ioremap_resource(pdev, 0);
-	if (IS_ERR(host->regbase)) {
-		ret = PTR_ERR(host->regbase);
-		goto err_put_master;
-	}
+	if (IS_ERR(host->regbase))
+		return PTR_ERR(host->regbase);
 
 	host->irq = platform_get_irq_optional(pdev, 0);
-	if (host->irq == -EPROBE_DEFER) {
-		ret = -EPROBE_DEFER;
-		goto err_put_master;
-	}
+	if (host->irq == -EPROBE_DEFER)
+		return -EPROBE_DEFER;
 
 	hisi_sfc_v3xx_disable_int(host);
 
@@ -496,16 +496,12 @@ static int hisi_sfc_v3xx_probe(struct platform_device *pdev)
 
 	ret = devm_spi_register_controller(dev, ctlr);
 	if (ret)
-		goto err_put_master;
+		return ret;
 
 	dev_info(&pdev->dev, "hw version 0x%x, %s mode.\n",
 		 version, host->irq ? "irq" : "polling");
 
 	return 0;
-
-err_put_master:
-	spi_master_put(ctlr);
-	return ret;
 }
 
 static const struct acpi_device_id hisi_sfc_v3xx_acpi_ids[] = {

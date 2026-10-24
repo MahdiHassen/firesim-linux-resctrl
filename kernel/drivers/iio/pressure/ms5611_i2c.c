@@ -14,9 +14,8 @@
 #include <linux/delay.h>
 #include <linux/i2c.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 #include "ms5611.h"
 
@@ -105,11 +104,6 @@ static int ms5611_i2c_probe(struct i2c_client *client)
 	return ms5611_probe(indio_dev, &client->dev, id->name, id->driver_data);
 }
 
-static void ms5611_i2c_remove(struct i2c_client *client)
-{
-	ms5611_remove(i2c_get_clientdata(client));
-}
-
 static const struct of_device_id ms5611_i2c_matches[] = {
 	{ .compatible = "meas,ms5611" },
 	{ .compatible = "meas,ms5607" },
@@ -118,8 +112,8 @@ static const struct of_device_id ms5611_i2c_matches[] = {
 MODULE_DEVICE_TABLE(of, ms5611_i2c_matches);
 
 static const struct i2c_device_id ms5611_id[] = {
-	{ "ms5611", MS5611 },
-	{ "ms5607", MS5607 },
+	{ .name = "ms5611", .driver_data = MS5611 },
+	{ .name = "ms5607", .driver_data = MS5607 },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, ms5611_id);
@@ -130,12 +124,11 @@ static struct i2c_driver ms5611_driver = {
 		.of_match_table = ms5611_i2c_matches,
 	},
 	.id_table = ms5611_id,
-	.probe_new = ms5611_i2c_probe,
-	.remove = ms5611_i2c_remove,
+	.probe = ms5611_i2c_probe,
 };
 module_i2c_driver(ms5611_driver);
 
 MODULE_AUTHOR("Tomasz Duszynski <tduszyns@gmail.com>");
 MODULE_DESCRIPTION("MS5611 i2c driver");
 MODULE_LICENSE("GPL v2");
-MODULE_IMPORT_NS(IIO_MS5611);
+MODULE_IMPORT_NS("IIO_MS5611");

@@ -5,12 +5,15 @@
 
 #include <linux/prime_numbers.h>
 
+#include <drm/drm_print.h>
+
 #include "gem/i915_gem_internal.h"
 #include "gem/i915_gem_pm.h"
 #include "gt/intel_engine_heartbeat.h"
 #include "gt/intel_reset.h"
 #include "gt/selftest_engine_heartbeat.h"
 
+#include "i915_jiffies.h"
 #include "i915_selftest.h"
 #include "selftests/i915_random.h"
 #include "selftests/igt_flush_test.h"
@@ -53,7 +56,7 @@ static int wait_for_submit(struct intel_engine_cs *engine,
 		if (i915_request_completed(rq)) /* that was quick! */
 			return 0;
 
-		/* Wait until the HW has acknowleged the submission (or err) */
+		/* Wait until the HW has acknowledged the submission (or err) */
 		intel_engine_flush_submission(engine);
 		if (!READ_ONCE(engine->execlists.pending[0]) && is_active(rq))
 			return 0;
@@ -93,7 +96,7 @@ static int wait_for_reset(struct intel_engine_cs *engine,
 		return -EINVAL;
 	}
 
-	/* Give the request a jiffie to complete after flushing the worker */
+	/* Give the request a jiffy to complete after flushing the worker */
 	if (i915_request_wait(rq, 0,
 			      max(0l, (long)(timeout - jiffies)) + 1) < 0) {
 		pr_err("%s: hanging request %llx:%lld did not complete\n",
@@ -1198,7 +1201,7 @@ static int live_timeslice_rewind(void *arg)
 		ENGINE_TRACE(engine, "forcing tasklet for rewind\n");
 		while (i915_request_is_active(rq[A2])) { /* semaphore yield! */
 			/* Wait for the timeslice to kick in */
-			del_timer(&engine->execlists.timer);
+			timer_delete(&engine->execlists.timer);
 			tasklet_hi_schedule(&engine->sched_engine->tasklet);
 			intel_engine_flush_submission(engine);
 		}
@@ -1530,8 +1533,8 @@ static int live_busywait_preempt(void *arg)
 	struct drm_i915_gem_object *obj;
 	struct i915_vma *vma;
 	enum intel_engine_id id;
-	int err = -ENOMEM;
 	u32 *map;
+	int err;
 
 	/*
 	 * Verify that even without HAS_LOGICAL_RING_PREEMPTION, we can
@@ -1539,13 +1542,17 @@ static int live_busywait_preempt(void *arg)
 	 */
 
 	ctx_hi = kernel_context(gt->i915, NULL);
-	if (!ctx_hi)
-		return -ENOMEM;
+	if (IS_ERR(ctx_hi))
+		return PTR_ERR(ctx_hi);
+
 	ctx_hi->sched.priority = I915_CONTEXT_MAX_USER_PRIORITY;
 
 	ctx_lo = kernel_context(gt->i915, NULL);
-	if (!ctx_lo)
+	if (IS_ERR(ctx_lo)) {
+		err = PTR_ERR(ctx_lo);
 		goto err_ctx_hi;
+	}
+
 	ctx_lo->sched.priority = I915_CONTEXT_MIN_USER_PRIORITY;
 
 	obj = i915_gem_object_create_internal(gt->i915, PAGE_SIZE);
@@ -2353,7 +2360,7 @@ static int __cancel_fail(struct live_preempt_cancel *arg)
 	/* force preempt reset [failure] */
 	while (!engine->execlists.pending[0])
 		intel_engine_flush_submission(engine);
-	del_timer_sync(&engine->execlists.preempt);
+	timer_delete_sync(&engine->execlists.preempt);
 	intel_engine_flush_submission(engine);
 
 	cancel_reset_timeout(engine);
@@ -2737,11 +2744,11 @@ static int create_gang(struct intel_engine_cs *engine,
 		MI_SEMAPHORE_POLL |
 		MI_SEMAPHORE_SAD_EQ_SDD;
 	*cs++ = 0;
-	*cs++ = lower_32_bits(vma->node.start);
-	*cs++ = upper_32_bits(vma->node.start);
+	*cs++ = lower_32_bits(i915_vma_offset(vma));
+	*cs++ = upper_32_bits(i915_vma_offset(vma));
 
 	if (*prev) {
-		u64 offset = (*prev)->batch->node.start;
+		u64 offset = i915_vma_offset((*prev)->batch);
 
 		/* Terminate the spinner in the next lower priority batch. */
 		*cs++ = MI_STORE_DWORD_IMM_GEN4;
@@ -2763,13 +2770,11 @@ static int create_gang(struct intel_engine_cs *engine,
 	rq->batch = i915_vma_get(vma);
 	i915_request_get(rq);
 
-	i915_vma_lock(vma);
-	err = i915_vma_move_to_active(vma, rq, 0);
+	err = igt_vma_move_to_active_unlocked(vma, rq, 0);
 	if (!err)
 		err = rq->engine->emit_bb_start(rq,
-						vma->node.start,
+						i915_vma_offset(vma),
 						PAGE_SIZE, 0);
-	i915_vma_unlock(vma);
 	i915_request_add(rq);
 	if (err)
 		goto err_rq;
@@ -3095,7 +3100,7 @@ create_gpr_user(struct intel_engine_cs *engine,
 		*cs++ = MI_MATH_ADD;
 		*cs++ = MI_MATH_STORE(MI_MATH_REG(i), MI_MATH_REG_ACCU);
 
-		addr = result->node.start + offset + i * sizeof(*cs);
+		addr = i915_vma_offset(result) + offset + i * sizeof(*cs);
 		*cs++ = MI_STORE_REGISTER_MEM_GEN8;
 		*cs++ = CS_GPR(engine, 2 * i);
 		*cs++ = lower_32_bits(addr);
@@ -3105,8 +3110,8 @@ create_gpr_user(struct intel_engine_cs *engine,
 			MI_SEMAPHORE_POLL |
 			MI_SEMAPHORE_SAD_GTE_SDD;
 		*cs++ = i;
-		*cs++ = lower_32_bits(result->node.start);
-		*cs++ = upper_32_bits(result->node.start);
+		*cs++ = lower_32_bits(i915_vma_offset(result));
+		*cs++ = upper_32_bits(i915_vma_offset(result));
 	}
 
 	*cs++ = MI_BATCH_BUFFER_END;
@@ -3177,16 +3182,14 @@ create_gpr_client(struct intel_engine_cs *engine,
 		goto out_batch;
 	}
 
-	i915_vma_lock(vma);
-	err = i915_vma_move_to_active(vma, rq, 0);
-	i915_vma_unlock(vma);
+	err = igt_vma_move_to_active_unlocked(vma, rq, 0);
 
 	i915_vma_lock(batch);
 	if (!err)
 		err = i915_vma_move_to_active(batch, rq, 0);
 	if (!err)
 		err = rq->engine->emit_bb_start(rq,
-						batch->node.start,
+						i915_vma_offset(batch),
 						PAGE_SIZE, 0);
 	i915_vma_unlock(batch);
 	i915_vma_unpin(batch);
@@ -3426,7 +3429,7 @@ static int live_preempt_timeout(void *arg)
 			cpu_relax();
 
 		saved_timeout = engine->props.preempt_timeout_ms;
-		engine->props.preempt_timeout_ms = 1; /* in ms, -> 1 jiffie */
+		engine->props.preempt_timeout_ms = 1; /* in ms, -> 1 jiffy */
 
 		i915_request_get(rq);
 		i915_request_add(rq);
@@ -3514,13 +3517,11 @@ static int smoke_submit(struct preempt_smoke *smoke,
 	}
 
 	if (vma) {
-		i915_vma_lock(vma);
-		err = i915_vma_move_to_active(vma, rq, 0);
+		err = igt_vma_move_to_active_unlocked(vma, rq, 0);
 		if (!err)
 			err = rq->engine->emit_bb_start(rq,
-							vma->node.start,
+							i915_vma_offset(vma),
 							PAGE_SIZE, 0);
-		i915_vma_unlock(vma);
 	}
 
 	i915_request_add(rq);
@@ -3563,7 +3564,7 @@ static int smoke_crescendo(struct preempt_smoke *smoke, unsigned int flags)
 	unsigned long count;
 	int err = 0;
 
-	arg = kmalloc_array(I915_NUM_ENGINES, sizeof(*arg), GFP_KERNEL);
+	arg = kmalloc_objs(*arg, I915_NUM_ENGINES);
 	if (!arg)
 		return -ENOMEM;
 
@@ -3576,7 +3577,7 @@ static int smoke_crescendo(struct preempt_smoke *smoke, unsigned int flags)
 			arg[id].batch = NULL;
 		arg[id].count = 0;
 
-		worker[id] = kthread_create_worker(0, "igt/smoke:%d", id);
+		worker[id] = kthread_run_worker(0, "igt/smoke:%d", id);
 		if (IS_ERR(worker[id])) {
 			err = PTR_ERR(worker[id]);
 			break;
@@ -3647,9 +3648,7 @@ static int live_preempt_smoke(void *arg)
 	u32 *cs;
 	int n;
 
-	smoke.contexts = kmalloc_array(smoke.ncontext,
-				       sizeof(*smoke.contexts),
-				       GFP_KERNEL);
+	smoke.contexts = kmalloc_objs(*smoke.contexts, smoke.ncontext);
 	if (!smoke.contexts)
 		return -ENOMEM;
 

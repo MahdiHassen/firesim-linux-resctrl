@@ -117,6 +117,9 @@ static int fsl_audmix_put_mix_clk_src(struct snd_kcontrol *kcontrol,
 	unsigned int *item = ucontrol->value.enumerated.item;
 	unsigned int reg_val, val, mix_clk;
 
+	if (item[0] >= e->items)
+		return -EINVAL;
+
 	/* Get current state */
 	reg_val = snd_soc_component_read(comp, FSL_AUDMIX_CTR);
 	mix_clk = ((reg_val & FSL_AUDMIX_CTR_MIXCLK_MASK)
@@ -156,6 +159,9 @@ static int fsl_audmix_put_out_src(struct snd_kcontrol *kcontrol,
 	u32 out_src, mix_clk;
 	unsigned int reg_val, val, mask = 0, ctr = 0;
 	int ret;
+
+	if (item[0] >= e->items)
+		return -EINVAL;
 
 	/* Get current state */
 	reg_val = snd_soc_component_read(comp, FSL_AUDMIX_CTR);
@@ -326,15 +332,6 @@ static struct snd_soc_dai_driver fsl_audmix_dai[] = {
 			.rates = SNDRV_PCM_RATE_8000_96000,
 			.formats = FSL_AUDMIX_FORMATS,
 		},
-		.capture = {
-			.stream_name = "AUDMIX-Capture-0",
-			.channels_min = 8,
-			.channels_max = 8,
-			.rate_min = 8000,
-			.rate_max = 96000,
-			.rates = SNDRV_PCM_RATE_8000_96000,
-			.formats = FSL_AUDMIX_FORMATS,
-		},
 		.ops = &fsl_audmix_dai_ops,
 	},
 	{
@@ -349,8 +346,13 @@ static struct snd_soc_dai_driver fsl_audmix_dai[] = {
 			.rates = SNDRV_PCM_RATE_8000_96000,
 			.formats = FSL_AUDMIX_FORMATS,
 		},
+		.ops = &fsl_audmix_dai_ops,
+	},
+	{
+		.id   = 2,
+		.name = "audmix-2",
 		.capture = {
-			.stream_name = "AUDMIX-Capture-1",
+			.stream_name = "AUDMIX-Capture-0",
 			.channels_min = 8,
 			.channels_max = 8,
 			.rate_min = 8000,
@@ -448,6 +450,9 @@ static const struct of_device_id fsl_audmix_ids[] = {
 	{
 		.compatible = "fsl,imx8qm-audmix",
 	},
+	{
+		.compatible = "fsl,imx952-audmix",
+	},
 	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(of, fsl_audmix_ids);
@@ -492,11 +497,17 @@ static int fsl_audmix_probe(struct platform_device *pdev)
 		goto err_disable_pm;
 	}
 
-	priv->pdev = platform_device_register_data(dev, "imx-audmix", 0, NULL, 0);
-	if (IS_ERR(priv->pdev)) {
-		ret = PTR_ERR(priv->pdev);
-		dev_err(dev, "failed to register platform: %d\n", ret);
-		goto err_disable_pm;
+	/*
+	 * If dais property exist, then register the imx-audmix card driver.
+	 * otherwise, it should be linked by audio graph card.
+	 */
+	if (of_find_property(pdev->dev.of_node, "dais", NULL)) {
+		priv->pdev = platform_device_register_data(dev, "imx-audmix", 0, NULL, 0);
+		if (IS_ERR(priv->pdev)) {
+			ret = PTR_ERR(priv->pdev);
+			dev_err(dev, "failed to register platform: %d\n", ret);
+			goto err_disable_pm;
+		}
 	}
 
 	return 0;
@@ -506,7 +517,7 @@ err_disable_pm:
 	return ret;
 }
 
-static int fsl_audmix_remove(struct platform_device *pdev)
+static void fsl_audmix_remove(struct platform_device *pdev)
 {
 	struct fsl_audmix *priv = dev_get_drvdata(&pdev->dev);
 
@@ -514,11 +525,8 @@ static int fsl_audmix_remove(struct platform_device *pdev)
 
 	if (priv->pdev)
 		platform_device_unregister(priv->pdev);
-
-	return 0;
 }
 
-#ifdef CONFIG_PM
 static int fsl_audmix_runtime_resume(struct device *dev)
 {
 	struct fsl_audmix *priv = dev_get_drvdata(dev);
@@ -546,14 +554,11 @@ static int fsl_audmix_runtime_suspend(struct device *dev)
 
 	return 0;
 }
-#endif /* CONFIG_PM */
 
 static const struct dev_pm_ops fsl_audmix_pm = {
-	SET_RUNTIME_PM_OPS(fsl_audmix_runtime_suspend,
-			   fsl_audmix_runtime_resume,
-			   NULL)
-	SET_SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend,
-				pm_runtime_force_resume)
+	RUNTIME_PM_OPS(fsl_audmix_runtime_suspend, fsl_audmix_runtime_resume,
+		       NULL)
+	SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend, pm_runtime_force_resume)
 };
 
 static struct platform_driver fsl_audmix_driver = {
@@ -562,7 +567,7 @@ static struct platform_driver fsl_audmix_driver = {
 	.driver = {
 		.name = "fsl-audmix",
 		.of_match_table = fsl_audmix_ids,
-		.pm = &fsl_audmix_pm,
+		.pm = pm_ptr(&fsl_audmix_pm),
 	},
 };
 module_platform_driver(fsl_audmix_driver);

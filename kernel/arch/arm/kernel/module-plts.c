@@ -28,11 +28,6 @@ static const u32 fixed_plts[] = {
 #endif
 };
 
-static bool in_init(const struct module *mod, unsigned long loc)
-{
-	return loc - (u32)mod->init_layout.base < mod->init_layout.size;
-}
-
 static void prealloc_fixed(struct mod_plt_sec *pltsec, struct plt_entries *plt)
 {
 	int i;
@@ -50,8 +45,8 @@ static void prealloc_fixed(struct mod_plt_sec *pltsec, struct plt_entries *plt)
 
 u32 get_module_plt(struct module *mod, unsigned long loc, Elf32_Addr val)
 {
-	struct mod_plt_sec *pltsec = !in_init(mod, loc) ? &mod->arch.core :
-							  &mod->arch.init;
+	struct mod_plt_sec *pltsec = !within_module_init(loc, mod) ?
+						&mod->arch.core : &mod->arch.init;
 	struct plt_entries *plt;
 	int idx;
 
@@ -230,6 +225,18 @@ int module_frob_arch_sections(Elf_Ehdr *ehdr, Elf_Shdr *sechdrs,
 			mod->arch.init.plt = s;
 		else if (s->sh_type == SHT_SYMTAB)
 			syms = (Elf32_Sym *)s->sh_addr;
+#if defined(CONFIG_ARM_UNWIND) && !defined(CONFIG_VMSPLIT_3G)
+		else if (s->sh_type == ELF_SECTION_UNWIND ||
+			 (strncmp(".ARM.extab", secstrings + s->sh_name, 10) == 0)) {
+			/*
+			 * To avoid the possible relocation out of range issue for
+			 * R_ARM_PREL31, mark unwind section .ARM.extab and .ARM.exidx as
+			 * executable so they will be allocated along with .text section to
+			 * meet +/-1GB range requirement of the R_ARM_PREL31 relocation
+			 */
+			s->sh_flags |= SHF_EXECINSTR;
+		}
+#endif
 	}
 
 	if (!mod->arch.core.plt || !mod->arch.init.plt) {
@@ -256,7 +263,7 @@ int module_frob_arch_sections(Elf_Ehdr *ehdr, Elf_Shdr *sechdrs,
 		/* sort by type and symbol index */
 		sort(rels, numrels, sizeof(Elf32_Rel), cmp_rel, NULL);
 
-		if (strncmp(secstrings + dstsec->sh_name, ".init", 5) != 0)
+		if (!module_init_layout_section(secstrings + dstsec->sh_name))
 			core_plts += count_plts(syms, dstsec->sh_addr, rels,
 						numrels, s->sh_info);
 		else
@@ -290,11 +297,9 @@ bool in_module_plt(unsigned long loc)
 	struct module *mod;
 	bool ret;
 
-	preempt_disable();
+	guard(rcu)();
 	mod = __module_text_address(loc);
 	ret = mod && (loc - (u32)mod->arch.core.plt_ent < mod->arch.core.plt_count * PLT_ENT_SIZE ||
 		      loc - (u32)mod->arch.init.plt_ent < mod->arch.init.plt_count * PLT_ENT_SIZE);
-	preempt_enable();
-
 	return ret;
 }

@@ -172,7 +172,7 @@ static bool cmd640_sff_irq_check(struct ata_port *ap)
 	return irq_stat & irq_mask;
 }
 
-static struct scsi_host_template cmd640_sht = {
+static const struct scsi_host_template cmd640_sht = {
 	ATA_PIO_SHT(DRV_NAME),
 };
 
@@ -248,8 +248,8 @@ static int cmd640_reinit_one(struct pci_dev *pdev)
 #endif
 
 static const struct pci_device_id cmd640[] = {
-	{ PCI_VDEVICE(CMD, 0x640), 0 },
-	{ },
+	{ PCI_VDEVICE(CMD, 0x0640) },
+	{ }
 };
 
 static struct pci_driver cmd640_pci_driver = {

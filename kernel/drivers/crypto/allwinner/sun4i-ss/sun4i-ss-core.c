@@ -6,7 +6,7 @@
  *
  * Core file which registers crypto algorithms supported by the SS.
  *
- * You could find a link for the datasheet in Documentation/arm/sunxi.rst
+ * You could find a link for the datasheet in Documentation/arch/arm/sunxi.rst
  */
 #include <linux/clk.h>
 #include <linux/crypto.h>
@@ -14,7 +14,6 @@
 #include <linux/io.h>
 #include <linux/module.h>
 #include <linux/of.h>
-#include <linux/of_device.h>
 #include <linux/platform_device.h>
 #include <crypto/scatterwalk.h>
 #include <linux/scatterlist.h>
@@ -50,7 +49,6 @@ static struct sun4i_ss_alg_template ss_algs[] = {
 				.cra_name = "md5",
 				.cra_driver_name = "md5-sun4i-ss",
 				.cra_priority = 300,
-				.cra_alignmask = 3,
 				.cra_blocksize = MD5_HMAC_BLOCK_SIZE,
 				.cra_ctxsize = sizeof(struct sun4i_req_ctx),
 				.cra_module = THIS_MODULE,
@@ -77,7 +75,6 @@ static struct sun4i_ss_alg_template ss_algs[] = {
 				.cra_name = "sha1",
 				.cra_driver_name = "sha1-sun4i-ss",
 				.cra_priority = 300,
-				.cra_alignmask = 3,
 				.cra_blocksize = SHA1_BLOCK_SIZE,
 				.cra_ctxsize = sizeof(struct sun4i_req_ctx),
 				.cra_module = THIS_MODULE,
@@ -216,23 +213,6 @@ static struct sun4i_ss_alg_template ss_algs[] = {
 		}
 	}
 },
-#ifdef CONFIG_CRYPTO_DEV_SUN4I_SS_PRNG
-{
-	.type = CRYPTO_ALG_TYPE_RNG,
-	.alg.rng = {
-		.base = {
-			.cra_name		= "stdrng",
-			.cra_driver_name	= "sun4i_ss_rng",
-			.cra_priority		= 300,
-			.cra_ctxsize		= 0,
-			.cra_module		= THIS_MODULE,
-		},
-		.generate               = sun4i_ss_prng_generate,
-		.seed                   = sun4i_ss_prng_seed,
-		.seedsize               = SS_SEED_LEN / BITS_PER_BYTE,
-	}
-},
-#endif
 };
 
 static int sun4i_ss_debugfs_show(struct seq_file *seq, void *v)
@@ -249,12 +229,6 @@ static int sun4i_ss_debugfs_show(struct seq_file *seq, void *v)
 				   ss_algs[i].alg.crypto.base.cra_name,
 				   ss_algs[i].stat_req, ss_algs[i].stat_opti, ss_algs[i].stat_fb,
 				   ss_algs[i].stat_bytes);
-			break;
-		case CRYPTO_ALG_TYPE_RNG:
-			seq_printf(seq, "%s %s reqs=%lu tsize=%lu\n",
-				   ss_algs[i].alg.rng.base.cra_driver_name,
-				   ss_algs[i].alg.rng.base.cra_name,
-				   ss_algs[i].stat_req, ss_algs[i].stat_bytes);
 			break;
 		case CRYPTO_ALG_TYPE_AHASH:
 			seq_printf(seq, "%s %s reqs=%lu\n",
@@ -474,13 +448,6 @@ static int sun4i_ss_probe(struct platform_device *pdev)
 				goto error_alg;
 			}
 			break;
-		case CRYPTO_ALG_TYPE_RNG:
-			err = crypto_register_rng(&ss_algs[i].alg.rng);
-			if (err) {
-				dev_err(ss->dev, "Fail to register %s\n",
-					ss_algs[i].alg.rng.base.cra_name);
-			}
-			break;
 		}
 	}
 
@@ -500,9 +467,6 @@ error_alg:
 		case CRYPTO_ALG_TYPE_AHASH:
 			crypto_unregister_ahash(&ss_algs[i].alg.hash);
 			break;
-		case CRYPTO_ALG_TYPE_RNG:
-			crypto_unregister_rng(&ss_algs[i].alg.rng);
-			break;
 		}
 	}
 error_pm:
@@ -510,7 +474,7 @@ error_pm:
 	return err;
 }
 
-static int sun4i_ss_remove(struct platform_device *pdev)
+static void sun4i_ss_remove(struct platform_device *pdev)
 {
 	int i;
 	struct sun4i_ss_ctx *ss = platform_get_drvdata(pdev);
@@ -523,14 +487,10 @@ static int sun4i_ss_remove(struct platform_device *pdev)
 		case CRYPTO_ALG_TYPE_AHASH:
 			crypto_unregister_ahash(&ss_algs[i].alg.hash);
 			break;
-		case CRYPTO_ALG_TYPE_RNG:
-			crypto_unregister_rng(&ss_algs[i].alg.rng);
-			break;
 		}
 	}
 
 	sun4i_ss_pm_exit(ss);
-	return 0;
 }
 
 static const struct of_device_id a20ss_crypto_of_match_table[] = {

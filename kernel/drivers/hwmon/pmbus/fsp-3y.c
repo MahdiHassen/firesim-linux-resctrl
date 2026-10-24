@@ -180,7 +180,6 @@ static struct pmbus_driver_info fsp3y_info[] = {
 			PMBUS_HAVE_FAN12,
 		.func[YM2151_PAGE_5VSB_LOG] =
 			PMBUS_HAVE_VOUT | PMBUS_HAVE_IOUT,
-			PMBUS_HAVE_IIN,
 		.read_word_data = fsp3y_read_word_data,
 		.read_byte_data = fsp3y_read_byte_data,
 	},
@@ -223,12 +222,6 @@ static int fsp3y_detect(struct i2c_client *client)
 	return -ENODEV;
 }
 
-static const struct i2c_device_id fsp3y_id[] = {
-	{"ym2151e", ym2151e},
-	{"yh5151e", yh5151e},
-	{ }
-};
-
 static int fsp3y_probe(struct i2c_client *client)
 {
 	struct fsp3y_data *data;
@@ -243,7 +236,7 @@ static int fsp3y_probe(struct i2c_client *client)
 	if (data->chip < 0)
 		return data->chip;
 
-	id = i2c_match_id(fsp3y_id, client);
+	id = i2c_client_get_device_id(client);
 	if (data->chip != id->driver_data)
 		dev_warn(&client->dev, "Device mismatch: Configured %s (%d), detected %d\n",
 			 id->name, (int)id->driver_data, data->chip);
@@ -277,13 +270,18 @@ static int fsp3y_probe(struct i2c_client *client)
 	return pmbus_do_probe(client, &data->info);
 }
 
+static const struct i2c_device_id fsp3y_id[] = {
+	{ .name = "ym2151e", .driver_data = ym2151e },
+	{ .name = "yh5151e", .driver_data = yh5151e },
+	{ }
+};
 MODULE_DEVICE_TABLE(i2c, fsp3y_id);
 
 static struct i2c_driver fsp3y_driver = {
 	.driver = {
 		   .name = "fsp3y",
 		   },
-	.probe_new = fsp3y_probe,
+	.probe = fsp3y_probe,
 	.id_table = fsp3y_id
 };
 
@@ -292,4 +290,4 @@ module_i2c_driver(fsp3y_driver);
 MODULE_AUTHOR("Václav Kubernát");
 MODULE_DESCRIPTION("PMBus driver for FSP/3Y-Power power supplies");
 MODULE_LICENSE("GPL");
-MODULE_IMPORT_NS(PMBUS);
+MODULE_IMPORT_NS("PMBUS");

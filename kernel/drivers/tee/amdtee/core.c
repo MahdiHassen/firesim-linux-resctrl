@@ -3,20 +3,22 @@
  * Copyright 2019 Advanced Micro Devices, Inc.
  */
 
+ #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+
 #include <linux/errno.h>
+#include <linux/device.h>
+#include <linux/firmware.h>
 #include <linux/io.h>
+#include <linux/mm.h>
 #include <linux/module.h>
+#include <linux/psp-tee.h>
 #include <linux/slab.h>
 #include <linux/string.h>
-#include <linux/device.h>
-#include <linux/tee_drv.h>
+#include <linux/tee_core.h>
 #include <linux/types.h>
-#include <linux/mm.h>
 #include <linux/uaccess.h>
-#include <linux/firmware.h>
+
 #include "amdtee_private.h"
-#include "../tee_private.h"
-#include <linux/psp-tee.h>
 
 static struct amdtee_driver_data *drv_data;
 static DEFINE_MUTEX(session_list_mutex);
@@ -36,13 +38,11 @@ static int amdtee_open(struct tee_context *ctx)
 {
 	struct amdtee_context_data *ctxdata;
 
-	ctxdata = kzalloc(sizeof(*ctxdata), GFP_KERNEL);
+	ctxdata = kzalloc_obj(*ctxdata);
 	if (!ctxdata)
 		return -ENOMEM;
 
 	INIT_LIST_HEAD(&ctxdata->sess_list);
-	INIT_LIST_HEAD(&ctxdata->shm_list);
-	mutex_init(&ctxdata->shm_mutex);
 
 	ctx->data = ctxdata;
 	return 0;
@@ -85,7 +85,6 @@ static void amdtee_release(struct tee_context *ctx)
 		list_del(&sess->list_node);
 		release_session(sess);
 	}
-	mutex_destroy(&ctxdata->shm_mutex);
 	kfree(ctxdata);
 
 	ctx->data = NULL;
@@ -120,7 +119,7 @@ static struct amdtee_session *alloc_session(struct amdtee_context_data *ctxdata,
 		}
 
 	/* Allocate a new session and add to list */
-	sess = kzalloc(sizeof(*sess), GFP_KERNEL);
+	sess = kzalloc_obj(*sess);
 	if (sess) {
 		sess->ta_handle = ta_handle;
 		kref_init(&sess->refcount);
@@ -148,23 +147,6 @@ static struct amdtee_session *find_session(struct amdtee_context_data *ctxdata,
 			return sess;
 
 	return NULL;
-}
-
-u32 get_buffer_id(struct tee_shm *shm)
-{
-	struct amdtee_context_data *ctxdata = shm->ctx->data;
-	struct amdtee_shm_data *shmdata;
-	u32 buf_id = 0;
-
-	mutex_lock(&ctxdata->shm_mutex);
-	list_for_each_entry(shmdata, &ctxdata->shm_list, shm_node)
-		if (shmdata->kaddr == shm->kaddr) {
-			buf_id = shmdata->buf_id;
-			break;
-		}
-	mutex_unlock(&ctxdata->shm_mutex);
-
-	return buf_id;
 }
 
 static DEFINE_MUTEX(drv_mutex);
@@ -217,12 +199,12 @@ unlock:
 	return rc;
 }
 
+/* mutex must be held by caller */
 static void destroy_session(struct kref *ref)
 {
 	struct amdtee_session *sess = container_of(ref, struct amdtee_session,
 						   refcount);
 
-	mutex_lock(&session_list_mutex);
 	list_del(&sess->list_node);
 	mutex_unlock(&session_list_mutex);
 	kfree(sess);
@@ -267,35 +249,36 @@ int amdtee_open_session(struct tee_context *ctx,
 		goto out;
 	}
 
-	/* Find an empty session index for the given TA */
-	spin_lock(&sess->lock);
-	i = find_first_zero_bit(sess->sess_mask, TEE_NUM_SESSIONS);
-	if (i < TEE_NUM_SESSIONS)
-		set_bit(i, sess->sess_mask);
-	spin_unlock(&sess->lock);
-
-	if (i >= TEE_NUM_SESSIONS) {
-		pr_err("reached maximum session count %d\n", TEE_NUM_SESSIONS);
-		handle_unload_ta(ta_handle);
-		kref_put(&sess->refcount, destroy_session);
-		rc = -ENOMEM;
-		goto out;
-	}
-
 	/* Open session with loaded TA */
 	handle_open_session(arg, &session_info, param);
 	if (arg->ret != TEEC_SUCCESS) {
 		pr_err("open_session failed %d\n", arg->ret);
-		spin_lock(&sess->lock);
-		clear_bit(i, sess->sess_mask);
-		spin_unlock(&sess->lock);
 		handle_unload_ta(ta_handle);
-		kref_put(&sess->refcount, destroy_session);
+		kref_put_mutex(&sess->refcount, destroy_session,
+			       &session_list_mutex);
 		goto out;
 	}
 
-	sess->session_info[i] = session_info;
-	set_session_id(ta_handle, i, &arg->session);
+	/* Find an empty session index for the given TA */
+	spin_lock(&sess->lock);
+	i = find_first_zero_bit(sess->sess_mask, TEE_NUM_SESSIONS);
+	if (i < TEE_NUM_SESSIONS) {
+		sess->session_info[i] = session_info;
+		set_session_id(ta_handle, i, &arg->session);
+		set_bit(i, sess->sess_mask);
+	}
+	spin_unlock(&sess->lock);
+
+	if (i >= TEE_NUM_SESSIONS) {
+		pr_err("reached maximum session count %d\n", TEE_NUM_SESSIONS);
+		handle_close_session(ta_handle, session_info);
+		handle_unload_ta(ta_handle);
+		kref_put_mutex(&sess->refcount, destroy_session,
+			       &session_list_mutex);
+		rc = -ENOMEM;
+		goto out;
+	}
+
 out:
 	free_pages((u64)ta, get_order(ta_size));
 	return rc;
@@ -332,25 +315,19 @@ int amdtee_close_session(struct tee_context *ctx, u32 session)
 	handle_close_session(ta_handle, session_info);
 	handle_unload_ta(ta_handle);
 
-	kref_put(&sess->refcount, destroy_session);
+	kref_put_mutex(&sess->refcount, destroy_session, &session_list_mutex);
 
 	return 0;
 }
 
 int amdtee_map_shmem(struct tee_shm *shm)
 {
-	struct amdtee_context_data *ctxdata;
-	struct amdtee_shm_data *shmnode;
 	struct shmem_desc shmem;
 	int rc, count;
 	u32 buf_id;
 
 	if (!shm)
 		return -EINVAL;
-
-	shmnode = kmalloc(sizeof(*shmnode), GFP_KERNEL);
-	if (!shmnode)
-		return -ENOMEM;
 
 	count = 1;
 	shmem.kaddr = shm->kaddr;
@@ -363,44 +340,26 @@ int amdtee_map_shmem(struct tee_shm *shm)
 	rc = handle_map_shmem(count, &shmem, &buf_id);
 	if (rc) {
 		pr_err("map_shmem failed: ret = %d\n", rc);
-		kfree(shmnode);
 		return rc;
 	}
 
-	shmnode->kaddr = shm->kaddr;
-	shmnode->buf_id = buf_id;
-	ctxdata = shm->ctx->data;
-	mutex_lock(&ctxdata->shm_mutex);
-	list_add(&shmnode->shm_node, &ctxdata->shm_list);
-	mutex_unlock(&ctxdata->shm_mutex);
+	shm->sec_world_id = buf_id;
 
-	pr_debug("buf_id :[%x] kaddr[%p]\n", shmnode->buf_id, shmnode->kaddr);
+	pr_debug("buf_id :[%x] kaddr[%p]\n", buf_id, shm->kaddr);
 
 	return 0;
 }
 
 void amdtee_unmap_shmem(struct tee_shm *shm)
 {
-	struct amdtee_context_data *ctxdata;
-	struct amdtee_shm_data *shmnode;
 	u32 buf_id;
 
 	if (!shm)
 		return;
 
-	buf_id = get_buffer_id(shm);
-	/* Unmap the shared memory from TEE */
+	buf_id = (u32)shm->sec_world_id;
 	handle_unmap_shmem(buf_id);
-
-	ctxdata = shm->ctx->data;
-	mutex_lock(&ctxdata->shm_mutex);
-	list_for_each_entry(shmnode, &ctxdata->shm_list, shm_node)
-		if (buf_id == shmnode->buf_id) {
-			list_del(&shmnode->shm_node);
-			kfree(shmnode);
-			break;
-		}
-	mutex_unlock(&ctxdata->shm_mutex);
+	shm->sec_world_id = 0;
 }
 
 int amdtee_invoke_func(struct tee_context *ctx,
@@ -458,15 +417,15 @@ static int __init amdtee_driver_init(void)
 
 	rc = psp_check_tee_status();
 	if (rc) {
-		pr_err("amd-tee driver: tee not present\n");
+		pr_err("tee not present\n");
 		return rc;
 	}
 
-	drv_data = kzalloc(sizeof(*drv_data), GFP_KERNEL);
+	drv_data = kzalloc_obj(*drv_data);
 	if (!drv_data)
 		return -ENOMEM;
 
-	amdtee = kzalloc(sizeof(*amdtee), GFP_KERNEL);
+	amdtee = kzalloc_obj(*amdtee);
 	if (!amdtee) {
 		rc = -ENOMEM;
 		goto err_kfree_drv_data;
@@ -494,7 +453,6 @@ static int __init amdtee_driver_init(void)
 
 	drv_data->amdtee = amdtee;
 
-	pr_info("amd-tee driver initialization successful\n");
 	return 0;
 
 err_device_unregister:
@@ -510,7 +468,7 @@ err_kfree_drv_data:
 	kfree(drv_data);
 	drv_data = NULL;
 
-	pr_err("amd-tee driver initialization failed\n");
+	pr_err("initialization failed\n");
 	return rc;
 }
 module_init(amdtee_driver_init);

@@ -2,13 +2,13 @@
 /*
  * Copyright (C) 2020, Google LLC.
  */
-#define _GNU_SOURCE
-
 #include <inttypes.h>
+#include <linux/bitmap.h>
 
 #include "kvm_util.h"
 #include "memstress.h"
 #include "processor.h"
+#include "ucall_common.h"
 
 struct memstress_args memstress_args;
 
@@ -16,7 +16,7 @@ struct memstress_args memstress_args;
  * Guest virtual memory offset of the testing memory slot.
  * Must not conflict with identity mapped test code.
  */
-static uint64_t guest_test_virt_mem = DEFAULT_GUEST_TEST_MEM;
+static u64 guest_test_virt_mem = DEFAULT_GUEST_TEST_MEM;
 
 struct vcpu_thread {
 	/* The index of the vCPU. */
@@ -44,18 +44,18 @@ static struct kvm_vcpu *vcpus[KVM_MAX_VCPUS];
  * Continuously write to the first 8 bytes of each page in the
  * specified region.
  */
-void memstress_guest_code(uint32_t vcpu_idx)
+void memstress_guest_code(u32 vcpu_idx)
 {
 	struct memstress_args *args = &memstress_args;
 	struct memstress_vcpu_args *vcpu_args = &args->vcpu_args[vcpu_idx];
 	struct guest_random_state rand_state;
-	uint64_t gva;
-	uint64_t pages;
-	uint64_t addr;
-	uint64_t page;
+	gva_t gva;
+	u64 pages;
+	u64 addr;
+	u64 page;
 	int i;
 
-	rand_state = new_guest_random_state(args->random_seed + vcpu_idx);
+	rand_state = new_guest_random_state(guest_random_seed + vcpu_idx);
 
 	gva = vcpu_args->gva;
 	pages = vcpu_args->pages;
@@ -64,6 +64,9 @@ void memstress_guest_code(uint32_t vcpu_idx)
 	GUEST_ASSERT(vcpu_args->vcpu_idx == vcpu_idx);
 
 	while (true) {
+		for (i = 0; i < sizeof(memstress_args); i += args->guest_page_size)
+			(void) *((volatile char *)args + i);
+
 		for (i = 0; i < pages; i++) {
 			if (args->random_access)
 				page = guest_random_u32(&rand_state) % pages;
@@ -72,10 +75,10 @@ void memstress_guest_code(uint32_t vcpu_idx)
 
 			addr = gva + (page * args->guest_page_size);
 
-			if (guest_random_u32(&rand_state) % 100 < args->write_percent)
-				*(uint64_t *)addr = 0x0123456789ABCDEF;
+			if (__guest_random_bool(&rand_state, args->write_percent))
+				*(u64 *)addr = 0x0123456789ABCDEF;
 			else
-				READ_ONCE(*(uint64_t *)addr);
+				READ_ONCE(*(u64 *)addr);
 		}
 
 		GUEST_SYNC(1);
@@ -84,7 +87,7 @@ void memstress_guest_code(uint32_t vcpu_idx)
 
 void memstress_setup_vcpus(struct kvm_vm *vm, int nr_vcpus,
 			   struct kvm_vcpu *vcpus[],
-			   uint64_t vcpu_memory_bytes,
+			   u64 vcpu_memory_bytes,
 			   bool partition_vcpu_memory_access)
 {
 	struct memstress_args *args = &memstress_args;
@@ -119,15 +122,15 @@ void memstress_setup_vcpus(struct kvm_vm *vm, int nr_vcpus,
 }
 
 struct kvm_vm *memstress_create_vm(enum vm_guest_mode mode, int nr_vcpus,
-				   uint64_t vcpu_memory_bytes, int slots,
+				   u64 vcpu_memory_bytes, int slots,
 				   enum vm_mem_backing_src_type backing_src,
 				   bool partition_vcpu_memory_access)
 {
 	struct memstress_args *args = &memstress_args;
 	struct kvm_vm *vm;
-	uint64_t guest_num_pages, slot0_pages = 0;
-	uint64_t backing_src_pagesz = get_backing_src_pagesz(backing_src);
-	uint64_t region_end_gfn;
+	u64 guest_num_pages, slot0_pages = 0;
+	u64 backing_src_pagesz = get_backing_src_pagesz(backing_src);
+	u64 region_end_gfn;
 	int i;
 
 	pr_info("Testing guest mode: %s\n", vm_guest_mode_string(mode));
@@ -164,7 +167,8 @@ struct kvm_vm *memstress_create_vm(enum vm_guest_mode mode, int nr_vcpus,
 	 * The memory is also added to memslot 0, but that's a benign side
 	 * effect as KVM allows aliasing HVAs in meslots.
 	 */
-	vm = __vm_create_with_vcpus(mode, nr_vcpus, slot0_pages + guest_num_pages,
+	vm = __vm_create_with_vcpus(VM_SHAPE(mode), nr_vcpus,
+				    slot0_pages + guest_num_pages,
 				    memstress_guest_code, vcpus);
 
 	args->vm = vm;
@@ -187,23 +191,19 @@ struct kvm_vm *memstress_create_vm(enum vm_guest_mode mode, int nr_vcpus,
 	TEST_ASSERT(guest_num_pages < region_end_gfn,
 		    "Requested more guest memory than address space allows.\n"
 		    "    guest pages: %" PRIx64 " max gfn: %" PRIx64
-		    " nr_vcpus: %d wss: %" PRIx64 "]\n",
+		    " nr_vcpus: %d wss: %" PRIx64 "]",
 		    guest_num_pages, region_end_gfn - 1, nr_vcpus, vcpu_memory_bytes);
 
 	args->gpa = (region_end_gfn - guest_num_pages - 1) * args->guest_page_size;
 	args->gpa = align_down(args->gpa, backing_src_pagesz);
-#ifdef __s390x__
-	/* Align to 1M (segment size) */
-	args->gpa = align_down(args->gpa, 1 << 20);
-#endif
 	args->size = guest_num_pages * args->guest_page_size;
 	pr_info("guest physical test memory: [0x%lx, 0x%lx)\n",
 		args->gpa, args->gpa + args->size);
 
 	/* Add extra memory slots for testing */
 	for (i = 0; i < slots; i++) {
-		uint64_t region_pages = guest_num_pages / slots;
-		vm_paddr_t region_start = args->gpa + region_pages * args->guest_page_size * i;
+		u64 region_pages = guest_num_pages / slots;
+		gpa_t region_start = args->gpa + region_pages * args->guest_page_size * i;
 
 		vm_userspace_mem_region_add(vm, backing_src, region_start,
 					    MEMSTRESS_MEM_SLOT_INDEX + i,
@@ -232,16 +232,10 @@ void memstress_destroy_vm(struct kvm_vm *vm)
 	kvm_vm_free(vm);
 }
 
-void memstress_set_write_percent(struct kvm_vm *vm, uint32_t write_percent)
+void memstress_set_write_percent(struct kvm_vm *vm, u32 write_percent)
 {
 	memstress_args.write_percent = write_percent;
 	sync_global_to_guest(vm, memstress_args.write_percent);
-}
-
-void memstress_set_random_seed(struct kvm_vm *vm, uint32_t random_seed)
-{
-	memstress_args.random_seed = random_seed;
-	sync_global_to_guest(vm, memstress_args.random_seed);
 }
 
 void memstress_set_random_access(struct kvm_vm *vm, bool random_access)
@@ -250,7 +244,7 @@ void memstress_set_random_access(struct kvm_vm *vm, bool random_access)
 	sync_global_to_guest(vm, memstress_args.random_access);
 }
 
-uint64_t __weak memstress_nested_pages(int nr_vcpus)
+u64 __weak memstress_nested_pages(int nr_vcpus)
 {
 	return 0;
 }
@@ -267,7 +261,7 @@ static void *vcpu_thread_main(void *data)
 	int vcpu_idx = vcpu->vcpu_idx;
 
 	if (memstress_args.pin_vcpus)
-		kvm_pin_this_task_to_pcpu(memstress_args.vcpu_to_pcpu[vcpu_idx]);
+		pin_self_to_cpu(memstress_args.vcpu_to_pcpu[vcpu_idx]);
 
 	WRITE_ONCE(vcpu->running, true);
 
@@ -319,4 +313,75 @@ void memstress_join_vcpu_threads(int nr_vcpus)
 
 	for (i = 0; i < nr_vcpus; i++)
 		pthread_join(vcpu_threads[i].thread, NULL);
+}
+
+static void toggle_dirty_logging(struct kvm_vm *vm, int slots, bool enable)
+{
+	int i;
+
+	for (i = 0; i < slots; i++) {
+		int slot = MEMSTRESS_MEM_SLOT_INDEX + i;
+		int flags = enable ? KVM_MEM_LOG_DIRTY_PAGES : 0;
+
+		vm_mem_region_set_flags(vm, slot, flags);
+	}
+}
+
+void memstress_enable_dirty_logging(struct kvm_vm *vm, int slots)
+{
+	toggle_dirty_logging(vm, slots, true);
+}
+
+void memstress_disable_dirty_logging(struct kvm_vm *vm, int slots)
+{
+	toggle_dirty_logging(vm, slots, false);
+}
+
+void memstress_get_dirty_log(struct kvm_vm *vm, unsigned long *bitmaps[], int slots)
+{
+	int i;
+
+	for (i = 0; i < slots; i++) {
+		int slot = MEMSTRESS_MEM_SLOT_INDEX + i;
+
+		kvm_vm_get_dirty_log(vm, slot, bitmaps[i]);
+	}
+}
+
+void memstress_clear_dirty_log(struct kvm_vm *vm, unsigned long *bitmaps[],
+			       int slots, u64 pages_per_slot)
+{
+	int i;
+
+	for (i = 0; i < slots; i++) {
+		int slot = MEMSTRESS_MEM_SLOT_INDEX + i;
+
+		kvm_vm_clear_dirty_log(vm, slot, bitmaps[i], 0, pages_per_slot);
+	}
+}
+
+unsigned long **memstress_alloc_bitmaps(int slots, u64 pages_per_slot)
+{
+	unsigned long **bitmaps;
+	int i;
+
+	bitmaps = malloc(slots * sizeof(bitmaps[0]));
+	TEST_ASSERT(bitmaps, "Failed to allocate bitmaps array.");
+
+	for (i = 0; i < slots; i++) {
+		bitmaps[i] = bitmap_zalloc(pages_per_slot);
+		TEST_ASSERT(bitmaps[i], "Failed to allocate slot bitmap.");
+	}
+
+	return bitmaps;
+}
+
+void memstress_free_bitmaps(unsigned long *bitmaps[], int slots)
+{
+	int i;
+
+	for (i = 0; i < slots; i++)
+		free(bitmaps[i]);
+
+	free(bitmaps);
 }

@@ -70,7 +70,7 @@ int iioutils_break_up_name(const char *full_name, char **generic_name)
 
 /**
  * iioutils_get_type() - find and process _type attribute data
- * @is_signed: output whether channel is signed
+ * @format: output channel format
  * @bytes: output how many bytes the channel storage occupies
  * @bits_used: output number of valid bits of data
  * @shift: output amount of bits to shift right data before applying bit mask
@@ -83,7 +83,7 @@ int iioutils_break_up_name(const char *full_name, char **generic_name)
  *
  * Returns a value >= 0 on success, otherwise a negative error code.
  **/
-static int iioutils_get_type(unsigned int *is_signed, unsigned int *bytes,
+static int iioutils_get_type(char *format, unsigned int *bytes,
 			     unsigned int *bits_used, unsigned int *shift,
 			     uint64_t *mask, unsigned int *be,
 			     const char *device_dir, int buffer_idx,
@@ -93,7 +93,7 @@ static int iioutils_get_type(unsigned int *is_signed, unsigned int *bytes,
 	int ret;
 	DIR *dp;
 	char *scan_el_dir, *builtname, *builtname_generic, *filename = 0;
-	char signchar, endianchar;
+	char formatchar, endianchar;
 	unsigned padint;
 	const struct dirent *ent;
 
@@ -140,7 +140,7 @@ static int iioutils_get_type(unsigned int *is_signed, unsigned int *bytes,
 			ret = fscanf(sysfsfp,
 				     "%ce:%c%u/%u>>%u",
 				     &endianchar,
-				     &signchar,
+				     &formatchar,
 				     bits_used,
 				     &padint, shift);
 			if (ret < 0) {
@@ -162,7 +162,7 @@ static int iioutils_get_type(unsigned int *is_signed, unsigned int *bytes,
 			else
 				*mask = (1ULL << *bits_used) - 1ULL;
 
-			*is_signed = (signchar == 's');
+			*format = formatchar;
 			if (fclose(sysfsfp)) {
 				ret = -errno;
 				fprintf(stderr, "Failed to close %s\n",
@@ -264,6 +264,7 @@ int iioutils_get_param_float(float *output, const char *param_name,
 			if (fscanf(sysfsfp, "%f", output) != 1)
 				ret = errno ? -errno : -ENODATA;
 
+			fclose(sysfsfp);
 			break;
 		}
 error_free_filename:
@@ -345,9 +346,9 @@ int build_channel_array(const char *device_dir, int buffer_idx,
 			}
 
 			sysfsfp = fopen(filename, "r");
+			free(filename);
 			if (!sysfsfp) {
 				ret = -errno;
-				free(filename);
 				goto error_close_dir;
 			}
 
@@ -357,7 +358,6 @@ int build_channel_array(const char *device_dir, int buffer_idx,
 				if (fclose(sysfsfp))
 					perror("build_channel_array(): Failed to close file");
 
-				free(filename);
 				goto error_close_dir;
 			}
 			if (ret == 1)
@@ -365,11 +365,9 @@ int build_channel_array(const char *device_dir, int buffer_idx,
 
 			if (fclose(sysfsfp)) {
 				ret = -errno;
-				free(filename);
 				goto error_close_dir;
 			}
 
-			free(filename);
 		}
 
 	*ci_array = malloc(sizeof(**ci_array) * (*counter));
@@ -378,7 +376,7 @@ int build_channel_array(const char *device_dir, int buffer_idx,
 		goto error_close_dir;
 	}
 
-	seekdir(dp, 0);
+	rewinddir(dp);
 	while (ent = readdir(dp), ent) {
 		if (strcmp(ent->d_name + strlen(ent->d_name) - strlen("_en"),
 			   "_en") == 0) {
@@ -395,9 +393,9 @@ int build_channel_array(const char *device_dir, int buffer_idx,
 			}
 
 			sysfsfp = fopen(filename, "r");
+			free(filename);
 			if (!sysfsfp) {
 				ret = -errno;
-				free(filename);
 				count--;
 				goto error_cleanup_array;
 			}
@@ -405,20 +403,17 @@ int build_channel_array(const char *device_dir, int buffer_idx,
 			errno = 0;
 			if (fscanf(sysfsfp, "%i", &current_enabled) != 1) {
 				ret = errno ? -errno : -ENODATA;
-				free(filename);
 				count--;
 				goto error_cleanup_array;
 			}
 
 			if (fclose(sysfsfp)) {
 				ret = -errno;
-				free(filename);
 				count--;
 				goto error_cleanup_array;
 			}
 
 			if (!current_enabled) {
-				free(filename);
 				count--;
 				continue;
 			}
@@ -429,7 +424,6 @@ int build_channel_array(const char *device_dir, int buffer_idx,
 						strlen(ent->d_name) -
 						strlen("_en"));
 			if (!current->name) {
-				free(filename);
 				ret = -ENOMEM;
 				count--;
 				goto error_cleanup_array;
@@ -439,7 +433,6 @@ int build_channel_array(const char *device_dir, int buffer_idx,
 			ret = iioutils_break_up_name(current->name,
 						     &current->generic_name);
 			if (ret) {
-				free(filename);
 				free(current->name);
 				count--;
 				goto error_cleanup_array;
@@ -450,17 +443,16 @@ int build_channel_array(const char *device_dir, int buffer_idx,
 				       scan_el_dir,
 				       current->name);
 			if (ret < 0) {
-				free(filename);
 				ret = -ENOMEM;
 				goto error_cleanup_array;
 			}
 
 			sysfsfp = fopen(filename, "r");
+			free(filename);
 			if (!sysfsfp) {
 				ret = -errno;
-				fprintf(stderr, "failed to open %s\n",
-					filename);
-				free(filename);
+				fprintf(stderr, "failed to open %s/%s_index\n",
+					scan_el_dir, current->name);
 				goto error_cleanup_array;
 			}
 
@@ -470,17 +462,14 @@ int build_channel_array(const char *device_dir, int buffer_idx,
 				if (fclose(sysfsfp))
 					perror("build_channel_array(): Failed to close file");
 
-				free(filename);
 				goto error_cleanup_array;
 			}
 
 			if (fclose(sysfsfp)) {
 				ret = -errno;
-				free(filename);
 				goto error_cleanup_array;
 			}
 
-			free(filename);
 			/* Find the scale */
 			ret = iioutils_get_param_float(&current->scale,
 						       "scale",
@@ -498,7 +487,7 @@ int build_channel_array(const char *device_dir, int buffer_idx,
 			if ((ret < 0) && (ret != -ENOENT))
 				goto error_cleanup_array;
 
-			ret = iioutils_get_type(&current->is_signed,
+			ret = iioutils_get_type(&current->format,
 						&current->bytes,
 						&current->bits_used,
 						&current->shift,

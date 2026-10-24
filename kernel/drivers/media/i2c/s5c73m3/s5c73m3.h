@@ -16,7 +16,6 @@
 #include <media/v4l2-common.h>
 #include <media/v4l2-ctrls.h>
 #include <media/v4l2-subdev.h>
-#include <media/i2c/s5c73m3.h>
 
 #define DRIVER_NAME			"S5C73M3"
 
@@ -383,8 +382,6 @@ struct s5c73m3 {
 
 	struct clk *clock;
 
-	/* External master clock frequency */
-	u32 mclk_frequency;
 	/* Video bus type - MIPI-CSI2/parallel */
 	enum v4l2_mbus_type bus_type;
 

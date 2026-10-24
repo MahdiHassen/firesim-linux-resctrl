@@ -1,9 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
 /* New Hydra driver using generic 8390 core */
 /* Based on old hydra driver by Topi Kanerva (topi@susanna.oulu.fi) */
-
-/* This file is subject to the terms and conditions of the GNU General      */
-/* Public License.  See the file COPYING in the main directory of the       */
-/* Linux distribution for more details.                                     */
 
 /* Peter De Schrijver (p2@mind.be) */
 /* Oldenburg 2000 */
@@ -68,8 +66,8 @@ static void hydra_block_output(struct net_device *dev, int count,
 static void hydra_remove_one(struct zorro_dev *z);
 
 static struct zorro_device_id hydra_zorro_tbl[] = {
-    { ZORRO_PROD_HYDRA_SYSTEMS_AMIGANET },
-    { 0 }
+    { .id = ZORRO_PROD_HYDRA_SYSTEMS_AMIGANET },
+    { }
 };
 MODULE_DEVICE_TABLE(zorro, hydra_zorro_tbl);
 
@@ -272,4 +270,5 @@ static void __exit hydra_cleanup_module(void)
 module_init(hydra_init_module);
 module_exit(hydra_cleanup_module);
 
+MODULE_DESCRIPTION("Zorro-II Hydra 8390 ethernet driver");
 MODULE_LICENSE("GPL");

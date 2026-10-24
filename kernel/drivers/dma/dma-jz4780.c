@@ -13,7 +13,6 @@
 #include <linux/interrupt.h>
 #include <linux/module.h>
 #include <linux/of.h>
-#include <linux/of_device.h>
 #include <linux/of_dma.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
@@ -238,7 +237,7 @@ jz4780_dma_desc_alloc(struct jz4780_dma_chan *jzchan, unsigned int count,
 	if (count > JZ_DMA_MAX_DESC)
 		return NULL;
 
-	desc = kzalloc(sizeof(*desc), GFP_NOWAIT);
+	desc = kzalloc_obj(*desc, GFP_NOWAIT);
 	if (!desc)
 		return NULL;
 
@@ -1009,7 +1008,7 @@ err_disable_clk:
 	return ret;
 }
 
-static int jz4780_dma_remove(struct platform_device *pdev)
+static void jz4780_dma_remove(struct platform_device *pdev)
 {
 	struct jz4780_dma_dev *jzdma = platform_get_drvdata(pdev);
 	int i;
@@ -1021,8 +1020,6 @@ static int jz4780_dma_remove(struct platform_device *pdev)
 
 	for (i = 0; i < jzdma->soc_data->nb_channels; i++)
 		tasklet_kill(&jzdma->chan[i].vchan.task);
-
-	return 0;
 }
 
 static const struct jz4780_dma_soc_data jz4740_dma_soc_data = {

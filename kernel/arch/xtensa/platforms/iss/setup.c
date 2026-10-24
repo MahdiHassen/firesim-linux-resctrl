@@ -16,6 +16,7 @@
 #include <linux/notifier.h>
 #include <linux/panic_notifier.h>
 #include <linux/printk.h>
+#include <linux/reboot.h>
 #include <linux/string.h>
 
 #include <asm/platform.h>
@@ -24,24 +25,20 @@
 #include <platform/simcall.h>
 
 
-void platform_halt(void)
-{
-	pr_info(" ** Called platform_halt() **\n");
-	simc_exit(0);
-}
-
-void platform_power_off(void)
+static int iss_power_off(struct sys_off_data *unused)
 {
 	pr_info(" ** Called platform_power_off() **\n");
 	simc_exit(0);
+	return NOTIFY_DONE;
 }
 
-void platform_restart(void)
+static int iss_restart(struct sys_off_data *unused)
 {
 	/* Flush and reset the mmu, simulate a processor reset, and
 	 * jump to the reset vector. */
 	cpu_reset();
-	/* control never gets here */
+
+	return NOTIFY_DONE;
 }
 
 static int
@@ -82,4 +79,10 @@ void __init platform_setup(char **p_cmdline)
 	}
 
 	atomic_notifier_chain_register(&panic_notifier_list, &iss_panic_block);
+	register_sys_off_handler(SYS_OFF_MODE_RESTART,
+				 SYS_OFF_PRIO_PLATFORM,
+				 iss_restart, NULL);
+	register_sys_off_handler(SYS_OFF_MODE_POWER_OFF,
+				 SYS_OFF_PRIO_PLATFORM,
+				 iss_power_off, NULL);
 }

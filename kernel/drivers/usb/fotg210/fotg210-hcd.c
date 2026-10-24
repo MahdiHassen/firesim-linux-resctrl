@@ -33,11 +33,10 @@
 #include <linux/platform_device.h>
 #include <linux/io.h>
 #include <linux/iopoll.h>
-#include <linux/clk.h>
 
 #include <asm/byteorder.h>
 #include <asm/irq.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 #include "fotg210.h"
 
@@ -405,9 +404,9 @@ static void qh_lines(struct fotg210_hcd *fotg210, struct fotg210_qh *qh,
 			else if (td->hw_alt_next != list_end)
 				mark = '/';
 		}
-		temp = snprintf(next, size,
-				"\n\t%p%c%s len=%d %08x urb %p",
-				td, mark, ({ char *tmp;
+		temp = scnprintf(next, size,
+				 "\n\t%p%c%s len=%d %08x urb %p",
+				 td, mark, ({ char *tmp;
 				switch ((scratch>>8)&0x03) {
 				case 0:
 					tmp = "out";
@@ -425,22 +424,15 @@ static void qh_lines(struct fotg210_hcd *fotg210, struct fotg210_qh *qh,
 				(scratch >> 16) & 0x7fff,
 				scratch,
 				td->urb);
-		if (size < temp)
-			temp = size;
 		size -= temp;
 		next += temp;
-		if (temp == size)
-			goto done;
 	}
 
-	temp = snprintf(next, size, "\n");
-	if (size < temp)
-		temp = size;
+	temp = scnprintf(next, size, "\n");
 
 	size -= temp;
 	next += temp;
 
-done:
 	*sizep = size;
 	*nextp = next;
 }
@@ -523,7 +515,7 @@ static ssize_t fill_periodic_buffer(struct debug_buffer *buf)
 	unsigned i;
 	__hc32 tag;
 
-	seen = kmalloc_array(DBG_SCHED_LIMIT, sizeof(*seen), GFP_ATOMIC);
+	seen = kmalloc_objs(*seen, DBG_SCHED_LIMIT, GFP_ATOMIC);
 	if (!seen)
 		return 0;
 
@@ -746,7 +738,7 @@ static struct debug_buffer
 {
 	struct debug_buffer *buf;
 
-	buf = kzalloc(sizeof(struct debug_buffer), GFP_KERNEL);
+	buf = kzalloc_obj(struct debug_buffer);
 
 	if (buf) {
 		buf->bus = bus;
@@ -862,7 +854,7 @@ static inline void remove_debug_files(struct fotg210_hcd *fotg210)
 {
 	struct usb_bus *bus = &fotg210_to_hcd(fotg210)->self;
 
-	debugfs_remove(debugfs_lookup(bus->bus_name, fotg210_debug_root));
+	debugfs_lookup_and_remove(bus->bus_name, fotg210_debug_root);
 }
 
 /* handshake - spin reading hc until handshake completes or fails
@@ -1855,7 +1847,7 @@ static struct fotg210_qh *fotg210_qh_alloc(struct fotg210_hcd *fotg210,
 	struct fotg210_qh *qh;
 	dma_addr_t dma;
 
-	qh = kzalloc(sizeof(*qh), GFP_ATOMIC);
+	qh = kzalloc_obj(*qh, GFP_ATOMIC);
 	if (!qh)
 		goto done;
 	qh->hw = (struct fotg210_qh_hw *)
@@ -3907,7 +3899,7 @@ static struct fotg210_iso_stream *iso_stream_alloc(gfp_t mem_flags)
 {
 	struct fotg210_iso_stream *stream;
 
-	stream = kzalloc(sizeof(*stream), mem_flags);
+	stream = kzalloc_obj(*stream, mem_flags);
 	if (likely(stream != NULL)) {
 		INIT_LIST_HEAD(&stream->td_list);
 		INIT_LIST_HEAD(&stream->free_list);
@@ -4015,7 +4007,7 @@ static struct fotg210_iso_sched *iso_sched_alloc(unsigned packets,
 {
 	struct fotg210_iso_sched *iso_sched;
 
-	iso_sched = kzalloc(struct_size(iso_sched, packet, packets), mem_flags);
+	iso_sched = kzalloc_flex(*iso_sched, packet, packets, mem_flags);
 	if (likely(iso_sched != NULL))
 		INIT_LIST_HEAD(&iso_sched->td_list);
 
@@ -4275,8 +4267,6 @@ static int iso_stream_schedule(struct fotg210_hcd *fotg210, struct urb *urb,
 	return 0;
 
 fail:
-	iso_sched_free(stream, sched);
-	urb->hcpriv = NULL;
 	return status;
 }
 
@@ -4570,6 +4560,10 @@ static int itd_submit(struct fotg210_hcd *fotg210, struct urb *urb,
 	else
 		usb_hcd_unlink_urb_from_ep(fotg210_to_hcd(fotg210), urb);
 done_not_linked:
+	if (status < 0) {
+		iso_sched_free(stream, urb->hcpriv);
+		urb->hcpriv = NULL;
+	}
 	spin_unlock_irqrestore(&fotg210->lock, flags);
 done:
 	return status;
@@ -4687,13 +4681,10 @@ static ssize_t uframe_periodic_max_show(struct device *dev,
 		struct device_attribute *attr, char *buf)
 {
 	struct fotg210_hcd *fotg210;
-	int n;
 
 	fotg210 = hcd_to_fotg210(bus_to_hcd(dev_get_drvdata(dev)));
-	n = scnprintf(buf, PAGE_SIZE, "%d\n", fotg210->uframe_periodic_max);
-	return n;
+	return sysfs_emit(buf, "%d\n", fotg210->uframe_periodic_max);
 }
-
 
 static ssize_t uframe_periodic_max_store(struct device *dev,
 		struct device_attribute *attr, const char *buf, size_t count)
@@ -4706,8 +4697,10 @@ static ssize_t uframe_periodic_max_store(struct device *dev,
 	ssize_t ret;
 
 	fotg210 = hcd_to_fotg210(bus_to_hcd(dev_get_drvdata(dev)));
-	if (kstrtouint(buf, 0, &uframe_periodic_max) < 0)
-		return -EINVAL;
+
+	ret = kstrtouint(buf, 0, &uframe_periodic_max);
+	if (ret)
+		return ret;
 
 	if (uframe_periodic_max < 100 || uframe_periodic_max >= 125) {
 		fotg210_info(fotg210, "rejecting invalid request for uframe_periodic_max=%u\n",
@@ -4910,8 +4903,7 @@ static int hcd_fotg210_init(struct usb_hcd *hcd)
 	 */
 	fotg210->need_io_watchdog = 1;
 
-	hrtimer_init(&fotg210->hrtimer, CLOCK_MONOTONIC, HRTIMER_MODE_ABS);
-	fotg210->hrtimer.function = fotg210_hrtimer_func;
+	hrtimer_setup(&fotg210->hrtimer, fotg210_hrtimer_func, CLOCK_MONOTONIC, HRTIMER_MODE_ABS);
 	fotg210->next_hrtimer_event = FOTG210_HRTIMER_NO_EVENT;
 
 	hcc_params = fotg210_readl(fotg210, &fotg210->caps->hcc_params);
@@ -5557,11 +5549,10 @@ static void fotg210_init(struct fotg210_hcd *fotg210)
  * then invokes the start() method for the HCD associated with it
  * through the hotplug entry's driver_data.
  */
-int fotg210_hcd_probe(struct platform_device *pdev)
+int fotg210_hcd_probe(struct platform_device *pdev, struct fotg210 *fotg)
 {
 	struct device *dev = &pdev->dev;
 	struct usb_hcd *hcd;
-	struct resource *res;
 	int irq;
 	int retval;
 	struct fotg210_hcd *fotg210;
@@ -5578,70 +5569,42 @@ int fotg210_hcd_probe(struct platform_device *pdev)
 	hcd = usb_create_hcd(&fotg210_fotg210_hc_driver, dev,
 			dev_name(dev));
 	if (!hcd) {
-		dev_err(dev, "failed to create hcd\n");
-		retval = -ENOMEM;
+		retval = dev_err_probe(dev, -ENOMEM, "failed to create hcd\n");
 		goto fail_create_hcd;
 	}
 
 	hcd->has_tt = 1;
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	hcd->regs = devm_ioremap_resource(&pdev->dev, res);
-	if (IS_ERR(hcd->regs)) {
-		retval = PTR_ERR(hcd->regs);
-		goto failed_put_hcd;
-	}
+	hcd->regs = fotg->base;
 
-	hcd->rsrc_start = res->start;
-	hcd->rsrc_len = resource_size(res);
+	hcd->rsrc_start = fotg->res->start;
+	hcd->rsrc_len = resource_size(fotg->res);
 
 	fotg210 = hcd_to_fotg210(hcd);
 
+	fotg210->fotg = fotg;
 	fotg210->caps = hcd->regs;
-
-	/* It's OK not to supply this clock */
-	fotg210->pclk = clk_get(dev, "PCLK");
-	if (!IS_ERR(fotg210->pclk)) {
-		retval = clk_prepare_enable(fotg210->pclk);
-		if (retval) {
-			dev_err(dev, "failed to enable PCLK\n");
-			goto failed_put_hcd;
-		}
-	} else if (PTR_ERR(fotg210->pclk) == -EPROBE_DEFER) {
-		/*
-		 * Percolate deferrals, for anything else,
-		 * just live without the clocking.
-		 */
-		retval = PTR_ERR(fotg210->pclk);
-		goto failed_dis_clk;
-	}
 
 	retval = fotg210_setup(hcd);
 	if (retval)
-		goto failed_dis_clk;
+		goto failed_put_hcd;
 
 	fotg210_init(fotg210);
 
 	retval = usb_add_hcd(hcd, irq, IRQF_SHARED);
 	if (retval) {
-		dev_err(dev, "failed to add hcd with err %d\n", retval);
-		goto failed_dis_clk;
+		dev_err_probe(dev, retval, "failed to add hcd\n");
+		goto failed_put_hcd;
 	}
 	device_wakeup_enable(hcd->self.controller);
 	platform_set_drvdata(pdev, hcd);
 
 	return retval;
 
-failed_dis_clk:
-	if (!IS_ERR(fotg210->pclk)) {
-		clk_disable_unprepare(fotg210->pclk);
-		clk_put(fotg210->pclk);
-	}
 failed_put_hcd:
 	usb_put_hcd(hcd);
 fail_create_hcd:
-	dev_err(dev, "init %s fail, %d\n", dev_name(dev), retval);
-	return retval;
+	return dev_err_probe(dev, retval, "init %s fail\n", dev_name(dev));
 }
 
 /*
@@ -5652,12 +5615,6 @@ fail_create_hcd:
 int fotg210_hcd_remove(struct platform_device *pdev)
 {
 	struct usb_hcd *hcd = platform_get_drvdata(pdev);
-	struct fotg210_hcd *fotg210 = hcd_to_fotg210(hcd);
-
-	if (!IS_ERR(fotg210->pclk)) {
-		clk_disable_unprepare(fotg210->pclk);
-		clk_put(fotg210->pclk);
-	}
 
 	usb_remove_hcd(hcd);
 	usb_put_hcd(hcd);
@@ -5669,11 +5626,6 @@ int __init fotg210_hcd_init(void)
 {
 	if (usb_disabled())
 		return -ENODEV;
-
-	set_bit(USB_EHCI_LOADED, &usb_hcds_loaded);
-	if (test_bit(USB_UHCI_LOADED, &usb_hcds_loaded) ||
-			test_bit(USB_OHCI_LOADED, &usb_hcds_loaded))
-		pr_warn("Warning! fotg210_hcd should always be loaded before uhci_hcd and ohci_hcd, not after\n");
 
 	pr_debug("%s: block sizes: qh %zd qtd %zd itd %zd\n",
 			hcd_name, sizeof(struct fotg210_qh),
@@ -5688,5 +5640,4 @@ int __init fotg210_hcd_init(void)
 void __exit fotg210_hcd_cleanup(void)
 {
 	debugfs_remove(fotg210_debug_root);
-	clear_bit(USB_EHCI_LOADED, &usb_hcds_loaded);
 }

@@ -188,6 +188,8 @@ struct brcmf_sdio_dev {
 	char nvram_name[BRCMF_FW_NAME_LEN];
 	char clm_name[BRCMF_FW_NAME_LEN];
 	bool wowl_enabled;
+	bool func1_power_manageable;
+	bool func2_power_manageable;
 	enum brcmf_sdiod_state state;
 	struct brcmf_sdiod_freezer *freezer;
 	const struct firmware *clm_fw;
@@ -356,9 +358,10 @@ void brcmf_sdiod_freezer_uncount(struct brcmf_sdio_dev *sdiodev);
 int brcmf_sdiod_probe(struct brcmf_sdio_dev *sdiodev);
 int brcmf_sdiod_remove(struct brcmf_sdio_dev *sdiodev);
 
-struct brcmf_sdio *brcmf_sdio_probe(struct brcmf_sdio_dev *sdiodev);
+int brcmf_sdio_probe(struct brcmf_sdio_dev *sdiodev);
 void brcmf_sdio_remove(struct brcmf_sdio *bus);
 void brcmf_sdio_isr(struct brcmf_sdio *bus, bool in_isr);
+void brcmf_sdio_cancel_datawork(struct brcmf_sdio *bus);
 
 void brcmf_sdio_wd_timer(struct brcmf_sdio *bus, bool active);
 void brcmf_sdio_wowl_config(struct device *dev, bool enabled);

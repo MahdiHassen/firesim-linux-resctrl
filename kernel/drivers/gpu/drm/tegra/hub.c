@@ -9,8 +9,8 @@
 #include <linux/host1x.h>
 #include <linux/module.h>
 #include <linux/of.h>
-#include <linux/of_device.h>
 #include <linux/of_graph.h>
+#include <linux/of_platform.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
 #include <linux/reset.h>
@@ -20,6 +20,7 @@
 #include <drm/drm_blend.h>
 #include <drm/drm_fourcc.h>
 #include <drm/drm_framebuffer.h>
+#include <drm/drm_print.h>
 #include <drm/drm_probe_helper.h>
 
 #include "drm.h"
@@ -423,7 +424,7 @@ static void tegra_dc_remove_shared_plane(struct tegra_dc *dc,
 }
 
 static int tegra_shared_plane_atomic_check(struct drm_plane *plane,
-					   struct drm_atomic_state *state)
+					   struct drm_atomic_commit *state)
 {
 	struct drm_plane_state *new_plane_state = drm_atomic_get_new_plane_state(state,
 										 plane);
@@ -481,7 +482,7 @@ static int tegra_shared_plane_atomic_check(struct drm_plane *plane,
 }
 
 static void tegra_shared_plane_atomic_disable(struct drm_plane *plane,
-					      struct drm_atomic_state *state)
+					      struct drm_atomic_commit *state)
 {
 	struct drm_plane_state *old_state = drm_atomic_get_old_plane_state(state,
 									   plane);
@@ -521,18 +522,17 @@ static void tegra_shared_plane_atomic_disable(struct drm_plane *plane,
 
 static inline u32 compute_phase_incr(fixed20_12 in, unsigned int out)
 {
-	u64 tmp, tmp1, tmp2;
+	u64 tmp, tmp1;
 
 	tmp = (u64)dfixed_trunc(in);
-	tmp2 = (u64)out;
-	tmp1 = (tmp << NFB) + (tmp2 >> 1);
-	do_div(tmp1, tmp2);
+	tmp1 = (tmp << NFB) + ((u64)out >> 1);
+	do_div(tmp1, out);
 
 	return lower_32_bits(tmp1);
 }
 
 static void tegra_shared_plane_atomic_update(struct drm_plane *plane,
-					     struct drm_atomic_state *state)
+					     struct drm_atomic_commit *state)
 {
 	struct drm_plane_state *new_state = drm_atomic_get_new_plane_state(state,
 									   plane);
@@ -756,9 +756,9 @@ static const struct drm_plane_helper_funcs tegra_shared_plane_helper_funcs = {
 struct drm_plane *tegra_shared_plane_create(struct drm_device *drm,
 					    struct tegra_dc *dc,
 					    unsigned int wgrp,
-					    unsigned int index)
+					    unsigned int index,
+					    enum drm_plane_type type)
 {
-	enum drm_plane_type type = DRM_PLANE_TYPE_OVERLAY;
 	struct tegra_drm *tegra = drm->dev_private;
 	struct tegra_display_hub *hub = tegra->hub;
 	struct tegra_shared_plane *plane;
@@ -769,7 +769,7 @@ struct drm_plane *tegra_shared_plane_create(struct drm_device *drm,
 	const u32 *formats;
 	int err;
 
-	plane = kzalloc(sizeof(*plane), GFP_KERNEL);
+	plane = kzalloc_obj(*plane);
 	if (!plane)
 		return ERR_PTR(-ENOMEM);
 
@@ -825,14 +825,29 @@ static void tegra_display_hub_destroy_state(struct drm_private_obj *obj,
 	kfree(hub_state);
 }
 
+static struct drm_private_state *
+tegra_display_hub_create_state(struct drm_private_obj *obj)
+{
+	struct tegra_display_hub_state *hub_state;
+
+	hub_state = kzalloc_obj(*hub_state);
+	if (!hub_state)
+		return ERR_PTR(-ENOMEM);
+
+	__drm_atomic_helper_private_obj_create_state(obj, &hub_state->base);
+
+	return &hub_state->base;
+}
+
 static const struct drm_private_state_funcs tegra_display_hub_state_funcs = {
+	.atomic_create_state = tegra_display_hub_create_state,
 	.atomic_duplicate_state = tegra_display_hub_duplicate_state,
 	.atomic_destroy_state = tegra_display_hub_destroy_state,
 };
 
 static struct tegra_display_hub_state *
 tegra_display_hub_get_state(struct tegra_display_hub *hub,
-			    struct drm_atomic_state *state)
+			    struct drm_atomic_commit *state)
 {
 	struct drm_private_state *priv;
 
@@ -844,7 +859,7 @@ tegra_display_hub_get_state(struct tegra_display_hub *hub,
 }
 
 int tegra_display_hub_atomic_check(struct drm_device *drm,
-				   struct drm_atomic_state *state)
+				   struct drm_atomic_commit *state)
 {
 	struct tegra_drm *tegra = drm->dev_private;
 	struct tegra_display_hub_state *hub_state;
@@ -910,7 +925,7 @@ static void tegra_display_hub_update(struct tegra_dc *dc)
 }
 
 void tegra_display_hub_atomic_commit(struct drm_device *drm,
-				     struct drm_atomic_state *state)
+				     struct drm_atomic_commit *state)
 {
 	struct tegra_drm *tegra = drm->dev_private;
 	struct tegra_display_hub *hub = tegra->hub;
@@ -941,13 +956,8 @@ static int tegra_display_hub_init(struct host1x_client *client)
 	struct tegra_display_hub *hub = to_tegra_display_hub(client);
 	struct drm_device *drm = dev_get_drvdata(client->host);
 	struct tegra_drm *tegra = drm->dev_private;
-	struct tegra_display_hub_state *state;
 
-	state = kzalloc(sizeof(*state), GFP_KERNEL);
-	if (!state)
-		return -ENOMEM;
-
-	drm_atomic_private_obj_init(drm, &hub->base, &state->base,
+	drm_atomic_private_obj_init(drm, &hub->base,
 				    &tegra_display_hub_state_funcs);
 
 	tegra->hub = hub;
@@ -1101,7 +1111,7 @@ static int tegra_display_hub_probe(struct platform_device *pdev)
 
 	for (i = 0; i < hub->soc->num_wgrps; i++) {
 		struct tegra_windowgroup *wgrp = &hub->wgrps[i];
-		char id[8];
+		char id[16];
 
 		snprintf(id, sizeof(id), "wgrp%u", i);
 		mutex_init(&wgrp->lock);
@@ -1174,17 +1184,12 @@ unregister:
 	return err;
 }
 
-static int tegra_display_hub_remove(struct platform_device *pdev)
+static void tegra_display_hub_remove(struct platform_device *pdev)
 {
 	struct tegra_display_hub *hub = platform_get_drvdata(pdev);
 	unsigned int i;
-	int err;
 
-	err = host1x_client_unregister(&hub->client);
-	if (err < 0) {
-		dev_err(&pdev->dev, "failed to unregister host1x client: %d\n",
-			err);
-	}
+	host1x_client_unregister(&hub->client);
 
 	for (i = 0; i < hub->soc->num_wgrps; i++) {
 		struct tegra_windowgroup *wgrp = &hub->wgrps[i];
@@ -1193,8 +1198,6 @@ static int tegra_display_hub_remove(struct platform_device *pdev)
 	}
 
 	pm_runtime_disable(&pdev->dev);
-
-	return err;
 }
 
 static const struct tegra_display_hub_soc tegra186_display_hub = {

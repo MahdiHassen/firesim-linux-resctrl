@@ -32,9 +32,9 @@
 #undef CONFIG_CPU_HAS_PREFETCH
 #endif
 
+#include <linux/export.h>
 #include <asm/asm.h>
 #include <asm/asm-offsets.h>
-#include <asm/export.h>
 #include <asm/regdef.h>
 
 #define dst a0
@@ -274,7 +274,6 @@
 	/* initialize __memcpy if this the first time we execute this macro */
 	.ifnotdef __memcpy
 	.set __memcpy, 1
-	.hidden __memcpy /* make sure it does not leak */
 	.endif
 
 	/*
@@ -538,7 +537,6 @@
 	.if __memcpy == 1
 	END(memcpy)
 	.set __memcpy, 0
-	.hidden __memcpy
 	.endif
 
 .Ll_exc_copy\@:

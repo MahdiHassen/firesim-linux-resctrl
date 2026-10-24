@@ -40,7 +40,7 @@
 #include <linux/slab.h>
 #include <linux/types.h>
 #include <linux/uuid.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 #define SURFACE_3_POLL_INTERVAL		(2 * HZ)
 #define SURFACE_3_STRLEN		10
@@ -454,8 +454,7 @@ static int mshw0011_install_space_handler(struct i2c_client *client)
 	if (!adev)
 		return -ENODEV;
 
-	data = kzalloc(sizeof(struct mshw0011_handler_data),
-			    GFP_KERNEL);
+	data = kzalloc_obj(struct mshw0011_handler_data);
 	if (!data)
 		return -ENOMEM;
 
@@ -573,7 +572,7 @@ static const struct acpi_device_id mshw0011_acpi_match[] = {
 MODULE_DEVICE_TABLE(acpi, mshw0011_acpi_match);
 
 static struct i2c_driver mshw0011_driver = {
-	.probe_new = mshw0011_probe,
+	.probe = mshw0011_probe,
 	.remove = mshw0011_remove,
 	.driver = {
 		.name = "mshw0011",

@@ -482,12 +482,13 @@ static int airspy_queue_setup(struct vb2_queue *vq,
 		unsigned int *nplanes, unsigned int sizes[], struct device *alloc_devs[])
 {
 	struct airspy *s = vb2_get_drv_priv(vq);
+	unsigned int q_num_bufs = vb2_get_num_buffers(vq);
 
 	dev_dbg(s->dev, "nbuffers=%d\n", *nbuffers);
 
 	/* Need at least 8 buffers */
-	if (vq->num_buffers + *nbuffers < 8)
-		*nbuffers = 8 - vq->num_buffers;
+	if (q_num_bufs + *nbuffers < 8)
+		*nbuffers = 8 - q_num_bufs;
 	*nplanes = 1;
 	sizes[0] = PAGE_ALIGN(s->buffersize);
 
@@ -521,10 +522,12 @@ static int airspy_start_streaming(struct vb2_queue *vq, unsigned int count)
 
 	dev_dbg(s->dev, "\n");
 
-	if (!s->udev)
-		return -ENODEV;
-
 	mutex_lock(&s->v4l2_lock);
+
+	if (!s->udev) {
+		ret = -ENODEV;
+		goto err_clear_bit;
+	}
 
 	s->sequence = 0;
 
@@ -602,8 +605,6 @@ static const struct vb2_ops airspy_vb2_ops = {
 	.buf_queue              = airspy_buf_queue,
 	.start_streaming        = airspy_start_streaming,
 	.stop_streaming         = airspy_stop_streaming,
-	.wait_prepare           = vb2_ops_wait_prepare,
-	.wait_finish            = vb2_ops_wait_finish,
 };
 
 static int airspy_querycap(struct file *file, void *fh,
@@ -969,7 +970,7 @@ static int airspy_probe(struct usb_interface *intf,
 	buf = NULL;
 	ret = -ENOMEM;
 
-	s = kzalloc(sizeof(struct airspy), GFP_KERNEL);
+	s = kzalloc_obj(struct airspy);
 	if (s == NULL) {
 		dev_err(&intf->dev, "Could not allocate memory for state\n");
 		return -ENOMEM;
@@ -1016,6 +1017,7 @@ static int airspy_probe(struct usb_interface *intf,
 	s->vb_queue.ops = &airspy_vb2_ops;
 	s->vb_queue.mem_ops = &vb2_vmalloc_memops;
 	s->vb_queue.timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC;
+	s->vb_queue.lock = &s->vb_queue_lock;
 	ret = vb2_queue_init(&s->vb_queue);
 	if (ret) {
 		dev_err(s->dev, "Could not initialize vb2 queue\n");
@@ -1025,7 +1027,6 @@ static int airspy_probe(struct usb_interface *intf,
 	/* Init video_device structure */
 	s->vdev = airspy_template;
 	s->vdev.queue = &s->vb_queue;
-	s->vdev.queue->lock = &s->vb_queue_lock;
 	video_set_drvdata(&s->vdev, s);
 
 	/* Register the v4l2_device structure */

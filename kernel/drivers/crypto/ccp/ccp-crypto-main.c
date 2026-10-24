@@ -7,14 +7,17 @@
  * Author: Tom Lendacky <thomas.lendacky@amd.com>
  */
 
-#include <linux/module.h>
-#include <linux/moduleparam.h>
+#include <crypto/internal/akcipher.h>
+#include <crypto/internal/hash.h>
+#include <crypto/internal/skcipher.h>
+#include <linux/ccp.h>
+#include <linux/err.h>
 #include <linux/kernel.h>
 #include <linux/list.h>
-#include <linux/ccp.h>
+#include <linux/module.h>
 #include <linux/scatterlist.h>
-#include <crypto/internal/hash.h>
-#include <crypto/internal/akcipher.h>
+#include <linux/slab.h>
+#include <linux/spinlock.h>
 
 #include "ccp-crypto.h"
 
@@ -146,7 +149,7 @@ static void ccp_crypto_complete(void *data, int err)
 		/* Only propagate the -EINPROGRESS if necessary */
 		if (crypto_cmd->ret == -EBUSY) {
 			crypto_cmd->ret = -EINPROGRESS;
-			req->complete(req, -EINPROGRESS);
+			crypto_request_complete(req, -EINPROGRESS);
 		}
 
 		return;
@@ -159,18 +162,18 @@ static void ccp_crypto_complete(void *data, int err)
 	held = ccp_crypto_cmd_complete(crypto_cmd, &backlog);
 	if (backlog) {
 		backlog->ret = -EINPROGRESS;
-		backlog->req->complete(backlog->req, -EINPROGRESS);
+		crypto_request_complete(backlog->req, -EINPROGRESS);
 	}
 
 	/* Transition the state from -EBUSY to -EINPROGRESS first */
 	if (crypto_cmd->ret == -EBUSY)
-		req->complete(req, -EINPROGRESS);
+		crypto_request_complete(req, -EINPROGRESS);
 
 	/* Completion callbacks */
 	ret = err;
 	if (ctx->complete)
 		ret = ctx->complete(req, ret);
-	req->complete(req, ret);
+	crypto_request_complete(req, ret);
 
 	/* Submit the next cmd */
 	while (held) {
@@ -186,12 +189,12 @@ static void ccp_crypto_complete(void *data, int err)
 		ctx = crypto_tfm_ctx_dma(held->req->tfm);
 		if (ctx->complete)
 			ret = ctx->complete(held->req, ret);
-		held->req->complete(held->req, ret);
+		crypto_request_complete(held->req, ret);
 
 		next = ccp_crypto_cmd_complete(held, &backlog);
 		if (backlog) {
 			backlog->ret = -EINPROGRESS;
-			backlog->req->complete(backlog->req, -EINPROGRESS);
+			crypto_request_complete(backlog->req, -EINPROGRESS);
 		}
 
 		kfree(held);
@@ -272,7 +275,7 @@ int ccp_crypto_enqueue_request(struct crypto_async_request *req,
 
 	gfp = req->flags & CRYPTO_TFM_REQ_MAY_SLEEP ? GFP_KERNEL : GFP_ATOMIC;
 
-	crypto_cmd = kzalloc(sizeof(*crypto_cmd), gfp);
+	crypto_cmd = kzalloc_obj(*crypto_cmd, gfp);
 	if (!crypto_cmd)
 		return -ENOMEM;
 

@@ -26,7 +26,7 @@
 #ifndef __DAL_AUX_ENGINE_DCE110_H__
 #define __DAL_AUX_ENGINE_DCE110_H__
 
-#include "i2caux_interface.h"
+#include "gpio_service_interface.h"
 #include "inc/hw/aux_engine.h"
 
 enum aux_return_code_type;
@@ -303,6 +303,14 @@ bool dce110_aux_engine_acquire(
 int dce_aux_transfer_raw(struct ddc_service *ddc,
 		struct aux_payload *cmd,
 		enum aux_return_code_type *operation_result);
+
+int dce_aux_transfer_raw_with_ddc_pin(struct ddc_service *ddc,
+		struct aux_payload *cmd,
+		enum aux_return_code_type *operation_result);
+
+int dce_aux_transfer_raw_without_ddc_pin(struct ddc_service *ddc,
+	struct aux_payload *cmd,
+	enum aux_return_code_type *operation_result);
 
 int dce_aux_transfer_dmub_raw(struct ddc_service *ddc,
 		struct aux_payload *payload,

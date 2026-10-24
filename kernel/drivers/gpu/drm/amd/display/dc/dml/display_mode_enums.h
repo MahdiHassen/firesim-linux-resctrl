@@ -30,6 +30,7 @@ enum output_encoder_class {
 	dm_hdmi = 1,
 	dm_wb = 2,
 	dm_edp = 3,
+	dm_hdmifrl = 4,
 	dm_dp2p0 = 5,
 };
 enum output_format_class {
@@ -190,6 +191,14 @@ enum dm_validation_status {
 	DML_FAIL_DSC_INPUT_BPC,
 	DML_FAIL_PREFETCH_SUPPORT,
 	DML_FAIL_V_RATIO_PREFETCH,
+	DML_FAIL_P2I_WITH_420,
+	DML_FAIL_DSC_ONLY_IF_NECESSARY_WITH_BPP,
+	DML_FAIL_NOT_DSC422_NATIVE,
+	DML_FAIL_ODM_COMBINE4TO1,
+	DML_FAIL_ENOUGH_WRITEBACK_UNITS,
+	DML_FAIL_VIEWPORT_EXCEEDS_SURFACE,
+	DML_FAIL_DYNAMIC_METADATA,
+	DML_FAIL_FMT_BUFFER_EXCEEDED,
 };
 
 enum writeback_config {

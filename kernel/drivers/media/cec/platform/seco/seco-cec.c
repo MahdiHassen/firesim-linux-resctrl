@@ -649,7 +649,7 @@ static int secocec_probe(struct platform_device *pdev)
 
 	ret = secocec_ir_probe(secocec);
 	if (ret)
-		goto err_notifier;
+		goto err_unregister_adapter;
 
 	platform_set_drvdata(pdev, secocec);
 
@@ -657,6 +657,10 @@ static int secocec_probe(struct platform_device *pdev)
 
 	return ret;
 
+err_unregister_adapter:
+	cec_notifier_cec_adap_unregister(secocec->notifier, secocec->cec_adap);
+	cec_unregister_adapter(secocec->cec_adap);
+	goto err;
 err_notifier:
 	cec_notifier_cec_adap_unregister(secocec->notifier, secocec->cec_adap);
 err_delete_adapter:
@@ -668,7 +672,7 @@ err:
 	return ret;
 }
 
-static int secocec_remove(struct platform_device *pdev)
+static void secocec_remove(struct platform_device *pdev)
 {
 	struct secocec_data *secocec = platform_get_drvdata(pdev);
 	u16 val;
@@ -686,8 +690,6 @@ static int secocec_remove(struct platform_device *pdev)
 	release_region(BRA_SMB_BASE_ADDR, 7);
 
 	dev_dbg(&pdev->dev, "CEC device removed\n");
-
-	return 0;
 }
 
 #ifdef CONFIG_PM_SLEEP

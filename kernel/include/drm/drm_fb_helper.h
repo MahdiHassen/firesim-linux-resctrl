@@ -37,11 +37,6 @@ struct drm_fb_helper;
 
 #include <drm/drm_client.h>
 
-enum mode_set_atomic {
-	LEAVE_ATOMIC_MODE_SET,
-	ENTER_ATOMIC_MODE_SET,
-};
-
 /**
  * struct drm_fb_helper_surface_size - describes fbdev size and scanout surface size
  * @fb_width: fbdev width
@@ -75,23 +70,6 @@ struct drm_fb_helper_surface_size {
  */
 struct drm_fb_helper_funcs {
 	/**
-	 * @fb_probe:
-	 *
-	 * Driver callback to allocate and initialize the fbdev info structure.
-	 * Furthermore it also needs to allocate the DRM framebuffer used to
-	 * back the fbdev.
-	 *
-	 * This callback is mandatory.
-	 *
-	 * RETURNS:
-	 *
-	 * The driver should return 0 on success and a negative error code on
-	 * failure.
-	 */
-	int (*fb_probe)(struct drm_fb_helper *helper,
-			struct drm_fb_helper_surface_size *sizes);
-
-	/**
 	 * @fb_dirty:
 	 *
 	 * Driver callback to update the framebuffer memory. If set, fbdev
@@ -104,6 +82,33 @@ struct drm_fb_helper_funcs {
 	 * 0 on success, or an error code otherwise.
 	 */
 	int (*fb_dirty)(struct drm_fb_helper *helper, struct drm_clip_rect *clip);
+
+	/**
+	 * @fb_restore:
+	 *
+	 * Driver callback to restore internal fbdev state. If set, fbdev
+	 * emulation will invoke this callback after restoring the display
+	 * mode.
+	 *
+	 * Only for i915. Do not use in new code.
+	 *
+	 * TODO: Fix i915 to not require this callback.
+	 */
+	void (*fb_restore)(struct drm_fb_helper *helper);
+
+	/**
+	 * @fb_set_suspend:
+	 *
+	 * Driver callback to suspend or resume, if set, fbdev emulation will
+	 * invoke this callback during suspend and resume. Driver should call
+	 * fb_set_suspend() from their implementation. If not set, fbdev
+	 * emulation will invoke fb_set_suspend() directly.
+	 *
+	 * Only for i915. Do not use in new code.
+	 *
+	 * TODO: Fix i915 to not require this callback.
+	 */
+	void (*fb_set_suspend)(struct drm_fb_helper *helper, bool suspend);
 };
 
 /**
@@ -162,13 +167,6 @@ struct drm_fb_helper {
 	struct mutex lock;
 
 	/**
-	 * @kernel_fb_list:
-	 *
-	 * Entry on the global kernel_fb_helper_list, used for kgdb entry/exit.
-	 */
-	struct list_head kernel_fb_list;
-
-	/**
 	 * @delayed_hotplug:
 	 *
 	 * A hotplug was received while fbdev wasn't in control of the DRM
@@ -199,15 +197,6 @@ struct drm_fb_helper {
 	 * See also: @deferred_setup
 	 */
 	int preferred_bpp;
-
-	/**
-	 * @hint_leak_smem_start:
-	 *
-	 * Hint to the fbdev emulation to store the framebuffer's physical
-	 * address in struct &fb_info.fix.smem_start. If the hint is unset,
-	 * the smem_start field should always be cleared to zero.
-	 */
-	bool hint_leak_smem_start;
 
 #ifdef CONFIG_FB_DEFERRED_IO
 	/**
@@ -240,13 +229,13 @@ drm_fb_helper_from_client(struct drm_client_dev *client)
 	.fb_setcmap	= drm_fb_helper_setcmap, \
 	.fb_blank	= drm_fb_helper_blank, \
 	.fb_pan_display	= drm_fb_helper_pan_display, \
-	.fb_debug_enter = drm_fb_helper_debug_enter, \
-	.fb_debug_leave = drm_fb_helper_debug_leave, \
 	.fb_ioctl	= drm_fb_helper_ioctl
 
 #ifdef CONFIG_DRM_FBDEV_EMULATION
 void drm_fb_helper_prepare(struct drm_device *dev, struct drm_fb_helper *helper,
+			   unsigned int preferred_bpp,
 			   const struct drm_fb_helper_funcs *funcs);
+void drm_fb_helper_unprepare(struct drm_fb_helper *fb_helper);
 int drm_fb_helper_init(struct drm_device *dev, struct drm_fb_helper *helper);
 void drm_fb_helper_fini(struct drm_fb_helper *helper);
 int drm_fb_helper_blank(int blank, struct fb_info *info);
@@ -256,39 +245,20 @@ int drm_fb_helper_set_par(struct fb_info *info);
 int drm_fb_helper_check_var(struct fb_var_screeninfo *var,
 			    struct fb_info *info);
 
-int drm_fb_helper_restore_fbdev_mode_unlocked(struct drm_fb_helper *fb_helper);
+int drm_fb_helper_restore_fbdev_mode_unlocked(struct drm_fb_helper *fb_helper,
+					      bool force);
 
-struct fb_info *drm_fb_helper_alloc_info(struct drm_fb_helper *fb_helper);
 void drm_fb_helper_unregister_info(struct drm_fb_helper *fb_helper);
 void drm_fb_helper_fill_info(struct fb_info *info,
 			     struct drm_fb_helper *fb_helper,
 			     struct drm_fb_helper_surface_size *sizes);
 
+void drm_fb_helper_damage_range(struct fb_info *info, off_t off, size_t len);
+void drm_fb_helper_damage_area(struct fb_info *info, u32 x, u32 y, u32 width, u32 height);
+
+#ifdef CONFIG_FB_DEFERRED_IO
 void drm_fb_helper_deferred_io(struct fb_info *info, struct list_head *pagereflist);
-
-ssize_t drm_fb_helper_sys_read(struct fb_info *info, char __user *buf,
-			       size_t count, loff_t *ppos);
-ssize_t drm_fb_helper_sys_write(struct fb_info *info, const char __user *buf,
-				size_t count, loff_t *ppos);
-
-void drm_fb_helper_sys_fillrect(struct fb_info *info,
-				const struct fb_fillrect *rect);
-void drm_fb_helper_sys_copyarea(struct fb_info *info,
-				const struct fb_copyarea *area);
-void drm_fb_helper_sys_imageblit(struct fb_info *info,
-				 const struct fb_image *image);
-
-ssize_t drm_fb_helper_cfb_read(struct fb_info *info, char __user *buf,
-			       size_t count, loff_t *ppos);
-ssize_t drm_fb_helper_cfb_write(struct fb_info *info, const char __user *buf,
-				size_t count, loff_t *ppos);
-
-void drm_fb_helper_cfb_fillrect(struct fb_info *info,
-				const struct fb_fillrect *rect);
-void drm_fb_helper_cfb_copyarea(struct fb_info *info,
-				const struct fb_copyarea *area);
-void drm_fb_helper_cfb_imageblit(struct fb_info *info,
-				 const struct fb_image *image);
+#endif
 
 void drm_fb_helper_set_suspend(struct drm_fb_helper *fb_helper, bool suspend);
 void drm_fb_helper_set_suspend_unlocked(struct drm_fb_helper *fb_helper,
@@ -300,195 +270,14 @@ int drm_fb_helper_ioctl(struct fb_info *info, unsigned int cmd,
 			unsigned long arg);
 
 int drm_fb_helper_hotplug_event(struct drm_fb_helper *fb_helper);
-int drm_fb_helper_initial_config(struct drm_fb_helper *fb_helper, int bpp_sel);
-int drm_fb_helper_debug_enter(struct fb_info *info);
-int drm_fb_helper_debug_leave(struct fb_info *info);
-
-void drm_fb_helper_lastclose(struct drm_device *dev);
-void drm_fb_helper_output_poll_changed(struct drm_device *dev);
+int drm_fb_helper_initial_config(struct drm_fb_helper *fb_helper);
+bool drm_fb_helper_gem_is_fb(const struct drm_fb_helper *fb_helper,
+			     const struct drm_gem_object *obj);
 #else
-static inline void drm_fb_helper_prepare(struct drm_device *dev,
-					struct drm_fb_helper *helper,
-					const struct drm_fb_helper_funcs *funcs)
+static inline bool drm_fb_helper_gem_is_fb(const struct drm_fb_helper *fb_helper,
+					   const struct drm_gem_object *obj)
 {
-}
-
-static inline int drm_fb_helper_init(struct drm_device *dev,
-		       struct drm_fb_helper *helper)
-{
-	/* So drivers can use it to free the struct */
-	helper->dev = dev;
-	dev->fb_helper = helper;
-
-	return 0;
-}
-
-static inline void drm_fb_helper_fini(struct drm_fb_helper *helper)
-{
-	if (helper && helper->dev)
-		helper->dev->fb_helper = NULL;
-}
-
-static inline int drm_fb_helper_blank(int blank, struct fb_info *info)
-{
-	return 0;
-}
-
-static inline int drm_fb_helper_pan_display(struct fb_var_screeninfo *var,
-					    struct fb_info *info)
-{
-	return 0;
-}
-
-static inline int drm_fb_helper_set_par(struct fb_info *info)
-{
-	return 0;
-}
-
-static inline int drm_fb_helper_check_var(struct fb_var_screeninfo *var,
-					  struct fb_info *info)
-{
-	return 0;
-}
-
-static inline int
-drm_fb_helper_restore_fbdev_mode_unlocked(struct drm_fb_helper *fb_helper)
-{
-	return 0;
-}
-
-static inline struct fb_info *
-drm_fb_helper_alloc_info(struct drm_fb_helper *fb_helper)
-{
-	return NULL;
-}
-
-static inline void drm_fb_helper_unregister_info(struct drm_fb_helper *fb_helper)
-{
-}
-
-static inline void
-drm_fb_helper_fill_info(struct fb_info *info,
-			struct drm_fb_helper *fb_helper,
-			struct drm_fb_helper_surface_size *sizes)
-{
-}
-
-static inline int drm_fb_helper_setcmap(struct fb_cmap *cmap,
-					struct fb_info *info)
-{
-	return 0;
-}
-
-static inline int drm_fb_helper_ioctl(struct fb_info *info, unsigned int cmd,
-				      unsigned long arg)
-{
-	return 0;
-}
-
-static inline void drm_fb_helper_deferred_io(struct fb_info *info,
-					     struct list_head *pagelist)
-{
-}
-
-static inline int drm_fb_helper_defio_init(struct drm_fb_helper *fb_helper)
-{
-	return -ENODEV;
-}
-
-static inline ssize_t drm_fb_helper_sys_read(struct fb_info *info,
-					     char __user *buf, size_t count,
-					     loff_t *ppos)
-{
-	return -ENODEV;
-}
-
-static inline ssize_t drm_fb_helper_sys_write(struct fb_info *info,
-					      const char __user *buf,
-					      size_t count, loff_t *ppos)
-{
-	return -ENODEV;
-}
-
-static inline void drm_fb_helper_sys_fillrect(struct fb_info *info,
-					      const struct fb_fillrect *rect)
-{
-}
-
-static inline void drm_fb_helper_sys_copyarea(struct fb_info *info,
-					      const struct fb_copyarea *area)
-{
-}
-
-static inline void drm_fb_helper_sys_imageblit(struct fb_info *info,
-					       const struct fb_image *image)
-{
-}
-
-static inline ssize_t drm_fb_helper_cfb_read(struct fb_info *info, char __user *buf,
-					     size_t count, loff_t *ppos)
-{
-	return -ENODEV;
-}
-
-static inline ssize_t drm_fb_helper_cfb_write(struct fb_info *info, const char __user *buf,
-					      size_t count, loff_t *ppos)
-{
-	return -ENODEV;
-}
-
-static inline void drm_fb_helper_cfb_fillrect(struct fb_info *info,
-					      const struct fb_fillrect *rect)
-{
-}
-
-static inline void drm_fb_helper_cfb_copyarea(struct fb_info *info,
-					      const struct fb_copyarea *area)
-{
-}
-
-static inline void drm_fb_helper_cfb_imageblit(struct fb_info *info,
-					       const struct fb_image *image)
-{
-}
-
-static inline void drm_fb_helper_set_suspend(struct drm_fb_helper *fb_helper,
-					     bool suspend)
-{
-}
-
-static inline void
-drm_fb_helper_set_suspend_unlocked(struct drm_fb_helper *fb_helper, bool suspend)
-{
-}
-
-static inline int drm_fb_helper_hotplug_event(struct drm_fb_helper *fb_helper)
-{
-	return 0;
-}
-
-static inline int drm_fb_helper_initial_config(struct drm_fb_helper *fb_helper,
-					       int bpp_sel)
-{
-	return 0;
-}
-
-static inline int drm_fb_helper_debug_enter(struct fb_info *info)
-{
-	return 0;
-}
-
-static inline int drm_fb_helper_debug_leave(struct fb_info *info)
-{
-	return 0;
-}
-
-static inline void drm_fb_helper_lastclose(struct drm_device *dev)
-{
-}
-
-static inline void drm_fb_helper_output_poll_changed(struct drm_device *dev)
-{
+	return false;
 }
 #endif
 

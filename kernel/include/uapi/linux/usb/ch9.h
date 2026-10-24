@@ -3,7 +3,7 @@
  * This file holds USB constants and structures that are needed for
  * USB device APIs.  These are used by the USB device model, which is
  * defined in chapter 9 of the USB 2.0 specification and in the
- * Wireless USB 1.0 (spread around).  Linux has several APIs in C that
+ * Wireless USB 1.0 spec (now defunct).  Linux has several APIs in C that
  * need these:
  *
  * - the master/host side Linux-USB kernel driver API;
@@ -13,9 +13,6 @@
  * USB 2.0 adds an additional "On The Go" (OTG) mode, which lets systems
  * act either as a USB master/host or as a USB slave/device.  That means
  * the master and slave side APIs benefit from working well together.
- *
- * There's also "Wireless USB", using low power short range radios for
- * peripheral interconnection but otherwise building on the USB framework.
  *
  * Note all descriptors are declared '__attribute__((packed))' so that:
  *
@@ -105,6 +102,8 @@
 #define USB_REQ_LOOPBACK_DATA_WRITE	0x15
 #define USB_REQ_LOOPBACK_DATA_READ	0x16
 #define USB_REQ_SET_INTERFACE_DS	0x17
+#define USB_REQ_AUTH_IN			0x18
+#define USB_REQ_AUTH_OUT		0x19
 
 /* specific requests for USB Power Delivery */
 #define USB_REQ_GET_PARTNER_PDO		20
@@ -124,15 +123,17 @@
  * are at most sixteen features of each type.)  Hubs may also support a
  * new USB_REQ_TEST_AND_SET_FEATURE to put ports into L1 suspend.
  */
-#define USB_DEVICE_SELF_POWERED		0	/* (read only) */
-#define USB_DEVICE_REMOTE_WAKEUP	1	/* dev may initiate wakeup */
-#define USB_DEVICE_TEST_MODE		2	/* (wired high speed only) */
-#define USB_DEVICE_BATTERY		2	/* (wireless) */
-#define USB_DEVICE_B_HNP_ENABLE		3	/* (otg) dev may initiate HNP */
-#define USB_DEVICE_WUSB_DEVICE		3	/* (wireless)*/
-#define USB_DEVICE_A_HNP_SUPPORT	4	/* (otg) RH port supports HNP */
-#define USB_DEVICE_A_ALT_HNP_SUPPORT	5	/* (otg) other RH port does */
-#define USB_DEVICE_DEBUG_MODE		6	/* (special devices only) */
+#define USB_DEVICE_SELF_POWERED				0	/* (read only) */
+#define USB_DEVICE_REMOTE_WAKEUP			1	/* dev may initiate wakeup */
+#define USB_DEVICE_TEST_MODE				2	/* (wired high speed only) */
+#define USB_DEVICE_BATTERY				2	/* (wireless) */
+#define USB_DEVICE_B_HNP_ENABLE				3	/* (otg) dev may initiate HNP */
+#define USB_DEVICE_WUSB_DEVICE				3	/* (wireless)*/
+#define USB_DEVICE_A_HNP_SUPPORT			4	/* (otg) RH port supports HNP */
+#define USB_DEVICE_A_ALT_HNP_SUPPORT			5	/* (otg) other RH port does */
+#define USB_DEVICE_DEBUG_MODE				6	/* (special devices only) */
+
+#define USB_DEVICE_BULK_MAX_PACKET_UPDATE		8	/* (eUSB2v2) bump maxpacket to 1024 */
 
 /*
  * Test Mode Selectors
@@ -256,7 +257,13 @@ struct usb_ctrlrequest {
 #define USB_DT_BOS			0x0f
 #define USB_DT_DEVICE_CAPABILITY	0x10
 #define USB_DT_WIRELESS_ENDPOINT_COMP	0x11
+/* From the eUSB2 spec */
+#define USB_DT_EUSB2_ISOC_ENDPOINT_COMP	0x12
+/* From Wireless USB spec */
 #define USB_DT_WIRE_ADAPTER		0x21
+/* From USB Device Firmware Upgrade Specification, Revision 1.1 */
+#define USB_DT_DFU_FUNCTIONAL		0x21
+/* these are from the Wireless USB spec */
 #define USB_DT_RPIPE			0x22
 #define USB_DT_CS_RADIO_CONTROL		0x23
 /* From the T10 UAS specification */
@@ -330,11 +337,13 @@ struct usb_device_descriptor {
 #define USB_CLASS_AUDIO_VIDEO		0x10
 #define USB_CLASS_BILLBOARD		0x11
 #define USB_CLASS_USB_TYPE_C_BRIDGE	0x12
+#define USB_CLASS_MCTP			0x14
 #define USB_CLASS_MISC			0xef
 #define USB_CLASS_APP_SPEC		0xfe
-#define USB_CLASS_VENDOR_SPEC		0xff
+#define USB_SUBCLASS_DFU			0x01
 
-#define USB_SUBCLASS_VENDOR_SPEC	0xff
+#define USB_CLASS_VENDOR_SPEC		0xff
+#define USB_SUBCLASS_VENDOR_SPEC		0xff
 
 /*-------------------------------------------------------------------------*/
 
@@ -376,7 +385,10 @@ struct usb_string_descriptor {
 	__u8  bLength;
 	__u8  bDescriptorType;
 
-	__le16 wData[1];		/* UTF-16LE encoded */
+	union {
+		__le16 legacy_padding;
+		__DECLARE_FLEX_ARRAY(__le16, wData);	/* UTF-16LE encoded */
+	};
 } __attribute__ ((packed));
 
 /* note that "string" zero is special, it holds language codes that
@@ -671,6 +683,18 @@ static inline int usb_endpoint_interrupt_type(
 
 /*-------------------------------------------------------------------------*/
 
+/* USB_DT_EUSB2_ISOC_ENDPOINT_COMP: eUSB2 Isoch Endpoint Companion descriptor */
+struct usb_eusb2_isoc_ep_comp_descriptor {
+	__u8	bLength;
+	__u8	bDescriptorType;
+	__le16	wMaxPacketSize;
+	__le32	dwBytesPerInterval;
+} __attribute__ ((packed));
+
+#define USB_DT_EUSB2_ISOC_EP_COMP_SIZE	8
+
+/*-------------------------------------------------------------------------*/
+
 /* USB_DT_SSP_ISOC_ENDPOINT_COMP: SuperSpeedPlus Isochronous Endpoint Companion
  * descriptor
  */
@@ -763,6 +787,8 @@ struct usb_otg20_descriptor {
 #define USB_OTG_SRP		(1 << 0)
 #define USB_OTG_HNP		(1 << 1)	/* swap host/device roles */
 #define USB_OTG_ADP		(1 << 2)	/* support ADP */
+/* OTG 3.0 */
+#define USB_OTG_RSP		(1 << 3)	/* support RSP */
 
 #define OTG_STS_SELECTOR	0xF000		/* OTG status selector */
 /*-------------------------------------------------------------------------*/
@@ -948,6 +974,22 @@ struct usb_ss_container_id_descriptor {
 #define USB_DT_USB_SS_CONTN_ID_SIZE	20
 
 /*
+ * Platform Device Capability descriptor: Defines platform specific device
+ * capabilities
+ */
+#define	USB_PLAT_DEV_CAP_TYPE	5
+struct usb_plat_dev_cap_descriptor {
+	__u8  bLength;
+	__u8  bDescriptorType;
+	__u8  bDevCapabilityType;
+	__u8  bReserved;
+	__u8  UUID[16];
+	__u8  CapabilityData[];
+} __attribute__((packed));
+
+#define USB_DT_USB_PLAT_DEV_CAP_SIZE(capability_data_size)	(20 + capability_data_size)
+
+/*
  * SuperSpeed Plus USB Capability descriptor: Defines the set of
  * SuperSpeed Plus USB specific device level capabilities
  */
@@ -965,7 +1007,11 @@ struct usb_ssp_cap_descriptor {
 #define USB_SSP_MIN_RX_LANE_COUNT		(0xf << 8)
 #define USB_SSP_MIN_TX_LANE_COUNT		(0xf << 12)
 	__le16 wReserved;
-	__le32 bmSublinkSpeedAttr[1]; /* list of sublink speed attrib entries */
+	union {
+		__le32 legacy_padding;
+		/* list of sublink speed attrib entries */
+		__DECLARE_FLEX_ARRAY(__le32, bmSublinkSpeedAttr);
+	};
 #define USB_SSP_SUBLINK_SPEED_SSID	(0xf)		/* sublink speed ID */
 #define USB_SSP_SUBLINK_SPEED_LSE	(0x3 << 4)	/* Lanespeed exponent */
 #define USB_SSP_SUBLINK_SPEED_LSE_BPS		0
@@ -1102,6 +1148,17 @@ struct usb_ptm_cap_descriptor {
  * (SSAC) specified in bmAttributes[4:0]. SSAC is zero-based
  */
 #define USB_DT_USB_SSP_CAP_SIZE(ssac)	(12 + (ssac + 1) * 4)
+
+/*-------------------------------------------------------------------------*/
+
+struct usb_authentication_capability_descriptor {
+	__u8  bLength;
+	__u8  bDescriptorType; /* set to USB_DT_DEVICE_CAPABILITY */
+	__u8  bmAttributes;
+
+	__u8  bcdProtocolVersion;
+	__u8  bcdCapability;
+} __attribute__((packed));
 
 /*-------------------------------------------------------------------------*/
 

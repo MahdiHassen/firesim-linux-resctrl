@@ -31,35 +31,68 @@
 #include <asm/sigframe.h>
 #include <asm/sighandling.h>
 #include <asm/smap.h>
+#include <asm/gsseg.h>
+
+/*
+ * The first GDT descriptor is reserved as 'NULL descriptor'.  As bits 0
+ * and 1 of a segment selector, i.e., the RPL bits, are NOT used to index
+ * GDT, selector values 0~3 all point to the NULL descriptor, thus values
+ * 0, 1, 2 and 3 are all valid NULL selector values.
+ *
+ * However IRET zeros ES, FS, GS, and DS segment registers if any of them
+ * is found to have any nonzero NULL selector value, which can be used by
+ * userspace in pre-FRED systems to spot any interrupt/exception by loading
+ * a nonzero NULL selector and waiting for it to become zero.  Before FRED
+ * there was nothing software could do to prevent such an information leak.
+ *
+ * ERETU, the only legit instruction to return to userspace from kernel
+ * under FRED, by design does NOT zero any segment register to avoid this
+ * problem behavior.
+ *
+ * As such, leave NULL selector values 0~3 unchanged.
+ */
+static inline u16 fixup_rpl(u16 sel)
+{
+	return sel <= 3 ? sel : sel | 3;
+}
 
 #ifdef CONFIG_IA32_EMULATION
-#include <asm/ia32_unistd.h>
+#include <asm/unistd_32_ia32.h>
 
 static inline void reload_segments(struct sigcontext_32 *sc)
 {
-	unsigned int cur;
+	u16 cur;
 
+	/*
+	 * Reload fs and gs if they have changed in the signal
+	 * handler.  This does not handle long fs/gs base changes in
+	 * the handler, but does not clobber them at least in the
+	 * normal case.
+	 */
 	savesegment(gs, cur);
-	if ((sc->gs | 0x03) != cur)
-		load_gs_index(sc->gs | 0x03);
+	if (fixup_rpl(sc->gs) != cur)
+		load_gs_index(fixup_rpl(sc->gs));
 	savesegment(fs, cur);
-	if ((sc->fs | 0x03) != cur)
-		loadsegment(fs, sc->fs | 0x03);
+	if (fixup_rpl(sc->fs) != cur)
+		loadsegment(fs, fixup_rpl(sc->fs));
+
 	savesegment(ds, cur);
-	if ((sc->ds | 0x03) != cur)
-		loadsegment(ds, sc->ds | 0x03);
+	if (fixup_rpl(sc->ds) != cur)
+		loadsegment(ds, fixup_rpl(sc->ds));
 	savesegment(es, cur);
-	if ((sc->es | 0x03) != cur)
-		loadsegment(es, sc->es | 0x03);
+	if (fixup_rpl(sc->es) != cur)
+		loadsegment(es, fixup_rpl(sc->es));
 }
 
 #define sigset32_t			compat_sigset_t
+#define siginfo32_t			compat_siginfo_t
 #define restore_altstack32		compat_restore_altstack
 #define unsafe_save_altstack32		unsafe_compat_save_altstack
 
 #else
 
 #define sigset32_t			sigset_t
+#define siginfo32_t			siginfo_t
 #define __NR_ia32_sigreturn		__NR_sigreturn
 #define __NR_ia32_rt_sigreturn		__NR_rt_sigreturn
 #define restore_altstack32		restore_altstack
@@ -102,18 +135,12 @@ static bool ia32_restore_sigcontext(struct pt_regs *regs,
 	regs->orig_ax = -1;
 
 #ifdef CONFIG_IA32_EMULATION
-	/*
-	 * Reload fs and gs if they have changed in the signal
-	 * handler.  This does not handle long fs/gs base changes in
-	 * the handler, but does not clobber them at least in the
-	 * normal case.
-	 */
 	reload_segments(&sc);
 #else
-	loadsegment(gs, sc.gs);
-	regs->fs = sc.fs;
-	regs->es = sc.es;
-	regs->ds = sc.ds;
+	loadsegment(gs, fixup_rpl(sc.gs));
+	regs->fs = fixup_rpl(sc.fs);
+	regs->es = fixup_rpl(sc.es);
+	regs->ds = fixup_rpl(sc.ds);
 #endif
 
 	return fpu__restore_sig(compat_ptr(sc.fpstate), 1);
@@ -124,6 +151,8 @@ SYSCALL32_DEFINE0(sigreturn)
 	struct pt_regs *regs = current_pt_regs();
 	struct sigframe_ia32 __user *frame = (struct sigframe_ia32 __user *)(regs->sp-8);
 	sigset_t set;
+
+	prevent_single_step_upon_eretu(regs);
 
 	if (!access_ok(frame, sizeof(*frame)))
 		goto badframe;
@@ -147,6 +176,8 @@ SYSCALL32_DEFINE0(rt_sigreturn)
 	struct pt_regs *regs = current_pt_regs();
 	struct rt_sigframe_ia32 __user *frame;
 	sigset_t set;
+
+	prevent_single_step_upon_eretu(regs);
 
 	frame = (struct rt_sigframe_ia32 __user *)(regs->sp - 4);
 
@@ -251,7 +282,7 @@ int ia32_setup_frame(struct ksignal *ksig, struct pt_regs *regs)
 		/* Return stub is in 32bit vsyscall page */
 		if (current->mm->context.vdso)
 			restorer = current->mm->context.vdso +
-				vdso_image_32.sym___kernel_sigreturn;
+				vdso32_image.sym___kernel_sigreturn;
 		else
 			restorer = &frame->retcode;
 	}
@@ -337,7 +368,7 @@ int ia32_setup_rt_frame(struct ksignal *ksig, struct pt_regs *regs)
 		restorer = ksig->ka.sa.sa_restorer;
 	else
 		restorer = current->mm->context.vdso +
-			vdso_image_32.sym___kernel_rt_sigreturn;
+			vdso32_image.sym___kernel_rt_sigreturn;
 	unsafe_put_user(ptr_to_compat(restorer), &frame->pretcode, Efault);
 
 	/*
@@ -377,3 +408,128 @@ Efault:
 	user_access_end();
 	return -EFAULT;
 }
+
+/*
+ * The siginfo_t structure and handing code is very easy
+ * to break in several ways.  It must always be updated when new
+ * updates are made to the main siginfo_t, and
+ * copy_siginfo_to_user32() must be updated when the
+ * (arch-independent) copy_siginfo_to_user() is updated.
+ *
+ * It is also easy to put a new member in the siginfo_t
+ * which has implicit alignment which can move internal structure
+ * alignment around breaking the ABI.  This can happen if you,
+ * for instance, put a plain 64-bit value in there.
+ */
+
+/*
+* If adding a new si_code, there is probably new data in
+* the siginfo.  Make sure folks bumping the si_code
+* limits also have to look at this code.  Make sure any
+* new fields are handled in copy_siginfo_to_user32()!
+*/
+static_assert(NSIGILL  == 11);
+static_assert(NSIGFPE  == 15);
+static_assert(NSIGSEGV == 10);
+static_assert(NSIGBUS  == 5);
+static_assert(NSIGTRAP == 6);
+static_assert(NSIGCHLD == 6);
+static_assert(NSIGSYS  == 2);
+
+/* This is part of the ABI and can never change in size: */
+static_assert(sizeof(siginfo32_t) == 128);
+
+/* This is a part of the ABI and can never change in alignment */
+static_assert(__alignof__(siginfo32_t) == 4);
+
+/*
+* The offsets of all the (unioned) si_fields are fixed
+* in the ABI, of course.  Make sure none of them ever
+* move and are always at the beginning:
+*/
+static_assert(offsetof(siginfo32_t, _sifields) == 3 * sizeof(int));
+
+static_assert(offsetof(siginfo32_t, si_signo) == 0);
+static_assert(offsetof(siginfo32_t, si_errno) == 4);
+static_assert(offsetof(siginfo32_t, si_code)  == 8);
+
+/*
+* Ensure that the size of each si_field never changes.
+* If it does, it is a sign that the
+* copy_siginfo_to_user32() code below needs to updated
+* along with the size in the CHECK_SI_SIZE().
+*
+* We repeat this check for both the generic and compat
+* siginfos.
+*
+* Note: it is OK for these to grow as long as the whole
+* structure stays within the padding size (checked
+* above).
+*/
+
+#define CHECK_SI_OFFSET(name)						\
+	static_assert(offsetof(siginfo32_t, _sifields) ==		\
+		      offsetof(siginfo32_t, _sifields.name))
+
+#define CHECK_SI_SIZE(name, size)					\
+	static_assert(sizeof_field(siginfo32_t, _sifields.name) == size)
+
+CHECK_SI_OFFSET(_kill);
+CHECK_SI_SIZE  (_kill, 2*sizeof(int));
+static_assert(offsetof(siginfo32_t, si_pid) == 0xC);
+static_assert(offsetof(siginfo32_t, si_uid) == 0x10);
+
+CHECK_SI_OFFSET(_timer);
+#ifdef CONFIG_COMPAT
+/* compat_siginfo_t doesn't have si_sys_private */
+CHECK_SI_SIZE  (_timer, 3*sizeof(int));
+#else
+CHECK_SI_SIZE  (_timer, 4*sizeof(int));
+#endif
+static_assert(offsetof(siginfo32_t, si_tid)     == 0x0C);
+static_assert(offsetof(siginfo32_t, si_overrun) == 0x10);
+static_assert(offsetof(siginfo32_t, si_value)   == 0x14);
+
+CHECK_SI_OFFSET(_rt);
+CHECK_SI_SIZE  (_rt, 3*sizeof(int));
+static_assert(offsetof(siginfo32_t, si_pid)   == 0x0C);
+static_assert(offsetof(siginfo32_t, si_uid)   == 0x10);
+static_assert(offsetof(siginfo32_t, si_value) == 0x14);
+
+CHECK_SI_OFFSET(_sigchld);
+CHECK_SI_SIZE  (_sigchld, 5*sizeof(int));
+static_assert(offsetof(siginfo32_t, si_pid)    == 0x0C);
+static_assert(offsetof(siginfo32_t, si_uid)    == 0x10);
+static_assert(offsetof(siginfo32_t, si_status) == 0x14);
+static_assert(offsetof(siginfo32_t, si_utime)  == 0x18);
+static_assert(offsetof(siginfo32_t, si_stime)  == 0x1C);
+
+CHECK_SI_OFFSET(_sigfault);
+CHECK_SI_SIZE  (_sigfault, 4*sizeof(int));
+static_assert(offsetof(siginfo32_t, si_addr) == 0x0C);
+
+static_assert(offsetof(siginfo32_t, si_trapno) == 0x10);
+
+static_assert(offsetof(siginfo32_t, si_addr_lsb) == 0x10);
+
+static_assert(offsetof(siginfo32_t, si_lower) == 0x14);
+static_assert(offsetof(siginfo32_t, si_upper) == 0x18);
+
+static_assert(offsetof(siginfo32_t, si_pkey) == 0x14);
+
+static_assert(offsetof(siginfo32_t, si_perf_data) == 0x10);
+static_assert(offsetof(siginfo32_t, si_perf_type) == 0x14);
+static_assert(offsetof(siginfo32_t, si_perf_flags) == 0x18);
+
+CHECK_SI_OFFSET(_sigpoll);
+CHECK_SI_SIZE  (_sigpoll, 2*sizeof(int));
+static_assert(offsetof(siginfo32_t, si_band) == 0x0C);
+static_assert(offsetof(siginfo32_t, si_fd)   == 0x10);
+
+CHECK_SI_OFFSET(_sigsys);
+CHECK_SI_SIZE  (_sigsys, 3*sizeof(int));
+static_assert(offsetof(siginfo32_t, si_call_addr) == 0x0C);
+static_assert(offsetof(siginfo32_t, si_syscall)   == 0x10);
+static_assert(offsetof(siginfo32_t, si_arch)      == 0x14);
+
+/* any new si_fields should be added here */

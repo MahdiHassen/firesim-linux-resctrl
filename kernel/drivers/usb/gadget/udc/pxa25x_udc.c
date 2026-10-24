@@ -12,7 +12,7 @@
 /* #define VERBOSE_DEBUG */
 
 #include <linux/device.h>
-#include <linux/gpio.h>
+#include <linux/gpio/consumer.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/ioport.h>
@@ -38,7 +38,7 @@
 #include <asm/byteorder.h>
 #include <asm/dma.h>
 #include <asm/mach-types.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 #include <linux/usb/ch9.h>
 #include <linux/usb/gadget.h>
@@ -261,24 +261,12 @@ static void nuke (struct pxa25x_ep *, int status);
 /* one GPIO should control a D+ pullup, so host sees this device (or not) */
 static void pullup_off(void)
 {
-	struct pxa2xx_udc_mach_info		*mach = the_controller->mach;
-	int off_level = mach->gpio_pullup_inverted;
-
-	if (gpio_is_valid(mach->gpio_pullup))
-		gpio_set_value(mach->gpio_pullup, off_level);
-	else if (mach->udc_command)
-		mach->udc_command(PXA2XX_UDC_CMD_DISCONNECT);
+	gpiod_set_value(the_controller->pullup_gpio, 0);
 }
 
 static void pullup_on(void)
 {
-	struct pxa2xx_udc_mach_info		*mach = the_controller->mach;
-	int on_level = !mach->gpio_pullup_inverted;
-
-	if (gpio_is_valid(mach->gpio_pullup))
-		gpio_set_value(mach->gpio_pullup, on_level);
-	else if (mach->udc_command)
-		mach->udc_command(PXA2XX_UDC_CMD_CONNECT);
+	gpiod_set_value(the_controller->pullup_gpio, 1);
 }
 
 #if defined(CONFIG_CPU_BIG_ENDIAN)
@@ -508,7 +496,7 @@ pxa25x_ep_alloc_request (struct usb_ep *_ep, gfp_t gfp_flags)
 {
 	struct pxa25x_request *req;
 
-	req = kzalloc(sizeof(*req), gfp_flags);
+	req = kzalloc_obj(*req, gfp_flags);
 	if (!req)
 		return NULL;
 
@@ -1190,8 +1178,7 @@ static int pxa25x_udc_pullup(struct usb_gadget *_gadget, int is_active)
 
 	udc = container_of(_gadget, struct pxa25x_udc, gadget);
 
-	/* not all boards support pullup control */
-	if (!gpio_is_valid(udc->mach->gpio_pullup) && !udc->mach->udc_command)
+	if (!udc->pullup_gpio)
 		return -EOPNOTSUPP;
 
 	udc->pullup = (is_active != 0);
@@ -1340,7 +1327,7 @@ DEFINE_SHOW_ATTRIBUTE(udc_debug);
 		debugfs_create_file(dev->gadget.name, \
 			S_IRUGO, NULL, dev, &udc_debug_fops); \
 	} while (0)
-#define remove_debug_files(dev) debugfs_remove(debugfs_lookup(dev->gadget.name, NULL))
+#define remove_debug_files(dev) debugfs_lookup_and_remove(dev->gadget.name, NULL)
 
 #else	/* !CONFIG_USB_GADGET_DEBUG_FILES */
 
@@ -1503,7 +1490,7 @@ reset_gadget(struct pxa25x_udc *dev, struct usb_gadget_driver *driver)
 		ep->stopped = 1;
 		nuke(ep, -ESHUTDOWN);
 	}
-	del_timer_sync(&dev->timer);
+	timer_delete_sync(&dev->timer);
 
 	/* report reset; the driver is already quiesced */
 	if (driver)
@@ -1530,7 +1517,7 @@ stop_activity(struct pxa25x_udc *dev, struct usb_gadget_driver *driver)
 		ep->stopped = 1;
 		nuke(ep, -ESHUTDOWN);
 	}
-	del_timer_sync(&dev->timer);
+	timer_delete_sync(&dev->timer);
 
 	/* report disconnect; the driver is already quiesced */
 	if (driver)
@@ -1561,40 +1548,6 @@ static int pxa25x_udc_stop(struct usb_gadget*g)
 
 /*-------------------------------------------------------------------------*/
 
-#ifdef CONFIG_ARCH_LUBBOCK
-
-/* Lubbock has separate connect and disconnect irqs.  More typical designs
- * use one GPIO as the VBUS IRQ, and another to control the D+ pullup.
- */
-
-static irqreturn_t
-lubbock_vbus_irq(int irq, void *_dev)
-{
-	struct pxa25x_udc	*dev = _dev;
-	int			vbus;
-
-	dev->stats.irqs++;
-	if (irq == dev->usb_irq) {
-		vbus = 1;
-		disable_irq(dev->usb_irq);
-		enable_irq(dev->usb_disc_irq);
-	} else if (irq == dev->usb_disc_irq) {
-		vbus = 0;
-		disable_irq(dev->usb_disc_irq);
-		enable_irq(dev->usb_irq);
-	} else {
-		return IRQ_NONE;
-	}
-
-	pxa25x_udc_vbus_session(&dev->gadget, vbus);
-	return IRQ_HANDLED;
-}
-
-#endif
-
-
-/*-------------------------------------------------------------------------*/
-
 static inline void clear_ep_state (struct pxa25x_udc *dev)
 {
 	unsigned i;
@@ -1608,7 +1561,7 @@ static inline void clear_ep_state (struct pxa25x_udc *dev)
 
 static void udc_watchdog(struct timer_list *t)
 {
-	struct pxa25x_udc	*dev = from_timer(dev, t, timer);
+	struct pxa25x_udc	*dev = timer_container_of(dev, t, timer);
 
 	local_irq_disable();
 	if (dev->ep0state == EP0_STALL
@@ -1641,14 +1594,14 @@ static void handle_ep0 (struct pxa25x_udc *dev)
 	if (udccs0 & UDCCS0_SST) {
 		nuke(ep, -EPIPE);
 		udc_ep0_set_UDCCS(dev, UDCCS0_SST);
-		del_timer(&dev->timer);
+		timer_delete(&dev->timer);
 		ep0_idle(dev);
 	}
 
 	/* previous request unfinished?  non-error iff back-to-back ... */
 	if ((udccs0 & UDCCS0_SA) != 0 && dev->ep0state != EP0_IDLE) {
 		nuke(ep, 0);
-		del_timer(&dev->timer);
+		timer_delete(&dev->timer);
 		ep0_idle(dev);
 	}
 
@@ -2377,20 +2330,17 @@ static int pxa25x_udc_probe(struct platform_device *pdev)
 
 	/* other non-static parts of init */
 	dev->dev = &pdev->dev;
-	dev->mach = dev_get_platdata(&pdev->dev);
 
 	dev->transceiver = devm_usb_get_phy(&pdev->dev, USB_PHY_TYPE_USB2);
 
-	if (gpio_is_valid(dev->mach->gpio_pullup)) {
-		retval = devm_gpio_request(&pdev->dev, dev->mach->gpio_pullup,
-					   "pca25x_udc GPIO PULLUP");
-		if (retval) {
-			dev_dbg(&pdev->dev,
-				"can't get pullup gpio %d, err: %d\n",
-				dev->mach->gpio_pullup, retval);
-			goto err;
-		}
-		gpio_direction_output(dev->mach->gpio_pullup, 0);
+	dev->pullup_gpio = devm_gpiod_get_index_optional(&pdev->dev, "pullup", 0,
+						    GPIOD_OUT_HIGH);
+	if (IS_ERR(dev->pullup_gpio)) {
+		dev_dbg(&pdev->dev,
+			"can't get pullup gpio err: %ld\n",
+			PTR_ERR(dev->pullup_gpio));
+		retval = PTR_ERR(dev->pullup_gpio);
+		goto err;
 	}
 
 	timer_setup(&dev->timer, udc_watchdog, 0);
@@ -2413,34 +2363,6 @@ static int pxa25x_udc_probe(struct platform_device *pdev)
 	}
 	dev->got_irq = 1;
 
-#ifdef CONFIG_ARCH_LUBBOCK
-	if (machine_is_lubbock()) {
-		dev->usb_irq = platform_get_irq(pdev, 1);
-		if (dev->usb_irq < 0)
-			return dev->usb_irq;
-
-		dev->usb_disc_irq = platform_get_irq(pdev, 2);
-		if (dev->usb_disc_irq < 0)
-			return dev->usb_disc_irq;
-
-		retval = devm_request_irq(&pdev->dev, dev->usb_disc_irq,
-					  lubbock_vbus_irq, 0, driver_name,
-					  dev);
-		if (retval != 0) {
-			pr_err("%s: can't get irq %i, err %d\n",
-				driver_name, dev->usb_disc_irq, retval);
-			goto err;
-		}
-		retval = devm_request_irq(&pdev->dev, dev->usb_irq,
-					  lubbock_vbus_irq, 0, driver_name,
-					  dev);
-		if (retval != 0) {
-			pr_err("%s: can't get irq %i, err %d\n",
-				driver_name, dev->usb_irq, retval);
-			goto err;
-		}
-	} else
-#endif
 	create_debug_files(dev);
 
 	retval = usb_add_gadget_udc(&pdev->dev, &dev->gadget);
@@ -2459,12 +2381,15 @@ static void pxa25x_udc_shutdown(struct platform_device *_dev)
 	pullup_off();
 }
 
-static int pxa25x_udc_remove(struct platform_device *pdev)
+static void pxa25x_udc_remove(struct platform_device *pdev)
 {
 	struct pxa25x_udc *dev = platform_get_drvdata(pdev);
 
-	if (dev->driver)
-		return -EBUSY;
+	if (dev->driver) {
+		dev_err(&pdev->dev,
+			"Driver still in use but removing anyhow\n");
+		return;
+	}
 
 	usb_del_gadget_udc(&dev->gadget);
 	dev->pullup = 0;
@@ -2476,7 +2401,6 @@ static int pxa25x_udc_remove(struct platform_device *pdev)
 		dev->transceiver = NULL;
 
 	the_controller = NULL;
-	return 0;
 }
 
 /*-------------------------------------------------------------------------*/
@@ -2500,7 +2424,7 @@ static int pxa25x_udc_suspend(struct platform_device *dev, pm_message_t state)
 	struct pxa25x_udc	*udc = platform_get_drvdata(dev);
 	unsigned long flags;
 
-	if (!gpio_is_valid(udc->mach->gpio_pullup) && !udc->mach->udc_command)
+	if (!udc->pullup_gpio)
 		WARNING("USB host won't detect disconnect!\n");
 	udc->suspended = 1;
 

@@ -12,7 +12,8 @@
 #include <linux/interrupt.h>
 #include <linux/list.h>
 #include <linux/module.h>
-#include <linux/of_device.h>
+#include <linux/of.h>
+#include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
 #include <linux/reset.h>
 #include <linux/slab.h>
@@ -60,7 +61,7 @@ int tegra_vde_alloc_bo(struct tegra_vde *vde,
 	struct tegra_vde_bo *bo;
 	int err;
 
-	bo = kzalloc(sizeof(*bo), GFP_KERNEL);
+	bo = kzalloc_obj(*bo);
 	if (!bo)
 		return -ENOMEM;
 
@@ -160,7 +161,8 @@ static __maybe_unused int tegra_vde_runtime_suspend(struct device *dev)
 	int err;
 
 	if (!dev->pm_domain) {
-		err = tegra_powergate_power_off(TEGRA_POWERGATE_VDEC);
+		err = tegra_pmc_powergate_power_off(vde->pmc,
+						    TEGRA_POWERGATE_VDEC);
 		if (err) {
 			dev_err(dev, "Failed to power down HW: %d\n", err);
 			return err;
@@ -192,15 +194,16 @@ static __maybe_unused int tegra_vde_runtime_resume(struct device *dev)
 	}
 
 	if (!dev->pm_domain) {
-		err = tegra_powergate_sequence_power_up(TEGRA_POWERGATE_VDEC,
-							vde->clk, vde->rst);
+		err = tegra_pmc_powergate_sequence_power_up(vde->pmc,
+							    TEGRA_POWERGATE_VDEC,
+							    vde->clk, vde->rst);
 		if (err) {
 			dev_err(dev, "Failed to power up HW : %d\n", err);
 			goto release_reset;
 		}
 	} else {
 		/*
-		 * tegra_powergate_sequence_power_up() leaves clocks enabled,
+		 * tegra_pmc_powergate_sequence_power_up() leaves clocks enabled,
 		 * while GENPD not.
 		 */
 		err = clk_prepare_enable(vde->clk);
@@ -292,6 +295,11 @@ static int tegra_vde_probe(struct platform_device *pdev)
 		return err;
 	}
 
+	vde->pmc = devm_tegra_pmc_get(dev);
+	if (IS_ERR(vde->pmc))
+		return dev_err_probe(dev, PTR_ERR(vde->pmc),
+				     "failed to get PMC\n");
+
 	irq = platform_get_irq_byname(pdev, "sync-token");
 	if (irq < 0)
 		return irq;
@@ -378,7 +386,7 @@ err_gen_free:
 	return err;
 }
 
-static int tegra_vde_remove(struct platform_device *pdev)
+static void tegra_vde_remove(struct platform_device *pdev)
 {
 	struct tegra_vde *vde = platform_get_drvdata(pdev);
 	struct device *dev = &pdev->dev;
@@ -407,8 +415,6 @@ static int tegra_vde_remove(struct platform_device *pdev)
 
 	gen_pool_free(vde->iram_pool, (unsigned long)vde->iram,
 		      gen_pool_size(vde->iram_pool));
-
-	return 0;
 }
 
 static void tegra_vde_shutdown(struct platform_device *pdev)

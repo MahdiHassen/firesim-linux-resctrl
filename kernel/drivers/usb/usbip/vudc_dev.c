@@ -43,7 +43,7 @@ struct urbp *alloc_urbp(void)
 {
 	struct urbp *urb_p;
 
-	urb_p = kzalloc(sizeof(*urb_p), GFP_KERNEL);
+	urb_p = kzalloc_obj(*urb_p);
 	if (!urb_p)
 		return urb_p;
 
@@ -284,7 +284,7 @@ static struct usb_request *vep_alloc_request(struct usb_ep *_ep,
 	if (!_ep)
 		return NULL;
 
-	req = kzalloc(sizeof(*req), mem_flags);
+	req = kzalloc_obj(*req, mem_flags);
 	if (!req)
 		return NULL;
 
@@ -333,7 +333,6 @@ static int vep_queue(struct usb_ep *_ep, struct usb_request *_req,
 static int vep_dequeue(struct usb_ep *_ep, struct usb_request *_req)
 {
 	struct vep *ep;
-	struct vrequest *req;
 	struct vudc *udc;
 	struct vrequest *lst;
 	unsigned long flags;
@@ -343,8 +342,7 @@ static int vep_dequeue(struct usb_ep *_ep, struct usb_request *_req)
 		return ret;
 
 	ep = to_vep(_ep);
-	req = to_vrequest(_req);
-	udc = req->udc;
+	udc = ep_to_vudc(ep);
 
 	if (!udc->driver)
 		return -ESHUTDOWN;
@@ -489,11 +487,11 @@ static void vudc_device_unusable(struct usbip_device *ud)
 
 struct vudc_device *alloc_vudc_device(int devid)
 {
-	struct vudc_device *udc_dev = NULL;
+	struct vudc_device *udc_dev;
 
-	udc_dev = kzalloc(sizeof(*udc_dev), GFP_KERNEL);
+	udc_dev = kzalloc_obj(*udc_dev);
 	if (!udc_dev)
-		goto out;
+		return NULL;
 
 	INIT_LIST_HEAD(&udc_dev->dev_entry);
 
@@ -503,7 +501,6 @@ struct vudc_device *alloc_vudc_device(int devid)
 		udc_dev = NULL;
 	}
 
-out:
 	return udc_dev;
 }
 
@@ -519,7 +516,7 @@ static int init_vudc_hw(struct vudc *udc)
 	struct usbip_device *ud = &udc->ud;
 	struct vep *ep;
 
-	udc->ep = kcalloc(VIRTUAL_ENDPOINTS, sizeof(*udc->ep), GFP_KERNEL);
+	udc->ep = kzalloc_objs(*udc->ep, VIRTUAL_ENDPOINTS);
 	if (!udc->ep)
 		goto nomem_ep;
 
@@ -599,7 +596,7 @@ int vudc_probe(struct platform_device *pdev)
 	struct vudc *udc;
 	int ret = -ENOMEM;
 
-	udc = kzalloc(sizeof(*udc), GFP_KERNEL);
+	udc = kzalloc_obj(*udc);
 	if (!udc)
 		goto out;
 
@@ -629,12 +626,12 @@ out:
 	return ret;
 }
 
-int vudc_remove(struct platform_device *pdev)
+void vudc_remove(struct platform_device *pdev)
 {
 	struct vudc *udc = platform_get_drvdata(pdev);
 
+	v_stop_timer(udc);
 	usb_del_gadget_udc(&udc->gadget);
 	cleanup_vudc_hw(udc);
 	kfree(udc);
-	return 0;
 }

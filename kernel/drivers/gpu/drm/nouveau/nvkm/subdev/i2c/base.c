@@ -22,7 +22,7 @@
  * Authors: Ben Skeggs
  */
 #include "priv.h"
-#include "aux.h"
+#include "auxch.h"
 #include "bus.h"
 #include "pad.h"
 
@@ -135,7 +135,7 @@ nvkm_i2c_intr(struct nvkm_subdev *subdev)
 }
 
 static int
-nvkm_i2c_fini(struct nvkm_subdev *subdev, bool suspend)
+nvkm_i2c_fini(struct nvkm_subdev *subdev, enum nvkm_suspend_state suspend)
 {
 	struct nvkm_i2c *i2c = nvkm_i2c(subdev);
 	struct nvkm_i2c_pad *pad;
@@ -260,12 +260,13 @@ nvkm_i2c_new_(const struct nvkm_i2c_func *func, struct nvkm_device *device,
 {
 	struct nvkm_bios *bios = device->bios;
 	struct nvkm_i2c *i2c;
+	struct nvkm_i2c_aux *aux;
 	struct dcb_i2c_entry ccbE;
 	struct dcb_output dcbE;
 	u8 ver, hdr;
-	int ret, i;
+	int ret, i, ids;
 
-	if (!(i2c = *pi2c = kzalloc(sizeof(*i2c), GFP_KERNEL)))
+	if (!(i2c = *pi2c = kzalloc_obj(*i2c)))
 		return -ENOMEM;
 
 	nvkm_subdev_ctor(&nvkm_i2c, device, type, inst, &i2c->subdev);
@@ -406,5 +407,11 @@ nvkm_i2c_new_(const struct nvkm_i2c_func *func, struct nvkm_device *device,
 		}
 	}
 
-	return nvkm_event_init(&nvkm_i2c_intr_func, &i2c->subdev, 4, i, &i2c->event);
+	ids = 0;
+	list_for_each_entry(aux, &i2c->aux, head)
+		ids = max(ids, aux->id + 1);
+	if (!ids)
+		return 0;
+
+	return nvkm_event_init(&nvkm_i2c_intr_func, &i2c->subdev, 4, ids, &i2c->event);
 }

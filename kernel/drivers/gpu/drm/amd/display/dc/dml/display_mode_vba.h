@@ -143,6 +143,7 @@ dml_get_pipe_attr_decl(vready_at_or_after_vsync);
 dml_get_pipe_attr_decl(min_dst_y_next_start);
 dml_get_pipe_attr_decl(vstartup_calculated);
 dml_get_pipe_attr_decl(subviewport_lines_needed_in_mall);
+dml_get_pipe_attr_decl(surface_size_in_mall);
 
 double get_total_immediate_flip_bytes(
 		struct display_mode_lib *mode_lib,
@@ -262,6 +263,7 @@ struct vba_vars_st {
 	int maxMpcComb;
 	bool UseMaximumVStartup;
 
+	double MaxVRatioPre;
 	double WritebackDISPCLK;
 	double DPPCLKUsingSingleDPPLuma;
 	double DPPCLKUsingSingleDPPChroma;
@@ -470,7 +472,7 @@ struct vba_vars_st {
 	unsigned int VTotal[DC__NUM_DPP__MAX];
 	unsigned int VTotal_Max[DC__NUM_DPP__MAX];
 	unsigned int VTotal_Min[DC__NUM_DPP__MAX];
-	int DPPPerPlane[DC__NUM_DPP__MAX];
+	unsigned int DPPPerPlane[DC__NUM_DPP__MAX];
 	double PixelClock[DC__NUM_DPP__MAX];
 	double PixelClockBackEnd[DC__NUM_DPP__MAX];
 	bool DCCEnable[DC__NUM_DPP__MAX];
@@ -737,7 +739,7 @@ struct vba_vars_st {
 	/* ms locals */
 	double IdealSDPPortBandwidthPerState[DC__VOLTAGE_STATES][2];
 	unsigned int NoOfDPP[DC__VOLTAGE_STATES][2][DC__NUM_DPP__MAX];
-	int NoOfDPPThisState[DC__NUM_DPP__MAX];
+	unsigned int NoOfDPPThisState[DC__NUM_DPP__MAX];
 	enum odm_combine_mode ODMCombineEnablePerState[DC__VOLTAGE_STATES][DC__NUM_DPP__MAX];
 	double SwathWidthYThisState[DC__NUM_DPP__MAX];
 	unsigned int SwathHeightCPerState[DC__VOLTAGE_STATES][2][DC__NUM_DPP__MAX];
@@ -898,7 +900,7 @@ struct vba_vars_st {
 	int PTEBufferSizeInRequestsForChroma;
 
 	// Missing from VBA
-	int dpte_group_bytes_chroma;
+	unsigned int dpte_group_bytes_chroma;
 	unsigned int vm_group_bytes_chroma;
 	double dst_x_after_scaler;
 	double dst_y_after_scaler;
@@ -1098,8 +1100,8 @@ struct vba_vars_st {
 	unsigned int DETBufferSizeCThisState[DC__NUM_DPP__MAX];
 	bool NoUrgentLatencyHiding[DC__NUM_DPP__MAX];
 	bool NoUrgentLatencyHidingPre[DC__NUM_DPP__MAX];
-	int swath_width_luma_ub_this_state[DC__NUM_DPP__MAX];
-	int swath_width_chroma_ub_this_state[DC__NUM_DPP__MAX];
+	unsigned int swath_width_luma_ub_this_state[DC__NUM_DPP__MAX];
+	unsigned int swath_width_chroma_ub_this_state[DC__NUM_DPP__MAX];
 	double UrgLatency[DC__VOLTAGE_STATES];
 	double VActiveCursorBandwidth[DC__VOLTAGE_STATES][2][DC__NUM_DPP__MAX];
 	double VActivePixelBandwidth[DC__VOLTAGE_STATES][2][DC__NUM_DPP__MAX];
@@ -1170,7 +1172,7 @@ struct vba_vars_st {
 	int ConfigReturnBufferSizeInKByte;
 	enum unbounded_requesting_policy UseUnboundedRequesting;
 	int CompressedBufferSegmentSizeInkByte;
-	int CompressedBufferSizeInkByte;
+	unsigned int CompressedBufferSizeInkByte;
 	int MetaFIFOSizeInKEntries;
 	int ZeroSizeBufferEntries;
 	int COMPBUF_RESERVED_SPACE_64B;

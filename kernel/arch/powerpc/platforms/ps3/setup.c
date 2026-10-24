@@ -10,6 +10,7 @@
 #include <linux/delay.h>
 #include <linux/fs.h>
 #include <linux/root_dev.h>
+#include <linux/sysfs.h>
 #include <linux/console.h>
 #include <linux/export.h>
 #include <linux/memblock.h>
@@ -115,10 +116,7 @@ static void __init prealloc(struct ps3_prealloc *p)
 	if (!p->size)
 		return;
 
-	p->address = memblock_alloc(p->size, p->align);
-	if (!p->address)
-		panic("%s: Failed to allocate %lu bytes align=0x%lx\n",
-		      __func__, p->size, p->align);
+	p->address = memblock_alloc_or_panic(p->size, p->align);
 
 	printk(KERN_INFO "%s: %lu bytes at %p\n", p->name, p->size,
 	       p->address);
@@ -186,7 +184,7 @@ static int ps3_set_dabr(unsigned long dabr, unsigned long dabrx)
 static ssize_t ps3_fw_version_show(struct kobject *kobj,
 	struct kobj_attribute *attr, char *buf)
 {
-	return sprintf(buf, "%s", ps3_firmware_version_str);
+	return sysfs_emit(buf, "%s\n", ps3_firmware_version_str);
 }
 
 static int __init ps3_setup_sysfs(void)
@@ -264,9 +262,6 @@ static int __init ps3_probe(void)
 {
 	DBG(" -> %s:%d\n", __func__, __LINE__);
 
-	if (!of_machine_is_compatible("sony,ps3"))
-		return 0;
-
 	ps3_os_area_save_params();
 
 	pm_power_off = ps3_power_off;
@@ -291,6 +286,7 @@ static void ps3_kexec_cpu_down(int crash_shutdown, int secondary)
 
 define_machine(ps3) {
 	.name				= "PS3",
+	.compatible			= "sony,ps3",
 	.probe				= ps3_probe,
 	.setup_arch			= ps3_setup_arch,
 	.init_IRQ			= ps3_init_IRQ,

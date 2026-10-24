@@ -9,6 +9,7 @@
 #include <linux/export.h>
 #include <linux/uaccess.h>
 #include <linux/highmem.h>
+#include <linux/libnvdimm.h>
 
 /*
  * Zero Userspace
@@ -17,7 +18,7 @@
 #ifdef CONFIG_ARCH_HAS_UACCESS_FLUSHCACHE
 /**
  * clean_cache_range - write back a cache range with CLWB
- * @vaddr:	virtual start address
+ * @addr:	virtual start address
  * @size:	number of bytes to write back
  *
  * Write back a cache range using the CLWB (cache line write back)
@@ -42,13 +43,17 @@ void arch_wb_cache_pmem(void *addr, size_t size)
 }
 EXPORT_SYMBOL_GPL(arch_wb_cache_pmem);
 
-long __copy_user_flushcache(void *dst, const void __user *src, unsigned size)
+size_t copy_user_flushcache(void *dst, const void __user *src, size_t size)
 {
 	unsigned long flushed, dest = (unsigned long) dst;
-	long rc = __copy_user_nocache(dst, src, size, 0);
+	unsigned long rc;
+
+	src = masked_user_access_begin(src);
+	rc = copy_to_nontemporal(dst, (__force const void *)src, size);
+	user_access_end();
 
 	/*
-	 * __copy_user_nocache() uses non-temporal stores for the bulk
+	 * copy_to_nontemporal() uses non-temporal stores for the bulk
 	 * of the transfer, but we need to manually flush if the
 	 * transfer is unaligned. A cached memory copy is used when
 	 * destination or size is not naturally aligned. That is:
@@ -136,13 +141,4 @@ void __memcpy_flushcache(void *_dst, const void *_src, size_t size)
 	}
 }
 EXPORT_SYMBOL_GPL(__memcpy_flushcache);
-
-void memcpy_page_flushcache(char *to, struct page *page, size_t offset,
-		size_t len)
-{
-	char *from = kmap_atomic(page);
-
-	memcpy_flushcache(to, from + offset, len);
-	kunmap_atomic(from);
-}
 #endif

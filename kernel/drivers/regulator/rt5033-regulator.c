@@ -116,7 +116,7 @@ static int rt5033_regulator_probe(struct platform_device *pdev)
 }
 
 static const struct platform_device_id rt5033_regulator_id[] = {
-	{ "rt5033-regulator", },
+	{ .name = "rt5033-regulator" },
 	{ }
 };
 MODULE_DEVICE_TABLE(platform, rt5033_regulator_id);
@@ -124,6 +124,7 @@ MODULE_DEVICE_TABLE(platform, rt5033_regulator_id);
 static struct platform_driver rt5033_regulator_driver = {
 	.driver = {
 		.name = "rt5033-regulator",
+		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
 	},
 	.probe		= rt5033_regulator_probe,
 	.id_table	= rt5033_regulator_id,

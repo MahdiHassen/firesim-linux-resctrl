@@ -73,14 +73,14 @@ restore_sigcontext(struct sigcontext __user *sc, struct pt_regs *regs)
 	return err;
 }
 
-void
+asmlinkage void
 sys_rt_sigreturn(struct pt_regs *regs, int in_syscall)
 {
 	struct rt_sigframe __user *frame;
 	sigset_t set;
 	unsigned long usp = (regs->gr[30] & ~(0x01UL));
 	unsigned long sigframe_size = PARISC_RT_SIGFRAME_SIZE;
-#ifdef CONFIG_64BIT
+#ifdef CONFIG_COMPAT
 	struct compat_rt_sigframe __user * compat_frame;
 	
 	if (is_compat_task())
@@ -96,7 +96,7 @@ sys_rt_sigreturn(struct pt_regs *regs, int in_syscall)
 
 	regs->orig_r28 = 1; /* no restarts for sigreturn */
 
-#ifdef CONFIG_64BIT
+#ifdef CONFIG_COMPAT
 	compat_frame = (struct compat_rt_sigframe __user *)frame;
 	
 	if (is_compat_task()) {
@@ -112,7 +112,7 @@ sys_rt_sigreturn(struct pt_regs *regs, int in_syscall)
 	set_current_blocked(&set);
 
 	/* Good thing we saved the old gr[30], eh? */
-#ifdef CONFIG_64BIT
+#ifdef CONFIG_COMPAT
 	if (is_compat_task()) {
 		DBG(1, "%s: compat_frame->uc.uc_mcontext 0x%p\n",
 				__func__, &compat_frame->uc.uc_mcontext);
@@ -176,7 +176,7 @@ get_sigframe(struct k_sigaction *ka, unsigned long sp, size_t frame_size)
 }
 
 static long
-setup_sigcontext(struct sigcontext __user *sc, struct pt_regs *regs, int in_syscall)
+setup_sigcontext(struct sigcontext __user *sc, struct pt_regs *regs, long in_syscall)
 		 
 {
 	unsigned long flags = 0;
@@ -211,20 +211,20 @@ setup_sigcontext(struct sigcontext __user *sc, struct pt_regs *regs, int in_sysc
 
 static long
 setup_rt_frame(struct ksignal *ksig, sigset_t *set, struct pt_regs *regs,
-	       int in_syscall)
+	       long in_syscall)
 {
 	struct rt_sigframe __user *frame;
 	unsigned long rp, usp;
 	unsigned long haddr, sigframe_size;
 	unsigned long start;
 	int err = 0;
-#ifdef CONFIG_64BIT
+#ifdef CONFIG_COMPAT
 	struct compat_rt_sigframe __user * compat_frame;
 #endif
-	
+
 	usp = (regs->gr[30] & ~(0x01UL));
 	sigframe_size = PARISC_RT_SIGFRAME_SIZE;
-#ifdef CONFIG_64BIT
+#ifdef CONFIG_COMPAT
 	if (is_compat_task()) {
 		/* The gcc alloca implementation leaves garbage in the upper 32 bits of sp */
 		usp = (compat_uint_t)usp;
@@ -239,7 +239,7 @@ setup_rt_frame(struct ksignal *ksig, sigset_t *set, struct pt_regs *regs,
 	if (start >= TASK_SIZE_MAX - sigframe_size)
 		return -EFAULT;
 	
-#ifdef CONFIG_64BIT
+#ifdef CONFIG_COMPAT
 
 	compat_frame = (struct compat_rt_sigframe __user *)frame;
 	
@@ -349,8 +349,8 @@ setup_rt_frame(struct ksignal *ksig, sigset_t *set, struct pt_regs *regs,
 
 	regs->gr[2]  = rp;			/* userland return pointer */
 	regs->gr[26] = ksig->sig;               /* signal number */
-	
-#ifdef CONFIG_64BIT
+
+#ifdef CONFIG_COMPAT
 	if (is_compat_task()) {
 		regs->gr[25] = A(&compat_frame->info); /* siginfo pointer */
 		regs->gr[24] = A(&compat_frame->uc);   /* ucontext pointer */
@@ -380,7 +380,7 @@ setup_rt_frame(struct ksignal *ksig, sigset_t *set, struct pt_regs *regs,
  */	
 
 static void
-handle_signal(struct ksignal *ksig, struct pt_regs *regs, int in_syscall)
+handle_signal(struct ksignal *ksig, struct pt_regs *regs, long in_syscall)
 {
 	int ret;
 	sigset_t *oldset = sigmask_to_save();
@@ -423,7 +423,7 @@ static void check_syscallno_in_delay_branch(struct pt_regs *regs)
 	regs->gr[31] -= 8; /* delayed branching */
 
 	/* Get assembler opcode of code in delay branch */
-	uaddr = (unsigned int *) ((regs->gr[31] & ~3) + 4);
+	uaddr = (u32 __user *) ((regs->gr[31] & ~3) + 4);
 	err = get_user(opcode, uaddr);
 	if (err)
 		return;
@@ -578,7 +578,7 @@ static void do_signal(struct pt_regs *regs, long in_syscall)
 	restore_saved_sigmask();
 }
 
-void do_notify_resume(struct pt_regs *regs, long in_syscall)
+asmlinkage void do_notify_resume(struct pt_regs *regs, long in_syscall)
 {
 	if (test_thread_flag(TIF_SIGPENDING) ||
 	    test_thread_flag(TIF_NOTIFY_SIGNAL))

@@ -314,8 +314,8 @@ static int mt6380_regulator_probe(struct platform_device *pdev)
 }
 
 static const struct platform_device_id mt6380_platform_ids[] = {
-	{"mt6380-regulator", 0},
-	{ /* sentinel */ },
+	{ .name = "mt6380-regulator" },
+	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(platform, mt6380_platform_ids);
 
@@ -328,6 +328,7 @@ MODULE_DEVICE_TABLE(of, mt6380_of_match);
 static struct platform_driver mt6380_regulator_driver = {
 	.driver = {
 		.name = "mt6380-regulator",
+		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
 		.of_match_table = of_match_ptr(mt6380_of_match),
 	},
 	.probe = mt6380_regulator_probe,

@@ -128,7 +128,7 @@ static int wf_lm87_probe(struct i2c_client *client)
 		return -ENODEV;
 	}
 
-	lm = kzalloc(sizeof(struct wf_lm87_sensor), GFP_KERNEL);
+	lm = kzalloc_obj(struct wf_lm87_sensor);
 	if (lm == NULL)
 		return -ENODEV;
 
@@ -156,7 +156,7 @@ static void wf_lm87_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id wf_lm87_id[] = {
-	{ "MAC,lm87cimt", 0 },
+	{ "MAC,lm87cimt" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, wf_lm87_id);
@@ -172,7 +172,7 @@ static struct i2c_driver wf_lm87_driver = {
 		.name	= "wf_lm87",
 		.of_match_table = wf_lm87_of_id,
 	},
-	.probe_new	= wf_lm87_probe,
+	.probe		= wf_lm87_probe,
 	.remove		= wf_lm87_remove,
 	.id_table	= wf_lm87_id,
 };

@@ -386,8 +386,8 @@ static void lm3646_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id lm3646_id_table[] = {
-	{LM3646_NAME, 0},
-	{}
+	{ .name = LM3646_NAME },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(i2c, lm3646_id_table);
@@ -396,7 +396,7 @@ static struct i2c_driver lm3646_i2c_driver = {
 	.driver = {
 		   .name = LM3646_NAME,
 		   },
-	.probe_new = lm3646_probe,
+	.probe = lm3646_probe,
 	.remove = lm3646_remove,
 	.id_table = lm3646_id_table,
 };

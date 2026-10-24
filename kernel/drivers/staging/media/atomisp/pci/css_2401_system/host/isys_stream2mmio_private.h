@@ -2,15 +2,6 @@
 /*
  * Support for Intel Camera Imaging ISP subsystem.
  * Copyright (c) 2015, Intel Corporation.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
  */
 
 #ifndef __ISYS_STREAM2MMIO_PRIVATE_H_INCLUDED__
@@ -50,9 +41,8 @@ STORAGE_CLASS_STREAM2MMIO_C void stream2mmio_get_state(
 	 * Get the values of the register-set per
 	 * stream2mmio-controller sids.
 	 */
-	for (i = STREAM2MMIO_SID0_ID; i < N_STREAM2MMIO_SID_PROCS[ID]; i++) {
+	for (i = STREAM2MMIO_SID0_ID; i < N_STREAM2MMIO_SID_PROCS[ID]; i++)
 		stream2mmio_get_sid_state(ID, i, &state->sid_state[i]);
-	}
 }
 
 /**

@@ -17,7 +17,10 @@ description: |
 
 properties:
   compatible:
-    const: ite,it66121
+    enum:
+      - ite,it66121
+      - ite,it66122
+      - ite,it6610
 
   reg:
     maxItems: 1
@@ -82,7 +85,10 @@ required:
   - interrupts
   - ports
 
-additionalProperties: false
+allOf:
+  - $ref: /schemas/sound/dai-common.yaml#
+
+unevaluatedProperties: false
 
 examples:
   - |

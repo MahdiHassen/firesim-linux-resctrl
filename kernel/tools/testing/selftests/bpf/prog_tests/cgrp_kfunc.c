@@ -4,12 +4,11 @@
 #define _GNU_SOURCE
 #include <cgroup_helpers.h>
 #include <test_progs.h>
+#include <sched.h>
+#include <sys/wait.h>
 
 #include "cgrp_kfunc_failure.skel.h"
 #include "cgrp_kfunc_success.skel.h"
-
-static size_t log_buf_sz = 1 << 20; /* 1 MB */
-static char obj_log_buf[1048576];
 
 static struct cgrp_kfunc_success *open_load_cgrp_kfunc_skel(void)
 {
@@ -87,65 +86,73 @@ static const char * const success_tests[] = {
 	"test_cgrp_xchg_release",
 	"test_cgrp_get_release",
 	"test_cgrp_get_ancestors",
+	"test_cgrp_from_id",
 };
 
-static struct {
-	const char *prog_name;
-	const char *expected_err_msg;
-} failure_tests[] = {
-	{"cgrp_kfunc_acquire_untrusted", "R1 must be referenced or trusted"},
-	{"cgrp_kfunc_acquire_fp", "arg#0 pointer type STRUCT cgroup must point"},
-	{"cgrp_kfunc_acquire_unsafe_kretprobe", "reg type unsupported for arg#0 function"},
-	{"cgrp_kfunc_acquire_trusted_walked", "R1 must be referenced or trusted"},
-	{"cgrp_kfunc_acquire_null", "arg#0 pointer type STRUCT cgroup must point"},
-	{"cgrp_kfunc_acquire_unreleased", "Unreleased reference"},
-	{"cgrp_kfunc_get_non_kptr_param", "arg#0 expected pointer to map value"},
-	{"cgrp_kfunc_get_non_kptr_acquired", "arg#0 expected pointer to map value"},
-	{"cgrp_kfunc_get_null", "arg#0 expected pointer to map value"},
-	{"cgrp_kfunc_xchg_unreleased", "Unreleased reference"},
-	{"cgrp_kfunc_get_unreleased", "Unreleased reference"},
-	{"cgrp_kfunc_release_untrusted", "arg#0 is untrusted_ptr_or_null_ expected ptr_ or socket"},
-	{"cgrp_kfunc_release_fp", "arg#0 pointer type STRUCT cgroup must point"},
-	{"cgrp_kfunc_release_null", "arg#0 is ptr_or_null_ expected ptr_ or socket"},
-	{"cgrp_kfunc_release_unacquired", "release kernel function bpf_cgroup_release expects"},
-};
-
-static void verify_fail(const char *prog_name, const char *expected_err_msg)
+static void test_cgrp_from_id_ns(void)
 {
-	LIBBPF_OPTS(bpf_object_open_opts, opts);
-	struct cgrp_kfunc_failure *skel;
-	int err, i;
+	LIBBPF_OPTS(bpf_test_run_opts, opts);
+	struct cgrp_kfunc_success *skel;
+	struct bpf_program *prog;
+	int pid, pipe_fd[2];
 
-	opts.kernel_log_buf = obj_log_buf;
-	opts.kernel_log_size = log_buf_sz;
-	opts.kernel_log_level = 1;
+	skel = open_load_cgrp_kfunc_skel();
+	if (!ASSERT_OK_PTR(skel, "open_load_skel"))
+		return;
 
-	skel = cgrp_kfunc_failure__open_opts(&opts);
-	if (!ASSERT_OK_PTR(skel, "cgrp_kfunc_failure__open_opts"))
+	if (!ASSERT_OK(skel->bss->err, "pre_mkdir_err"))
 		goto cleanup;
 
-	for (i = 0; i < ARRAY_SIZE(failure_tests); i++) {
-		struct bpf_program *prog;
-		const char *curr_name = failure_tests[i].prog_name;
+	prog = skel->progs.test_cgrp_from_id_ns;
 
-		prog = bpf_object__find_program_by_name(skel->obj, curr_name);
-		if (!ASSERT_OK_PTR(prog, "bpf_object__find_program_by_name"))
-			goto cleanup;
-
-		bpf_program__set_autoload(prog, !strcmp(curr_name, prog_name));
-	}
-
-	err = cgrp_kfunc_failure__load(skel);
-	if (!ASSERT_ERR(err, "unexpected load success"))
+	if (!ASSERT_OK(pipe(pipe_fd), "pipe"))
 		goto cleanup;
 
-	if (!ASSERT_OK_PTR(strstr(obj_log_buf, expected_err_msg), "expected_err_msg")) {
-		fprintf(stderr, "Expected err_msg: %s\n", expected_err_msg);
-		fprintf(stderr, "Verifier output: %s\n", obj_log_buf);
+	pid = fork();
+	if (!ASSERT_GE(pid, 0, "fork result")) {
+		close(pipe_fd[0]);
+		close(pipe_fd[1]);
+		goto cleanup;
 	}
 
+	if (pid == 0) {
+		int ret = 0;
+
+		close(pipe_fd[0]);
+
+		if (!ASSERT_GE(cgroup_setup_and_join("cgrp_from_id_ns"), 0, "join cgroup"))
+			exit(1);
+
+		if (!ASSERT_OK(unshare(CLONE_NEWCGROUP), "unshare cgns"))
+			exit(1);
+
+		ret = bpf_prog_test_run_opts(bpf_program__fd(prog), &opts);
+		if (!ASSERT_OK(ret, "test run ret"))
+			exit(1);
+
+		if (!ASSERT_OK(opts.retval, "test run retval"))
+			exit(1);
+
+		if (!ASSERT_EQ(write(pipe_fd[1], &ret, sizeof(ret)), sizeof(ret), "write pipe"))
+			exit(1);
+
+		exit(0);
+	} else {
+		int res;
+
+		close(pipe_fd[1]);
+
+		ASSERT_EQ(read(pipe_fd[0], &res, sizeof(res)), sizeof(res), "read res");
+		ASSERT_EQ(waitpid(pid, NULL, 0), pid, "wait on child");
+
+		remove_cgroup_pid("cgrp_from_id_ns", pid);
+
+		ASSERT_OK(res, "result from run");
+	}
+
+	close(pipe_fd[0]);
 cleanup:
-	cgrp_kfunc_failure__destroy(skel);
+	cgrp_kfunc_success__destroy(skel);
 }
 
 void test_cgrp_kfunc(void)
@@ -163,12 +170,10 @@ void test_cgrp_kfunc(void)
 		run_success_test(success_tests[i]);
 	}
 
-	for (i = 0; i < ARRAY_SIZE(failure_tests); i++) {
-		if (!test__start_subtest(failure_tests[i].prog_name))
-			continue;
+	if (test__start_subtest("test_cgrp_from_id_ns"))
+		test_cgrp_from_id_ns();
 
-		verify_fail(failure_tests[i].prog_name, failure_tests[i].expected_err_msg);
-	}
+	RUN_TESTS(cgrp_kfunc_failure);
 
 cleanup:
 	cleanup_cgroup_environment();

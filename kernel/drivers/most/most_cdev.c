@@ -19,11 +19,14 @@
 
 #define CHRDEV_REGION_SIZE 50
 
+static const struct class most_cdev_class = {
+	.name		= "most_cdev"
+};
+
 static struct cdev_component {
 	dev_t devno;
 	struct ida minor_id;
 	unsigned int major;
-	struct class *class;
 	struct most_component cc;
 } comp;
 
@@ -91,7 +94,7 @@ static void destroy_cdev(struct comp_channel *c)
 {
 	unsigned long flags;
 
-	device_destroy(comp.class, c->devno);
+	device_destroy(&most_cdev_class, c->devno);
 	cdev_del(&c->cdev);
 	spin_lock_irqsave(&ch_list_lock, flags);
 	list_del(&c->list);
@@ -100,7 +103,7 @@ static void destroy_cdev(struct comp_channel *c)
 
 static void destroy_channel(struct comp_channel *c)
 {
-	ida_simple_remove(&comp.minor_id, MINOR(c->devno));
+	ida_free(&comp.minor_id, MINOR(c->devno));
 	kfifo_free(&c->fifo);
 	kfree(c);
 }
@@ -297,7 +300,7 @@ static __poll_t comp_poll(struct file *filp, poll_table *wait)
 	return mask;
 }
 
-/**
+/*
  * Initialization of struct file_operations
  */
 static const struct file_operations channel_fops = {
@@ -404,8 +407,9 @@ static int comp_tx_completion(struct most_interface *iface, int channel_id)
  * @channel_id: channel index/ID
  * @cfg: pointer to actual channel configuration
  * @name: name of the device to be created
+ * @args: pointer to array of component parameters (from configfs)
  *
- * This allocates achannel object and creates the device node in /dev
+ * This allocates a channel object and creates the device node in /dev
  *
  * Returns 0 on success or error code otherwise.
  */
@@ -424,11 +428,11 @@ static int comp_probe(struct most_interface *iface, int channel_id,
 	if (c)
 		return -EEXIST;
 
-	current_minor = ida_simple_get(&comp.minor_id, 0, 0, GFP_KERNEL);
+	current_minor = ida_alloc(&comp.minor_id, GFP_KERNEL);
 	if (current_minor < 0)
 		return current_minor;
 
-	c = kzalloc(sizeof(*c), GFP_KERNEL);
+	c = kzalloc_obj(*c);
 	if (!c) {
 		retval = -ENOMEM;
 		goto err_remove_ida;
@@ -454,7 +458,7 @@ static int comp_probe(struct most_interface *iface, int channel_id,
 	spin_lock_irqsave(&ch_list_lock, cl_flags);
 	list_add_tail(&c->list, &channel_list);
 	spin_unlock_irqrestore(&ch_list_lock, cl_flags);
-	c->dev = device_create(comp.class, NULL, c->devno, NULL, "%s", name);
+	c->dev = device_create(&most_cdev_class, NULL, c->devno, NULL, "%s", name);
 
 	if (IS_ERR(c->dev)) {
 		retval = PTR_ERR(c->dev);
@@ -471,7 +475,7 @@ err_del_cdev_and_free_channel:
 err_free_c:
 	kfree(c);
 err_remove_ida:
-	ida_simple_remove(&comp.minor_id, current_minor);
+	ida_free(&comp.minor_id, current_minor);
 	return retval;
 }
 
@@ -486,13 +490,14 @@ static struct cdev_component comp = {
 	},
 };
 
+
 static int __init most_cdev_init(void)
 {
 	int err;
 
-	comp.class = class_create(THIS_MODULE, "most_cdev");
-	if (IS_ERR(comp.class))
-		return PTR_ERR(comp.class);
+	err = class_register(&most_cdev_class);
+	if (err)
+		return err;
 
 	ida_init(&comp.minor_id);
 
@@ -514,7 +519,7 @@ free_cdev:
 	unregister_chrdev_region(comp.devno, CHRDEV_REGION_SIZE);
 dest_ida:
 	ida_destroy(&comp.minor_id);
-	class_destroy(comp.class);
+	class_unregister(&most_cdev_class);
 	return err;
 }
 
@@ -531,7 +536,7 @@ static void __exit most_cdev_exit(void)
 	}
 	unregister_chrdev_region(comp.devno, CHRDEV_REGION_SIZE);
 	ida_destroy(&comp.minor_id);
-	class_destroy(comp.class);
+	class_unregister(&most_cdev_class);
 }
 
 module_init(most_cdev_init);

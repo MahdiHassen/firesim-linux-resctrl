@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 /*
- * Copyright (C) 2012-2014, 2018-2022 Intel Corporation
+ * Copyright (C) 2012-2014, 2018-2026 Intel Corporation
  * Copyright (C) 2013-2014 Intel Mobile Communications GmbH
  * Copyright (C) 2015-2017 Intel Deutschland GmbH
  */
@@ -128,19 +128,11 @@ static void iwl_fwrt_dump_umac_error_log(struct iwl_fw_runtime *fwrt)
 
 	IWL_ERR(fwrt, "0x%08X | %s\n", table.error_id,
 		iwl_fw_lookup_assert_desc(table.error_id));
-	IWL_ERR(fwrt, "0x%08X | umac branchlink1\n", table.blink1);
-	IWL_ERR(fwrt, "0x%08X | umac branchlink2\n", table.blink2);
-	IWL_ERR(fwrt, "0x%08X | umac interruptlink1\n", table.ilink1);
 	IWL_ERR(fwrt, "0x%08X | umac interruptlink2\n", table.ilink2);
 	IWL_ERR(fwrt, "0x%08X | umac data1\n", table.data1);
 	IWL_ERR(fwrt, "0x%08X | umac data2\n", table.data2);
 	IWL_ERR(fwrt, "0x%08X | umac data3\n", table.data3);
-	IWL_ERR(fwrt, "0x%08X | umac major\n", table.umac_major);
-	IWL_ERR(fwrt, "0x%08X | umac minor\n", table.umac_minor);
-	IWL_ERR(fwrt, "0x%08X | frame pointer\n", table.frame_pointer);
-	IWL_ERR(fwrt, "0x%08X | stack pointer\n", table.stack_pointer);
 	IWL_ERR(fwrt, "0x%08X | last host cmd\n", table.cmd_header);
-	IWL_ERR(fwrt, "0x%08X | isr status reg\n", table.nic_isr_pref);
 }
 
 static void iwl_fwrt_dump_lmac_error_log(struct iwl_fw_runtime *fwrt, u8 lmac_num)
@@ -157,8 +149,7 @@ static void iwl_fwrt_dump_lmac_error_log(struct iwl_fw_runtime *fwrt, u8 lmac_nu
 			base = fwrt->fw->inst_errlog_ptr;
 	}
 
-	if ((fwrt->trans->trans_cfg->device_family >= IWL_DEVICE_FAMILY_BZ && !base) ||
-	    (fwrt->trans->trans_cfg->device_family < IWL_DEVICE_FAMILY_BZ && base < 0x400000)) {
+	if (!base) {
 		IWL_ERR(fwrt,
 			"Not valid error log pointer 0x%08X for %s uCode\n",
 			base,
@@ -169,17 +160,17 @@ static void iwl_fwrt_dump_lmac_error_log(struct iwl_fw_runtime *fwrt, u8 lmac_nu
 
 	/* check if there is a HW error */
 	val = iwl_trans_read_mem32(trans, base);
-	if (((val & ~0xf) == 0xa5a5a5a0) || ((val & ~0xf) == 0x5a5a5a50)) {
+	if (iwl_trans_is_hw_error_value(val)) {
 		int err;
 
 		IWL_ERR(trans, "HW error, resetting before reading\n");
 
 		/* reset the device */
-		err = iwl_trans_sw_reset(trans, true);
+		err = iwl_trans_sw_reset(trans);
 		if (err)
 			return;
 
-		err = iwl_finish_nic_init(trans);
+		err = iwl_trans_activate_nic(trans);
 		if (err)
 			return;
 	}
@@ -201,39 +192,10 @@ static void iwl_fwrt_dump_lmac_error_log(struct iwl_fw_runtime *fwrt, u8 lmac_nu
 
 	IWL_ERR(fwrt, "0x%08X | %-28s\n", table.error_id,
 		iwl_fw_lookup_assert_desc(table.error_id));
-	IWL_ERR(fwrt, "0x%08X | trm_hw_status0\n", table.trm_hw_status0);
-	IWL_ERR(fwrt, "0x%08X | trm_hw_status1\n", table.trm_hw_status1);
-	IWL_ERR(fwrt, "0x%08X | branchlink2\n", table.blink2);
-	IWL_ERR(fwrt, "0x%08X | interruptlink1\n", table.ilink1);
 	IWL_ERR(fwrt, "0x%08X | interruptlink2\n", table.ilink2);
 	IWL_ERR(fwrt, "0x%08X | data1\n", table.data1);
 	IWL_ERR(fwrt, "0x%08X | data2\n", table.data2);
 	IWL_ERR(fwrt, "0x%08X | data3\n", table.data3);
-	IWL_ERR(fwrt, "0x%08X | beacon time\n", table.bcon_time);
-	IWL_ERR(fwrt, "0x%08X | tsf low\n", table.tsf_low);
-	IWL_ERR(fwrt, "0x%08X | tsf hi\n", table.tsf_hi);
-	IWL_ERR(fwrt, "0x%08X | time gp1\n", table.gp1);
-	IWL_ERR(fwrt, "0x%08X | time gp2\n", table.gp2);
-	IWL_ERR(fwrt, "0x%08X | uCode revision type\n", table.fw_rev_type);
-	IWL_ERR(fwrt, "0x%08X | uCode version major\n", table.major);
-	IWL_ERR(fwrt, "0x%08X | uCode version minor\n", table.minor);
-	IWL_ERR(fwrt, "0x%08X | hw version\n", table.hw_ver);
-	IWL_ERR(fwrt, "0x%08X | board version\n", table.brd_ver);
-	IWL_ERR(fwrt, "0x%08X | hcmd\n", table.hcmd);
-	IWL_ERR(fwrt, "0x%08X | isr0\n", table.isr0);
-	IWL_ERR(fwrt, "0x%08X | isr1\n", table.isr1);
-	IWL_ERR(fwrt, "0x%08X | isr2\n", table.isr2);
-	IWL_ERR(fwrt, "0x%08X | isr3\n", table.isr3);
-	IWL_ERR(fwrt, "0x%08X | isr4\n", table.isr4);
-	IWL_ERR(fwrt, "0x%08X | last cmd Id\n", table.last_cmd_id);
-	IWL_ERR(fwrt, "0x%08X | wait_event\n", table.wait_event);
-	IWL_ERR(fwrt, "0x%08X | l2p_control\n", table.l2p_control);
-	IWL_ERR(fwrt, "0x%08X | l2p_duration\n", table.l2p_duration);
-	IWL_ERR(fwrt, "0x%08X | l2p_mhvalid\n", table.l2p_mhvalid);
-	IWL_ERR(fwrt, "0x%08X | l2p_addr_match\n", table.l2p_addr_match);
-	IWL_ERR(fwrt, "0x%08X | lmpm_pmg_sel\n", table.lmpm_pmg_sel);
-	IWL_ERR(fwrt, "0x%08X | timestamp\n", table.u_timestamp);
-	IWL_ERR(fwrt, "0x%08X | flow_handler\n", table.flow_handler);
 }
 
 /*
@@ -265,7 +227,6 @@ static void iwl_fwrt_dump_tcm_error_log(struct iwl_fw_runtime *fwrt, int idx)
 	struct iwl_trans *trans = fwrt->trans;
 	struct iwl_tcm_error_event_table table = {};
 	u32 base = fwrt->trans->dbg.tcm_error_event_table[idx];
-	int i;
 	u32 flag = idx ? IWL_ERROR_EVENT_TABLE_TCM2 :
 			 IWL_ERROR_EVENT_TABLE_TCM1;
 
@@ -276,23 +237,10 @@ static void iwl_fwrt_dump_tcm_error_log(struct iwl_fw_runtime *fwrt, int idx)
 
 	IWL_ERR(fwrt, "TCM%d status:\n", idx + 1);
 	IWL_ERR(fwrt, "0x%08X | error ID\n", table.error_id);
-	IWL_ERR(fwrt, "0x%08X | tcm branchlink2\n", table.blink2);
-	IWL_ERR(fwrt, "0x%08X | tcm interruptlink1\n", table.ilink1);
 	IWL_ERR(fwrt, "0x%08X | tcm interruptlink2\n", table.ilink2);
 	IWL_ERR(fwrt, "0x%08X | tcm data1\n", table.data1);
 	IWL_ERR(fwrt, "0x%08X | tcm data2\n", table.data2);
 	IWL_ERR(fwrt, "0x%08X | tcm data3\n", table.data3);
-	IWL_ERR(fwrt, "0x%08X | tcm log PC\n", table.logpc);
-	IWL_ERR(fwrt, "0x%08X | tcm frame pointer\n", table.frame_pointer);
-	IWL_ERR(fwrt, "0x%08X | tcm stack pointer\n", table.stack_pointer);
-	IWL_ERR(fwrt, "0x%08X | tcm msg ID\n", table.msgid);
-	IWL_ERR(fwrt, "0x%08X | tcm ISR status\n", table.isr);
-	for (i = 0; i < ARRAY_SIZE(table.hw_status); i++)
-		IWL_ERR(fwrt, "0x%08X | tcm HW status[%d]\n",
-			table.hw_status[i], i);
-	for (i = 0; i < ARRAY_SIZE(table.sw_status); i++)
-		IWL_ERR(fwrt, "0x%08X | tcm SW status[%d]\n",
-			table.sw_status[i], i);
 }
 
 /*
@@ -339,26 +287,10 @@ static void iwl_fwrt_dump_rcm_error_log(struct iwl_fw_runtime *fwrt, int idx)
 
 	IWL_ERR(fwrt, "RCM%d status:\n", idx + 1);
 	IWL_ERR(fwrt, "0x%08X | error ID\n", table.error_id);
-	IWL_ERR(fwrt, "0x%08X | rcm branchlink2\n", table.blink2);
-	IWL_ERR(fwrt, "0x%08X | rcm interruptlink1\n", table.ilink1);
 	IWL_ERR(fwrt, "0x%08X | rcm interruptlink2\n", table.ilink2);
 	IWL_ERR(fwrt, "0x%08X | rcm data1\n", table.data1);
 	IWL_ERR(fwrt, "0x%08X | rcm data2\n", table.data2);
 	IWL_ERR(fwrt, "0x%08X | rcm data3\n", table.data3);
-	IWL_ERR(fwrt, "0x%08X | rcm log PC\n", table.logpc);
-	IWL_ERR(fwrt, "0x%08X | rcm frame pointer\n", table.frame_pointer);
-	IWL_ERR(fwrt, "0x%08X | rcm stack pointer\n", table.stack_pointer);
-	IWL_ERR(fwrt, "0x%08X | rcm msg ID\n", table.msgid);
-	IWL_ERR(fwrt, "0x%08X | rcm ISR status\n", table.isr);
-	IWL_ERR(fwrt, "0x%08X | frame HW status\n", table.frame_hw_status);
-	IWL_ERR(fwrt, "0x%08X | LMAC-to-RCM request mbox\n",
-		table.mbx_lmac_to_rcm_req);
-	IWL_ERR(fwrt, "0x%08X | RCM-to-LMAC request mbox\n",
-		table.mbx_rcm_to_lmac_req);
-	IWL_ERR(fwrt, "0x%08X | MAC header control\n", table.mh_ctl);
-	IWL_ERR(fwrt, "0x%08X | MAC header addr1 low\n", table.mh_addr1_lo);
-	IWL_ERR(fwrt, "0x%08X | MAC header info\n", table.mh_info);
-	IWL_ERR(fwrt, "0x%08X | MAC header error\n", table.mh_err);
 }
 
 static void iwl_fwrt_dump_iml_error_log(struct iwl_fw_runtime *fwrt)
@@ -366,10 +298,10 @@ static void iwl_fwrt_dump_iml_error_log(struct iwl_fw_runtime *fwrt)
 	struct iwl_trans *trans = fwrt->trans;
 	u32 error, data1;
 
-	if (fwrt->trans->trans_cfg->device_family >= IWL_DEVICE_FAMILY_22000) {
+	if (fwrt->trans->mac_cfg->device_family >= IWL_DEVICE_FAMILY_22000) {
 		error = UMAG_SB_CPU_2_STATUS;
 		data1 = UMAG_SB_CPU_1_STATUS;
-	} else if (fwrt->trans->trans_cfg->device_family >=
+	} else if (fwrt->trans->mac_cfg->device_family >=
 		   IWL_DEVICE_FAMILY_8000) {
 		error = SB_CPU_2_STATUS;
 		data1 = SB_CPU_1_STATUS;
@@ -388,7 +320,7 @@ static void iwl_fwrt_dump_iml_error_log(struct iwl_fw_runtime *fwrt)
 	IWL_ERR(fwrt, "0x%08X | IML/ROM data1\n",
 		iwl_read_umac_prph(trans, data1));
 
-	if (fwrt->trans->trans_cfg->device_family >= IWL_DEVICE_FAMILY_22000)
+	if (fwrt->trans->mac_cfg->device_family >= IWL_DEVICE_FAMILY_22000)
 		IWL_ERR(fwrt, "0x%08X | IML/ROM WFPM_AUTH_KEY_0\n",
 			iwl_read_umac_prph(trans, SB_MODIFY_CFG_FLAG));
 }
@@ -415,6 +347,10 @@ static void iwl_fwrt_dump_fseq_regs(struct iwl_fw_runtime *fwrt)
 		FSEQ_REG(CNVR_AUX_MISC_CHIP),
 		FSEQ_REG(CNVR_SCU_SD_REGS_SD_REG_DIG_DCDC_VTRIM),
 		FSEQ_REG(CNVR_SCU_SD_REGS_SD_REG_ACTIVE_VDIG_MIRROR),
+		FSEQ_REG(FSEQ_PREV_CNVIO_INIT_VERSION),
+		FSEQ_REG(FSEQ_WIFI_FSEQ_VERSION),
+		FSEQ_REG(FSEQ_BT_FSEQ_VERSION),
+		FSEQ_REG(FSEQ_CLASS_TP_VERSION),
 	};
 
 	if (!iwl_trans_grab_nic_access(trans))
@@ -432,7 +368,10 @@ static void iwl_fwrt_dump_fseq_regs(struct iwl_fw_runtime *fwrt)
 
 void iwl_fwrt_dump_error_logs(struct iwl_fw_runtime *fwrt)
 {
-	if (!test_bit(STATUS_DEVICE_ENABLED, &fwrt->trans->status)) {
+	struct iwl_pc_data *pc_data;
+	u8 count;
+
+	if (!iwl_trans_device_enabled(fwrt->trans)) {
 		IWL_ERR(fwrt,
 			"DEVICE_ENABLED bit is not set. Aborting dump.\n");
 		return;
@@ -444,12 +383,27 @@ void iwl_fwrt_dump_error_logs(struct iwl_fw_runtime *fwrt)
 	iwl_fwrt_dump_umac_error_log(fwrt);
 	iwl_fwrt_dump_tcm_error_log(fwrt, 0);
 	iwl_fwrt_dump_rcm_error_log(fwrt, 0);
-	iwl_fwrt_dump_tcm_error_log(fwrt, 1);
-	iwl_fwrt_dump_rcm_error_log(fwrt, 1);
+	if (fwrt->trans->dbg.tcm_error_event_table[1])
+		iwl_fwrt_dump_tcm_error_log(fwrt, 1);
+	if (fwrt->trans->dbg.rcm_error_event_table[1])
+		iwl_fwrt_dump_rcm_error_log(fwrt, 1);
 	iwl_fwrt_dump_iml_error_log(fwrt);
 	iwl_fwrt_dump_fseq_regs(fwrt);
+	if (fwrt->trans->mac_cfg->device_family >= IWL_DEVICE_FAMILY_22000) {
+		pc_data = fwrt->trans->dbg.pc_data;
 
-	if (fwrt->trans->trans_cfg->device_family >= IWL_DEVICE_FAMILY_BZ) {
+		if (!iwl_trans_grab_nic_access(fwrt->trans))
+			return;
+		for (count = 0; count < fwrt->trans->dbg.num_pc;
+		     count++, pc_data++)
+			IWL_ERR(fwrt, "%s: 0x%x\n",
+				pc_data->pc_name,
+				iwl_read_prph_no_grab(fwrt->trans,
+						      pc_data->pc_address));
+		iwl_trans_release_nic_access(fwrt->trans);
+	}
+
+	if (fwrt->trans->mac_cfg->device_family >= IWL_DEVICE_FAMILY_BZ) {
 		u32 scratch = iwl_read32(fwrt->trans, CSR_FUNC_SCRATCH);
 
 		IWL_ERR(fwrt, "Function Scratch status:\n");
@@ -457,3 +411,31 @@ void iwl_fwrt_dump_error_logs(struct iwl_fw_runtime *fwrt)
 	}
 }
 IWL_EXPORT_SYMBOL(iwl_fwrt_dump_error_logs);
+
+bool iwl_fwrt_read_err_table(struct iwl_trans *trans, u32 base, u32 *err_id)
+{
+	struct error_table_start {
+		/* cf. struct iwl_error_event_table */
+		u32 valid;
+		__le32 err_id;
+	} err_info = {};
+	int ret;
+
+	if (err_id)
+		*err_id = 0;
+
+	if (!base)
+		return false;
+
+	ret = iwl_trans_read_mem_bytes(trans, base,
+				       &err_info, sizeof(err_info));
+
+	if (ret)
+		return true;
+
+	if (err_info.valid && err_id)
+		*err_id = le32_to_cpu(err_info.err_id);
+
+	return !!err_info.valid;
+}
+IWL_EXPORT_SYMBOL(iwl_fwrt_read_err_table);

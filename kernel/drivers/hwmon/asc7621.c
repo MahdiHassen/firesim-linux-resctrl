@@ -1179,9 +1179,9 @@ static void asc7621_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id asc7621_id[] = {
-	{"asc7621", asc7621},
-	{"asc7621a", asc7621a},
-	{},
+	{ .name = "asc7621", .driver_data = asc7621 },
+	{ .name = "asc7621a", .driver_data = asc7621a },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(i2c, asc7621_id);
@@ -1191,7 +1191,7 @@ static struct i2c_driver asc7621_driver = {
 	.driver = {
 		.name = "asc7621",
 	},
-	.probe_new = asc7621_probe,
+	.probe = asc7621_probe,
 	.remove = asc7621_remove,
 	.id_table = asc7621_id,
 	.detect = asc7621_detect,

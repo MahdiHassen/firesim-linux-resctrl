@@ -34,10 +34,8 @@ unsigned long sdei_exit_mode;
 DECLARE_PER_CPU(unsigned long *, sdei_stack_normal_ptr);
 DECLARE_PER_CPU(unsigned long *, sdei_stack_critical_ptr);
 
-#ifdef CONFIG_VMAP_STACK
 DEFINE_PER_CPU(unsigned long *, sdei_stack_normal_ptr);
 DEFINE_PER_CPU(unsigned long *, sdei_stack_critical_ptr);
-#endif
 
 DECLARE_PER_CPU(unsigned long *, sdei_shadow_call_stack_normal_ptr);
 DECLARE_PER_CPU(unsigned long *, sdei_shadow_call_stack_critical_ptr);
@@ -46,6 +44,9 @@ DECLARE_PER_CPU(unsigned long *, sdei_shadow_call_stack_critical_ptr);
 DEFINE_PER_CPU(unsigned long *, sdei_shadow_call_stack_normal_ptr);
 DEFINE_PER_CPU(unsigned long *, sdei_shadow_call_stack_critical_ptr);
 #endif
+
+DEFINE_PER_CPU(struct sdei_registered_event *, sdei_active_normal_event);
+DEFINE_PER_CPU(struct sdei_registered_event *, sdei_active_critical_event);
 
 static void _free_sdei_stack(unsigned long * __percpu *ptr, int cpu)
 {
@@ -61,9 +62,6 @@ static void _free_sdei_stack(unsigned long * __percpu *ptr, int cpu)
 static void free_sdei_stacks(void)
 {
 	int cpu;
-
-	if (!IS_ENABLED(CONFIG_VMAP_STACK))
-		return;
 
 	for_each_possible_cpu(cpu) {
 		_free_sdei_stack(&sdei_stack_normal_ptr, cpu);
@@ -87,9 +85,6 @@ static int init_sdei_stacks(void)
 {
 	int cpu;
 	int err = 0;
-
-	if (!IS_ENABLED(CONFIG_VMAP_STACK))
-		return 0;
 
 	for_each_possible_cpu(cpu) {
 		err = _init_sdei_stack(&sdei_stack_normal_ptr, cpu);
@@ -203,7 +198,7 @@ out_err:
 /*
  * do_sdei_event() returns one of:
  *  SDEI_EV_HANDLED -  success, return to the interrupted context.
- *  SDEI_EV_FAILED  -  failure, return this error code to firmare.
+ *  SDEI_EV_FAILED  -  failure, return this error code to firmware.
  *  virtual-address -  success, return to this address.
  */
 unsigned long __kprobes do_sdei_event(struct pt_regs *regs,
@@ -244,7 +239,7 @@ unsigned long __kprobes do_sdei_event(struct pt_regs *regs,
 	 * If we interrupted the kernel with interrupts masked, we always go
 	 * back to wherever we came from.
 	 */
-	if (mode == kernel_mode && !interrupts_enabled(regs))
+	if (mode == kernel_mode && regs_irqs_disabled(regs))
 		return SDEI_EV_HANDLED;
 
 	/*

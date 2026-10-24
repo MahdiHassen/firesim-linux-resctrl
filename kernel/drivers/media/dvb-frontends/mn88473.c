@@ -626,7 +626,7 @@ static int mn88473_probe(struct i2c_client *client)
 		goto err;
 	}
 
-	dev = kzalloc(sizeof(*dev), GFP_KERNEL);
+	dev = kzalloc_obj(*dev);
 	if (dev == NULL) {
 		ret = -ENOMEM;
 		goto err;
@@ -743,8 +743,8 @@ static void mn88473_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id mn88473_id_table[] = {
-	{"mn88473", 0},
-	{}
+	{ .name = "mn88473" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, mn88473_id_table);
 
@@ -753,7 +753,7 @@ static struct i2c_driver mn88473_driver = {
 		.name		     = "mn88473",
 		.suppress_bind_attrs = true,
 	},
-	.probe_new	= mn88473_probe,
+	.probe		= mn88473_probe,
 	.remove		= mn88473_remove,
 	.id_table	= mn88473_id_table,
 };

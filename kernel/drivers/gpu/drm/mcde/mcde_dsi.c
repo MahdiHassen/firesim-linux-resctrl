@@ -40,7 +40,6 @@ struct mcde_dsi {
 	struct mcde *mcde;
 	struct drm_bridge bridge;
 	struct drm_panel *panel;
-	struct drm_bridge *bridge_out;
 	struct mipi_dsi_host dsi_host;
 	struct mipi_dsi_device *mdsi;
 	const struct drm_display_mode *mode;
@@ -1048,6 +1047,7 @@ void mcde_dsi_disable(struct drm_bridge *bridge)
 }
 
 static int mcde_dsi_bridge_attach(struct drm_bridge *bridge,
+				  struct drm_encoder *encoder,
 				  enum drm_bridge_attach_flags flags)
 {
 	struct mcde_dsi *d = bridge_to_mcde_dsi(bridge);
@@ -1059,7 +1059,7 @@ static int mcde_dsi_bridge_attach(struct drm_bridge *bridge,
 	}
 
 	/* Attach the DSI bridge to the output (panel etc) bridge */
-	return drm_bridge_attach(bridge->encoder, d->bridge_out, bridge, flags);
+	return drm_bridge_attach(encoder, d->bridge.next_bridge, bridge, flags);
 }
 
 static const struct drm_bridge_funcs mcde_dsi_bridge_funcs = {
@@ -1075,7 +1075,7 @@ static int mcde_dsi_bind(struct device *dev, struct device *master,
 	struct mcde_dsi *d = dev_get_drvdata(dev);
 	struct device_node *child;
 	struct drm_panel *panel = NULL;
-	struct drm_bridge *bridge = NULL;
+	struct drm_bridge *bridge __free(drm_bridge_put) = NULL;
 
 	if (!of_get_available_child_count(dev->of_node)) {
 		dev_info(dev, "unused DSI interface\n");
@@ -1108,12 +1108,17 @@ static int mcde_dsi_bind(struct device *dev, struct device *master,
 				PTR_ERR(panel));
 			panel = NULL;
 
-			bridge = of_drm_find_bridge(child);
+			bridge = of_drm_find_and_get_bridge(child);
 			if (!bridge) {
 				dev_err(dev, "failed to find bridge\n");
 				of_node_put(child);
 				return -EINVAL;
 			}
+		}
+
+		if (panel || bridge) {
+			of_node_put(child);
+			break;
 		}
 	}
 	if (panel) {
@@ -1123,6 +1128,7 @@ static int mcde_dsi_bind(struct device *dev, struct device *master,
 			dev_err(dev, "error adding panel bridge\n");
 			return PTR_ERR(bridge);
 		}
+		drm_bridge_get(bridge);
 		dev_info(dev, "connected to panel\n");
 		d->panel = panel;
 	} else if (bridge) {
@@ -1134,10 +1140,9 @@ static int mcde_dsi_bind(struct device *dev, struct device *master,
 		return -ENODEV;
 	}
 
-	d->bridge_out = bridge;
+	d->bridge.next_bridge = drm_bridge_get(bridge);
 
 	/* Create a bridge for this DSI channel */
-	d->bridge.funcs = &mcde_dsi_bridge_funcs;
 	d->bridge.of_node = dev->of_node;
 	drm_bridge_add(&d->bridge);
 
@@ -1155,7 +1160,7 @@ static void mcde_dsi_unbind(struct device *dev, struct device *master,
 	struct mcde_dsi *d = dev_get_drvdata(dev);
 
 	if (d->panel)
-		drm_panel_bridge_remove(d->bridge_out);
+		drm_panel_bridge_remove(d->bridge.next_bridge);
 	regmap_update_bits(d->prcmu, PRCM_DSI_SW_RESET,
 			   PRCM_DSI_SW_RESET_DSI0_SW_RESETN, 0);
 }
@@ -1173,9 +1178,9 @@ static int mcde_dsi_probe(struct platform_device *pdev)
 	u32 dsi_id;
 	int ret;
 
-	d = devm_kzalloc(dev, sizeof(*d), GFP_KERNEL);
-	if (!d)
-		return -ENOMEM;
+	d = devm_drm_bridge_alloc(dev, struct mcde_dsi, bridge, &mcde_dsi_bridge_funcs);
+	if (IS_ERR(d))
+		return PTR_ERR(d);
 	d->dev = dev;
 	platform_set_drvdata(pdev, d);
 
@@ -1208,14 +1213,12 @@ static int mcde_dsi_probe(struct platform_device *pdev)
 	return component_add(dev, &mcde_dsi_component_ops);
 }
 
-static int mcde_dsi_remove(struct platform_device *pdev)
+static void mcde_dsi_remove(struct platform_device *pdev)
 {
 	struct mcde_dsi *d = platform_get_drvdata(pdev);
 
 	component_del(&pdev->dev, &mcde_dsi_component_ops);
 	mipi_dsi_host_unregister(&d->dsi_host);
-
-	return 0;
 }
 
 static const struct of_device_id mcde_dsi_of_match[] = {
@@ -1228,7 +1231,7 @@ static const struct of_device_id mcde_dsi_of_match[] = {
 struct platform_driver mcde_dsi_driver = {
 	.driver = {
 		.name           = "mcde-dsi",
-		.of_match_table = of_match_ptr(mcde_dsi_of_match),
+		.of_match_table = mcde_dsi_of_match,
 	},
 	.probe = mcde_dsi_probe,
 	.remove = mcde_dsi_remove,

@@ -1,11 +1,11 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * This file implement the Wireless Extensions core API.
  *
  * Authors :	Jean Tourrilhes - HPL - <jt@hpl.hp.com>
  * Copyright (c) 1997-2007 Jean Tourrilhes, All Rights Reserved.
  * Copyright	2009 Johannes Berg <johannes@sipsolutions.net>
- *
- * (As all part of the Linux kernel, this file is GPL)
+ * Copyright (C) 2024 Intel Corporation
  */
 #include <linux/kernel.h>
 #include <linux/netdevice.h>
@@ -430,7 +430,7 @@ static struct nlmsghdr *rtnetlink_ifinfo_prep(struct net_device *dev,
 	r->__ifi_pad = 0;
 	r->ifi_type = dev->type;
 	r->ifi_index = dev->ifindex;
-	r->ifi_flags = dev_get_flags(dev);
+	r->ifi_flags = netif_get_flags(dev);
 	r->ifi_change = 0;	/* Wireless changes don't affect those flags */
 
 	if (nla_put_string(skb, IFLA_IFNAME, dev->name))
@@ -636,7 +636,13 @@ void wireless_send_event(struct net_device *	dev,
 }
 EXPORT_SYMBOL(wireless_send_event);
 
-
+#ifdef CONFIG_CFG80211_WEXT
+static void wireless_warn_cfg80211_wext(void)
+{
+	pr_warn_once("warning: `%s' uses wireless extensions which will stop working for Wi-Fi 7 hardware; use nl80211\n",
+		     current->comm);
+}
+#endif
 
 /* IW handlers */
 
@@ -652,8 +658,13 @@ struct iw_statistics *get_wireless_stats(struct net_device *dev)
 	if (dev->ieee80211_ptr &&
 	    dev->ieee80211_ptr->wiphy &&
 	    dev->ieee80211_ptr->wiphy->wext &&
-	    dev->ieee80211_ptr->wiphy->wext->get_wireless_stats)
+	    dev->ieee80211_ptr->wiphy->wext->get_wireless_stats) {
+		wireless_warn_cfg80211_wext();
+		if (dev->ieee80211_ptr->wiphy->flags & (WIPHY_FLAG_SUPPORTS_MLO |
+							WIPHY_FLAG_DISABLE_WEXT))
+			return NULL;
 		return dev->ieee80211_ptr->wiphy->wext->get_wireless_stats(dev);
+	}
 #endif
 
 	/* not found */
@@ -690,8 +701,13 @@ static iw_handler get_handler(struct net_device *dev, unsigned int cmd)
 	const struct iw_handler_def *handlers = NULL;
 
 #ifdef CONFIG_CFG80211_WEXT
-	if (dev->ieee80211_ptr && dev->ieee80211_ptr->wiphy)
+	if (dev->ieee80211_ptr && dev->ieee80211_ptr->wiphy) {
+		wireless_warn_cfg80211_wext();
+		if (dev->ieee80211_ptr->wiphy->flags & (WIPHY_FLAG_SUPPORTS_MLO |
+							WIPHY_FLAG_DISABLE_WEXT))
+			return NULL;
 		handlers = dev->ieee80211_ptr->wiphy->wext;
+	}
 #endif
 #ifdef CONFIG_WIRELESS_EXT
 	if (dev->wireless_handlers)
@@ -798,6 +814,12 @@ static int ioctl_standard_iw_point(struct iw_point *iwp, unsigned int cmd,
 			 */
 		}
 	}
+
+	/* Sanity-check to ensure we never end up _allocating_ zero
+	 * bytes of data for extra.
+	 */
+	if (extra_size <= 0)
+		return -EFAULT;
 
 	/* kzalloc() ensures NULL-termination for essid_compat. */
 	extra = kzalloc(extra_size, GFP_KERNEL);
@@ -1078,6 +1100,10 @@ static int compat_standard_call(struct net_device	*dev,
 		return ioctl_standard_call(dev, iwr, cmd, info, handler);
 
 	iwp_compat = (struct compat_iw_point *) &iwr->u.data;
+
+	/* struct iw_point has a 32bit hole on 64bit arches. */
+	memset(&iwp, 0, sizeof(iwp));
+
 	iwp.pointer = compat_ptr(iwp_compat->pointer);
 	iwp.length = iwp_compat->length;
 	iwp.flags = iwp_compat->flags;
@@ -1134,7 +1160,7 @@ char *iwe_stream_add_event(struct iw_request_info *info, char *stream,
 	/* Check if it's possible */
 	if (likely((stream + event_len) < ends)) {
 		iwe->len = event_len;
-		/* Beware of alignement issues on 64 bits */
+		/* Beware of alignment issues on 64 bits */
 		memcpy(stream, (char *) iwe, IW_EV_LCP_PK_LEN);
 		memcpy(stream + lcp_len, &iwe->u,
 		       event_len - lcp_len);

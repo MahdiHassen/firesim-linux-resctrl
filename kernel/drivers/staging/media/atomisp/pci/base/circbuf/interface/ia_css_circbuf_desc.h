@@ -2,15 +2,6 @@
 /*
  * Support for Intel Camera Imaging ISP subsystem.
  * Copyright (c) 2015, Intel Corporation.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
  */
 
 #ifndef _IA_CSS_CIRCBUF_DESC_H_
@@ -56,7 +47,7 @@ static inline bool ia_css_circbuf_desc_is_full(
     ia_css_circbuf_desc_t *cb_desc)
 {
 	OP___assert(cb_desc);
-	return (OP_std_modadd(cb_desc->end, 1, cb_desc->size) == cb_desc->start);
+	return ((cb_desc->end + 1) % cb_desc->size) == cb_desc->start;
 }
 
 /**
@@ -87,20 +78,15 @@ static inline uint8_t ia_css_circbuf_desc_get_pos_at_offset(
     u32 base,
     int offset)
 {
-	u8 dest;
-
 	OP___assert(cb_desc);
 	OP___assert(cb_desc->size > 0);
 
 	/* step 1: adjust the offset  */
-	while (offset < 0) {
+	while (offset < 0)
 		offset += cb_desc->size;
-	}
 
 	/* step 2: shift and round by the upper limit */
-	dest = OP_std_modadd(base, offset, cb_desc->size);
-
-	return dest;
+	return (base + offset) % cb_desc->size;
 }
 
 /**

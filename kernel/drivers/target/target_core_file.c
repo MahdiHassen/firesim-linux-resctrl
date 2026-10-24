@@ -22,7 +22,7 @@
 #include <linux/uio.h>
 #include <linux/scatterlist.h>
 #include <scsi/scsi_proto.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 #include <target/target_core_base.h>
 #include <target/target_core_backend.h>
@@ -38,7 +38,7 @@ static int fd_attach_hba(struct se_hba *hba, u32 host_id)
 {
 	struct fd_host *fd_host;
 
-	fd_host = kzalloc(sizeof(struct fd_host), GFP_KERNEL);
+	fd_host = kzalloc_obj(struct fd_host);
 	if (!fd_host) {
 		pr_err("Unable to allocate memory for struct fd_host\n");
 		return -ENOMEM;
@@ -73,7 +73,7 @@ static struct se_device *fd_alloc_device(struct se_hba *hba, const char *name)
 	struct fd_dev *fd_dev;
 	struct fd_host *fd_host = hba->hba_ptr;
 
-	fd_dev = kzalloc(sizeof(struct fd_dev), GFP_KERNEL);
+	fd_dev = kzalloc_obj(struct fd_dev);
 	if (!fd_dev) {
 		pr_err("Unable to allocate memory for struct fd_dev\n");
 		return NULL;
@@ -92,8 +92,8 @@ static bool fd_configure_unmap(struct se_device *dev)
 	struct inode *inode = file->f_mapping->host;
 
 	if (S_ISBLK(inode->i_mode))
-		return target_configure_unmap_from_queue(&dev->dev_attrib,
-							 I_BDEV(inode));
+		return target_configure_unmap_from_bdev(&dev->dev_attrib,
+							I_BDEV(inode));
 
 	/* Limit UNMAP emulation to 8k Number of LBAs (NoLB) */
 	dev->dev_attrib.max_unmap_lba_count = 0x2000;
@@ -173,7 +173,7 @@ static int fd_configure_device(struct se_device *dev)
 		 */
 		dev->dev_attrib.max_write_same_len = 0xFFFF;
 
-		if (bdev_nonrot(bdev))
+		if (!bdev_rot(bdev))
 			dev->dev_attrib.is_nonrot = 1;
 	} else {
 		if (!(fd_dev->fbd_flags & FBDF_HAS_SIZE)) {
@@ -276,15 +276,13 @@ fd_execute_rw_aio(struct se_cmd *cmd, struct scatterlist *sgl, u32 sgl_nents,
 	ssize_t len = 0;
 	int ret = 0, i;
 
-	aio_cmd = kmalloc(struct_size(aio_cmd, bvecs, sgl_nents), GFP_KERNEL);
+	aio_cmd = kzalloc_flex(*aio_cmd, bvecs, sgl_nents);
 	if (!aio_cmd)
 		return TCM_LOGICAL_UNIT_COMMUNICATION_FAILURE;
 
 	for_each_sg(sgl, sg, sgl_nents, i) {
-		aio_cmd->bvecs[i].bv_page = sg_page(sg);
-		aio_cmd->bvecs[i].bv_len = sg->length;
-		aio_cmd->bvecs[i].bv_offset = sg->offset;
-
+		bvec_set_page(&aio_cmd->bvecs[i], sg_page(sg), sg->length,
+			      sg->offset);
 		len += sg->length;
 	}
 
@@ -301,9 +299,9 @@ fd_execute_rw_aio(struct se_cmd *cmd, struct scatterlist *sgl, u32 sgl_nents,
 		aio_cmd->iocb.ki_flags |= IOCB_DSYNC;
 
 	if (is_write)
-		ret = call_write_iter(file, &aio_cmd->iocb, &iter);
+		ret = file->f_op->write_iter(&aio_cmd->iocb, &iter);
 	else
-		ret = call_read_iter(file, &aio_cmd->iocb, &iter);
+		ret = file->f_op->read_iter(&aio_cmd->iocb, &iter);
 
 	if (ret != -EIOCBQUEUED)
 		cmd_rw_aio_complete(&aio_cmd->iocb, ret);
@@ -322,17 +320,14 @@ static int fd_do_rw(struct se_cmd *cmd, struct file *fd,
 	loff_t pos = (cmd->t_task_lba * block_size);
 	int ret = 0, i;
 
-	bvec = kcalloc(sgl_nents, sizeof(struct bio_vec), GFP_KERNEL);
+	bvec = kzalloc_objs(struct bio_vec, sgl_nents);
 	if (!bvec) {
 		pr_err("Unable to allocate fd_do_readv iov[]\n");
 		return -ENOMEM;
 	}
 
 	for_each_sg(sgl, sg, sgl_nents, i) {
-		bvec[i].bv_page = sg_page(sg);
-		bvec[i].bv_len = sg->length;
-		bvec[i].bv_offset = sg->offset;
-
+		bvec_set_page(&bvec[i], sg_page(sg), sg->length, sg->offset);
 		len += sg->length;
 	}
 
@@ -460,15 +455,14 @@ fd_execute_write_same(struct se_cmd *cmd)
 		return TCM_INVALID_CDB_FIELD;
 	}
 
-	bvec = kcalloc(nolb, sizeof(struct bio_vec), GFP_KERNEL);
+	bvec = kzalloc_objs(struct bio_vec, nolb);
 	if (!bvec)
 		return TCM_LOGICAL_UNIT_COMMUNICATION_FAILURE;
 
 	for (i = 0; i < nolb; i++) {
-		bvec[i].bv_page = sg_page(&cmd->t_data_sg[0]);
-		bvec[i].bv_len = cmd->t_data_sg[0].length;
-		bvec[i].bv_offset = cmd->t_data_sg[0].offset;
-
+		bvec_set_page(&bvec[i], sg_page(&cmd->t_data_sg[0]),
+			      cmd->t_data_sg[0].length,
+			      cmd->t_data_sg[0].offset);
 		len += se_dev->dev_attrib.block_size;
 	}
 
@@ -902,7 +896,7 @@ static void fd_free_prot(struct se_device *dev)
 	fd_dev->fd_prot_file = NULL;
 }
 
-static struct sbc_ops fd_sbc_ops = {
+static struct exec_cmd_ops fd_exec_cmd_ops = {
 	.execute_rw		= fd_execute_rw,
 	.execute_sync_cache	= fd_execute_sync_cache,
 	.execute_write_same	= fd_execute_write_same,
@@ -912,7 +906,7 @@ static struct sbc_ops fd_sbc_ops = {
 static sense_reason_t
 fd_parse_cdb(struct se_cmd *cmd)
 {
-	return sbc_parse_cdb(cmd, &fd_sbc_ops);
+	return sbc_parse_cdb(cmd, &fd_exec_cmd_ops);
 }
 
 static const struct target_backend_ops fileio_ops = {

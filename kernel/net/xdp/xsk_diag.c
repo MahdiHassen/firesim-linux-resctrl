@@ -92,7 +92,7 @@ static int xsk_diag_put_stats(const struct xdp_sock *xs, struct sk_buff *nlskb)
 static int xsk_diag_fill(struct sock *sk, struct sk_buff *nlskb,
 			 struct xdp_diag_req *req,
 			 struct user_namespace *user_ns,
-			 u32 portid, u32 seq, u32 flags, int sk_ino)
+			 u32 portid, u32 seq, u32 flags, u64 sk_ino)
 {
 	struct xdp_sock *xs = xdp_sk(sk);
 	struct xdp_diag_msg *msg;
@@ -111,12 +111,15 @@ static int xsk_diag_fill(struct sock *sk, struct sk_buff *nlskb,
 	sock_diag_save_cookie(sk, msg->xdiag_cookie);
 
 	mutex_lock(&xs->mutex);
+	if (READ_ONCE(xs->state) == XSK_UNBOUND)
+		goto out_nlmsg_trim;
+
 	if ((req->xdiag_show & XDP_SHOW_INFO) && xsk_diag_put_info(xs, nlskb))
 		goto out_nlmsg_trim;
 
 	if ((req->xdiag_show & XDP_SHOW_INFO) &&
 	    nla_put_u32(nlskb, XDP_DIAG_UID,
-			from_kuid_munged(user_ns, sock_i_uid(sk))))
+			from_kuid_munged(user_ns, sk_uid(sk))))
 		goto out_nlmsg_trim;
 
 	if ((req->xdiag_show & XDP_SHOW_RING_CFG) &&
@@ -191,6 +194,7 @@ static int xsk_diag_handler_dump(struct sk_buff *nlskb, struct nlmsghdr *hdr)
 }
 
 static const struct sock_diag_handler xsk_diag_handler = {
+	.owner = THIS_MODULE,
 	.family = AF_XDP,
 	.dump = xsk_diag_handler_dump,
 };
@@ -208,4 +212,5 @@ static void __exit xsk_diag_exit(void)
 module_init(xsk_diag_init);
 module_exit(xsk_diag_exit);
 MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("XDP socket monitoring via SOCK_DIAG");
 MODULE_ALIAS_NET_PF_PROTO_TYPE(PF_NETLINK, NETLINK_SOCK_DIAG, AF_XDP);

@@ -27,7 +27,7 @@ MODULE_PARM_DESC(bmcaddr, "Address to use for BMC.");
 
 static unsigned int retry_time_ms = 250;
 module_param(retry_time_ms, uint, 0644);
-MODULE_PARM_DESC(max_retries, "Timeout time between retries, in milliseconds.");
+MODULE_PARM_DESC(retry_time_ms, "Timeout time between retries, in milliseconds.");
 
 static unsigned int max_retries = 1;
 module_param(max_retries, uint, 0644);
@@ -202,11 +202,16 @@ static int ipmi_ipmb_slave_cb(struct i2c_client *client,
 		break;
 
 	case I2C_SLAVE_READ_REQUESTED:
+		*val = 0xff;
+		ipmi_ipmb_check_msg_done(iidev);
+		break;
+
 	case I2C_SLAVE_STOP:
 		ipmi_ipmb_check_msg_done(iidev);
 		break;
 
 	case I2C_SLAVE_READ_PROCESSED:
+		*val = 0xff;
 		break;
 	}
 
@@ -404,8 +409,7 @@ static void ipmi_ipmb_shutdown(void *send_info)
 	ipmi_ipmb_stop_thread(iidev);
 }
 
-static void ipmi_ipmb_sender(void *send_info,
-			     struct ipmi_smi_msg *msg)
+static int ipmi_ipmb_sender(void *send_info, struct ipmi_smi_msg *msg)
 {
 	struct ipmi_ipmb_dev *iidev = send_info;
 	unsigned long flags;
@@ -417,6 +421,7 @@ static void ipmi_ipmb_sender(void *send_info,
 	spin_unlock_irqrestore(&iidev->lock, flags);
 
 	up(&iidev->wake_thread);
+	return IPMI_CC_NO_ERROR;
 }
 
 static void ipmi_ipmb_request_events(void *send_info)
@@ -561,8 +566,8 @@ MODULE_DEVICE_TABLE(of, of_ipmi_ipmb_match);
 #endif
 
 static const struct i2c_device_id ipmi_ipmb_id[] = {
-	{ DEVICE_NAME, 0 },
-	{},
+	{ .name = DEVICE_NAME },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, ipmi_ipmb_id);
 
@@ -572,7 +577,7 @@ static struct i2c_driver ipmi_ipmb_driver = {
 		.name = DEVICE_NAME,
 		.of_match_table = of_ipmi_ipmb_match,
 	},
-	.probe_new	= ipmi_ipmb_probe,
+	.probe		= ipmi_ipmb_probe,
 	.remove		= ipmi_ipmb_remove,
 	.id_table	= ipmi_ipmb_id,
 };

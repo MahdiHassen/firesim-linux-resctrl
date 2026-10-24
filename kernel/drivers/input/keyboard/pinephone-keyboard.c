@@ -10,7 +10,6 @@
 #include <linux/input/matrix_keypad.h>
 #include <linux/interrupt.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/of.h>
 #include <linux/regulator/consumer.h>
 #include <linux/types.h>
@@ -318,39 +317,21 @@ static void ppkb_close(struct input_dev *input)
 	ppkb_set_scan(client, false);
 }
 
-static void ppkb_regulator_disable(void *regulator)
-{
-	regulator_disable(regulator);
-}
-
 static int ppkb_probe(struct i2c_client *client)
 {
 	struct device *dev = &client->dev;
 	unsigned int phys_rows, phys_cols;
 	struct pinephone_keyboard *ppkb;
-	struct regulator *vbat_supply;
 	u8 info[PPKB_MATRIX_SIZE + 1];
 	struct device_node *i2c_bus;
 	int ret;
 	int error;
 
-	vbat_supply = devm_regulator_get(dev, "vbat");
-	error = PTR_ERR_OR_ZERO(vbat_supply);
+	error = devm_regulator_get_enable(dev, "vbat");
 	if (error) {
 		dev_err(dev, "Failed to get VBAT supply: %d\n", error);
 		return error;
 	}
-
-	error = regulator_enable(vbat_supply);
-	if (error) {
-		dev_err(dev, "Failed to enable VBAT: %d\n", error);
-		return error;
-	}
-
-	error = devm_add_action_or_reset(dev, ppkb_regulator_disable,
-					 vbat_supply);
-	if (error)
-		return error;
 
 	ret = i2c_smbus_read_i2c_block_data(client, 0, sizeof(info), info);
 	if (ret != sizeof(info)) {
@@ -455,7 +436,7 @@ static const struct of_device_id ppkb_of_match[] = {
 MODULE_DEVICE_TABLE(of, ppkb_of_match);
 
 static struct i2c_driver ppkb_driver = {
-	.probe_new	= ppkb_probe,
+	.probe		= ppkb_probe,
 	.driver		= {
 		.name		= DRV_NAME,
 		.of_match_table = ppkb_of_match,

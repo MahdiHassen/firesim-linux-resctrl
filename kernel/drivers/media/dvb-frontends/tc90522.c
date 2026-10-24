@@ -21,7 +21,7 @@
 #include <linux/kernel.h>
 #include <linux/math64.h>
 #include <linux/dvb/frontend.h>
-#include <media/dvb_math.h>
+#include <linux/int_log.h>
 #include "tc90522.h"
 
 #define TC90522_I2C_THRU_REG 0xfe
@@ -647,7 +647,7 @@ tc90522_master_xfer(struct i2c_adapter *adap, struct i2c_msg *msgs, int num)
 	for (i = 0; i < num; i++)
 		if (msgs[i].flags & I2C_M_RD)
 			rd_num++;
-	new_msgs = kmalloc_array(num + rd_num, sizeof(*new_msgs), GFP_KERNEL);
+	new_msgs = kmalloc_objs(*new_msgs, num + rd_num);
 	if (!new_msgs)
 		return -ENOMEM;
 
@@ -779,16 +779,16 @@ static const struct dvb_frontend_ops tc90522_ops_ter = {
 };
 
 
-static int tc90522_probe(struct i2c_client *client,
-			 const struct i2c_device_id *id)
+static int tc90522_probe(struct i2c_client *client)
 {
+	const struct i2c_device_id *id = i2c_client_get_device_id(client);
 	struct tc90522_state *state;
 	struct tc90522_config *cfg;
 	const struct dvb_frontend_ops *ops;
 	struct i2c_adapter *adap;
 	int ret;
 
-	state = kzalloc(sizeof(*state), GFP_KERNEL);
+	state = kzalloc_obj(*state);
 	if (!state)
 		return -ENOMEM;
 	state->i2c_client = client;
@@ -830,9 +830,9 @@ static void tc90522_remove(struct i2c_client *client)
 
 
 static const struct i2c_device_id tc90522_id[] = {
-	{ TC90522_I2C_DEV_SAT, 0 },
-	{ TC90522_I2C_DEV_TER, 1 },
-	{}
+	{ .name = TC90522_I2C_DEV_SAT, .driver_data = 0 },
+	{ .name = TC90522_I2C_DEV_TER, .driver_data = 1 },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, tc90522_id);
 

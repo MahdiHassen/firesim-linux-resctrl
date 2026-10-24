@@ -433,7 +433,7 @@ static int cxd2820r_gpio_direction_output(struct gpio_chip *chip, unsigned nr,
 	return cxd2820r_gpio(&priv->fe, gpio);
 }
 
-static void cxd2820r_gpio_set(struct gpio_chip *chip, unsigned nr, int val)
+static int cxd2820r_gpio_set(struct gpio_chip *chip, unsigned int nr, int val)
 {
 	struct cxd2820r_priv *priv = gpiochip_get_data(chip);
 	struct i2c_client *client = priv->client[0];
@@ -446,7 +446,7 @@ static void cxd2820r_gpio_set(struct gpio_chip *chip, unsigned nr, int val)
 
 	(void) cxd2820r_gpio(&priv->fe, gpio);
 
-	return;
+	return 0;
 }
 
 static int cxd2820r_gpio_get(struct gpio_chip *chip, unsigned nr)
@@ -536,7 +536,7 @@ struct dvb_frontend *cxd2820r_attach(const struct cxd2820r_config *config,
 
 	return pdata.get_dvb_frontend(client);
 }
-EXPORT_SYMBOL(cxd2820r_attach);
+EXPORT_SYMBOL_GPL(cxd2820r_attach);
 
 static struct dvb_frontend *cxd2820r_get_dvb_frontend(struct i2c_client *client)
 {
@@ -594,7 +594,7 @@ static int cxd2820r_probe(struct i2c_client *client)
 
 	dev_dbg(&client->dev, "\n");
 
-	priv = kzalloc(sizeof(*priv), GFP_KERNEL);
+	priv = kzalloc_obj(*priv);
 	if (!priv) {
 		ret = -ENOMEM;
 		goto err;
@@ -723,8 +723,8 @@ static void cxd2820r_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id cxd2820r_id_table[] = {
-	{"cxd2820r", 0},
-	{}
+	{ .name = "cxd2820r" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, cxd2820r_id_table);
 
@@ -733,7 +733,7 @@ static struct i2c_driver cxd2820r_driver = {
 		.name                = "cxd2820r",
 		.suppress_bind_attrs = true,
 	},
-	.probe_new = cxd2820r_probe,
+	.probe    = cxd2820r_probe,
 	.remove   = cxd2820r_remove,
 	.id_table = cxd2820r_id_table,
 };

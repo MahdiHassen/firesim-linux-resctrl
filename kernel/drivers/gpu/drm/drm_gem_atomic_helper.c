@@ -2,6 +2,7 @@
 
 #include <linux/dma-resv.h>
 #include <linux/dma-fence-chain.h>
+#include <linux/export.h>
 
 #include <drm/drm_atomic_state_helper.h>
 #include <drm/drm_atomic_uapi.h>
@@ -26,11 +27,8 @@
  * call drm_gem_plane_helper_prepare_fb() from their implementation of
  * struct &drm_plane_helper.prepare_fb . It sets the plane's fence from
  * the framebuffer so that the DRM core can synchronize access automatically.
- *
  * drm_gem_plane_helper_prepare_fb() can also be used directly as
- * implementation of prepare_fb. For drivers based on
- * struct drm_simple_display_pipe, drm_gem_simple_display_pipe_prepare_fb()
- * provides equivalent functionality.
+ * implementation of prepare_fb.
  *
  * .. code-block:: c
  *
@@ -39,11 +37,6 @@
  *	struct drm_plane_helper_funcs driver_plane_helper_funcs = {
  *		...,
  *		. prepare_fb = drm_gem_plane_helper_prepare_fb,
- *	};
- *
- *	struct drm_simple_display_pipe_funcs driver_pipe_funcs = {
- *		...,
- *		. prepare_fb = drm_gem_simple_display_pipe_prepare_fb,
  *	};
  *
  * A driver using a shadow buffer copies the content of the shadow buffers
@@ -94,28 +87,6 @@
  * A mapping address for each of the framebuffer's buffer object is stored in
  * struct &drm_shadow_plane_state.map. The mappings are valid while the state
  * is being used.
- *
- * Drivers that use struct drm_simple_display_pipe can use
- * %DRM_GEM_SIMPLE_DISPLAY_PIPE_SHADOW_PLANE_FUNCS to initialize the rsp
- * callbacks. Access to shadow-buffer mappings is similar to regular
- * atomic_update.
- *
- * .. code-block:: c
- *
- *	struct drm_simple_display_pipe_funcs driver_pipe_funcs = {
- *		...,
- *		DRM_GEM_SIMPLE_DISPLAY_PIPE_SHADOW_PLANE_FUNCS,
- *	};
- *
- *	void driver_pipe_enable(struct drm_simple_display_pipe *pipe,
- *				struct drm_crtc_state *crtc_state,
- *				struct drm_plane_state *plane_state)
- *	{
- *		struct drm_shadow_plane_state *shadow_plane_state =
- *			to_drm_shadow_plane_state(plane_state);
- *
- *		// access shadow buffer via shadow_plane_state->map
- *	}
  */
 
 /*
@@ -205,27 +176,6 @@ error:
 }
 EXPORT_SYMBOL_GPL(drm_gem_plane_helper_prepare_fb);
 
-/**
- * drm_gem_simple_display_pipe_prepare_fb - prepare_fb helper for &drm_simple_display_pipe
- * @pipe: Simple display pipe
- * @plane_state: Plane state
- *
- * This function uses drm_gem_plane_helper_prepare_fb() to extract the fences
- * from &drm_gem_object.resv and attaches them to the plane state for the atomic
- * helper to wait on. This is necessary to correctly implement implicit
- * synchronization for any buffers shared as a struct &dma_buf. Drivers can use
- * this as their &drm_simple_display_pipe_funcs.prepare_fb callback.
- *
- * See drm_gem_plane_helper_prepare_fb() for a discussion of implicit and
- * explicit fencing in atomic modeset updates.
- */
-int drm_gem_simple_display_pipe_prepare_fb(struct drm_simple_display_pipe *pipe,
-					   struct drm_plane_state *plane_state)
-{
-	return drm_gem_plane_helper_prepare_fb(&pipe->plane, plane_state);
-}
-EXPORT_SYMBOL(drm_gem_simple_display_pipe_prepare_fb);
-
 /*
  * Shadow-buffered Planes
  */
@@ -247,7 +197,14 @@ void
 __drm_gem_duplicate_shadow_plane_state(struct drm_plane *plane,
 				       struct drm_shadow_plane_state *new_shadow_plane_state)
 {
+	struct drm_plane_state *plane_state = plane->state;
+	struct drm_shadow_plane_state *shadow_plane_state =
+		to_drm_shadow_plane_state(plane_state);
+
 	__drm_atomic_helper_plane_duplicate_state(plane, &new_shadow_plane_state->base);
+
+	drm_format_conv_state_copy(&new_shadow_plane_state->fmtcnv_state,
+				   &shadow_plane_state->fmtcnv_state);
 }
 EXPORT_SYMBOL(__drm_gem_duplicate_shadow_plane_state);
 
@@ -277,7 +234,7 @@ drm_gem_duplicate_shadow_plane_state(struct drm_plane *plane)
 	if (!plane_state)
 		return NULL;
 
-	new_shadow_plane_state = kzalloc(sizeof(*new_shadow_plane_state), GFP_KERNEL);
+	new_shadow_plane_state = kzalloc_obj(*new_shadow_plane_state);
 	if (!new_shadow_plane_state)
 		return NULL;
 	__drm_gem_duplicate_shadow_plane_state(plane, new_shadow_plane_state);
@@ -295,6 +252,7 @@ EXPORT_SYMBOL(drm_gem_duplicate_shadow_plane_state);
  */
 void __drm_gem_destroy_shadow_plane_state(struct drm_shadow_plane_state *shadow_plane_state)
 {
+	drm_format_conv_state_release(&shadow_plane_state->fmtcnv_state);
 	__drm_atomic_helper_plane_destroy_state(&shadow_plane_state->base);
 }
 EXPORT_SYMBOL(__drm_gem_destroy_shadow_plane_state);
@@ -330,7 +288,12 @@ EXPORT_SYMBOL(drm_gem_destroy_shadow_plane_state);
 void __drm_gem_reset_shadow_plane(struct drm_plane *plane,
 				  struct drm_shadow_plane_state *shadow_plane_state)
 {
-	__drm_atomic_helper_plane_reset(plane, &shadow_plane_state->base);
+	if (shadow_plane_state) {
+		__drm_atomic_helper_plane_reset(plane, &shadow_plane_state->base);
+		drm_format_conv_state_init(&shadow_plane_state->fmtcnv_state);
+	} else {
+		__drm_atomic_helper_plane_reset(plane, NULL);
+	}
 }
 EXPORT_SYMBOL(__drm_gem_reset_shadow_plane);
 
@@ -352,9 +315,7 @@ void drm_gem_reset_shadow_plane(struct drm_plane *plane)
 		plane->state = NULL; /* must be set to NULL here */
 	}
 
-	shadow_plane_state = kzalloc(sizeof(*shadow_plane_state), GFP_KERNEL);
-	if (!shadow_plane_state)
-		return;
+	shadow_plane_state = kzalloc_obj(*shadow_plane_state);
 	__drm_gem_reset_shadow_plane(plane, shadow_plane_state);
 }
 EXPORT_SYMBOL(drm_gem_reset_shadow_plane);

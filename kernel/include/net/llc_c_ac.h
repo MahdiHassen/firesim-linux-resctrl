@@ -1,15 +1,9 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef LLC_C_AC_H
 #define LLC_C_AC_H
 /*
  * Copyright (c) 1997 by Procom Technology,Inc.
  * 		 2001 by Arnaldo Carvalho de Melo <acme@conectiva.com.br>
- *
- * This program can be redistributed or modified under the terms of the
- * GNU General Public License as published by the Free Software Foundation.
- * This program is distributed without any warranty or implied warranty
- * of merchantability or fitness for a particular purpose.
- *
- * See the GNU General Public License for more details.
  */
 /* Connection component state transition actions */
 /*
@@ -175,7 +169,6 @@ int llc_conn_ac_send_ack_if_needed(struct sock *sk, struct sk_buff *skb);
 int llc_conn_ac_adjust_npta_by_rr(struct sock *sk, struct sk_buff *skb);
 int llc_conn_ac_adjust_npta_by_rnr(struct sock *sk, struct sk_buff *skb);
 int llc_conn_ac_rst_sendack_flag(struct sock *sk, struct sk_buff *skb);
-int llc_conn_ac_send_i_rsp_as_ack(struct sock *sk, struct sk_buff *skb);
 int llc_conn_ac_send_i_as_ack(struct sock *sk, struct sk_buff *skb);
 
 void llc_conn_busy_tmr_cb(struct timer_list *t);

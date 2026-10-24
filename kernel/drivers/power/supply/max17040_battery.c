@@ -15,9 +15,10 @@
 #include <linux/delay.h>
 #include <linux/interrupt.h>
 #include <linux/power_supply.h>
-#include <linux/of_device.h>
+#include <linux/of.h>
 #include <linux/regmap.h>
 #include <linux/slab.h>
+#include <linux/iio/consumer.h>
 
 #define MAX17040_VCELL	0x02
 #define MAX17040_SOC	0x04
@@ -142,6 +143,7 @@ struct max17040_chip {
 	struct delayed_work		work;
 	struct power_supply		*battery;
 	struct chip_data		data;
+	struct iio_channel		*channel_temp;
 
 	/* battery capacity */
 	int soc;
@@ -386,9 +388,11 @@ static int max17040_get_property(struct power_supply *psy,
 			    union power_supply_propval *val)
 {
 	struct max17040_chip *chip = power_supply_get_drvdata(psy);
+	int ret;
 
 	switch (psp) {
 	case POWER_SUPPLY_PROP_ONLINE:
+	case POWER_SUPPLY_PROP_PRESENT:
 		val->intval = max17040_get_online(chip);
 		break;
 	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
@@ -399,6 +403,24 @@ static int max17040_get_property(struct power_supply *psy,
 		break;
 	case POWER_SUPPLY_PROP_CAPACITY_ALERT_MIN:
 		val->intval = chip->low_soc_alert;
+		break;
+	case POWER_SUPPLY_PROP_STATUS:
+		ret = power_supply_get_property_from_supplier(psy, psp, val);
+		if (ret == -ENODEV)
+			val->intval = POWER_SUPPLY_STATUS_UNKNOWN;
+		else if (ret)
+			return ret;
+		break;
+	case POWER_SUPPLY_PROP_TEMP:
+		if (!chip->channel_temp)
+			return -ENODATA;
+
+		ret = iio_read_channel_processed(chip->channel_temp, &val->intval);
+		if (ret)
+			return ret;
+
+		val->intval /= 100; /* Convert from milli- to deci-degree */
+
 		break;
 	default:
 		return -EINVAL;
@@ -415,9 +437,12 @@ static const struct regmap_config max17040_regmap = {
 
 static enum power_supply_property max17040_battery_props[] = {
 	POWER_SUPPLY_PROP_ONLINE,
+	POWER_SUPPLY_PROP_PRESENT,
 	POWER_SUPPLY_PROP_VOLTAGE_NOW,
 	POWER_SUPPLY_PROP_CAPACITY,
 	POWER_SUPPLY_PROP_CAPACITY_ALERT_MIN,
+	POWER_SUPPLY_PROP_STATUS,
+	POWER_SUPPLY_PROP_TEMP,
 };
 
 static const struct power_supply_desc max17040_battery_desc = {
@@ -462,6 +487,17 @@ static int max17040_probe(struct i2c_client *client)
 
 	i2c_set_clientdata(client, chip);
 	psy_cfg.drv_data = chip;
+
+	/* Switch to devm_iio_channel_get_optional when available  */
+	chip->channel_temp = devm_iio_channel_get(&client->dev, "temp");
+	if (IS_ERR(chip->channel_temp)) {
+		ret = PTR_ERR(chip->channel_temp);
+		if (ret != -ENODEV)
+			return dev_err_probe(&client->dev, PTR_ERR(chip->channel_temp),
+					     "failed to get temp\n");
+		else
+			chip->channel_temp = NULL;
+	}
 
 	chip->battery = devm_power_supply_register(&client->dev,
 				&max17040_battery_desc, &psy_cfg);
@@ -566,15 +602,15 @@ static SIMPLE_DEV_PM_OPS(max17040_pm_ops, max17040_suspend, max17040_resume);
 #endif /* CONFIG_PM_SLEEP */
 
 static const struct i2c_device_id max17040_id[] = {
-	{ "max17040", ID_MAX17040 },
-	{ "max17041", ID_MAX17041 },
-	{ "max17043", ID_MAX17043 },
-	{ "max77836-battery", ID_MAX17043 },
-	{ "max17044", ID_MAX17044 },
-	{ "max17048", ID_MAX17048 },
-	{ "max17049", ID_MAX17049 },
-	{ "max17058", ID_MAX17058 },
-	{ "max17059", ID_MAX17059 },
+	{ .name = "max17040", .driver_data = ID_MAX17040 },
+	{ .name = "max17041", .driver_data = ID_MAX17041 },
+	{ .name = "max17043", .driver_data = ID_MAX17043 },
+	{ .name = "max77836-battery", .driver_data = ID_MAX17043 },
+	{ .name = "max17044", .driver_data = ID_MAX17044 },
+	{ .name = "max17048", .driver_data = ID_MAX17048 },
+	{ .name = "max17049", .driver_data = ID_MAX17049 },
+	{ .name = "max17058", .driver_data = ID_MAX17058 },
+	{ .name = "max17059", .driver_data = ID_MAX17059 },
 	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(i2c, max17040_id);
@@ -599,7 +635,7 @@ static struct i2c_driver max17040_i2c_driver = {
 		.of_match_table = max17040_of_match,
 		.pm	= MAX17040_PM_OPS,
 	},
-	.probe_new	= max17040_probe,
+	.probe		= max17040_probe,
 	.id_table	= max17040_id,
 };
 module_i2c_driver(max17040_i2c_driver);

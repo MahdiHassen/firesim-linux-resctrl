@@ -12,8 +12,10 @@
 #include <asm/io.h>
 #include <asm/mach-au1x00/au1000.h>
 
-struct gpio;
 struct gpio_chip;
+struct software_node;
+
+extern const struct software_node alchemy_gpic_node;
 
 /* with the current GPIC design, up to 128 GPIOs are possible.
  * The only implementation so far is in the Au1300, which has 75 externally
@@ -96,11 +98,6 @@ static inline int au1300_gpio_is_valid(unsigned int gpio)
 		ret = 0;
 	}
 	return ret;
-}
-
-static inline int au1300_gpio_cansleep(unsigned int gpio)
-{
-	return 0;
 }
 
 /* hardware remembers gpio 0-63 levels on powerup */

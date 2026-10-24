@@ -212,8 +212,8 @@ nvkm_intr(int irq, void *arg)
 		list_for_each_entry(intr, &device->intr.intr, head) {
 			for (leaf = 0; leaf < intr->leaves; leaf++) {
 				if (intr->stat[leaf]) {
-					nvkm_warn(intr->subdev, "intr%d: %08x\n",
-						  leaf, intr->stat[leaf]);
+					nvkm_debug(intr->subdev, "intr%d: %08x\n",
+						   leaf, intr->stat[leaf]);
 					nvkm_intr_block_locked(intr, leaf, intr->stat[leaf]);
 				}
 			}
@@ -239,8 +239,8 @@ nvkm_intr_add(const struct nvkm_intr_func *func, const struct nvkm_intr_data *da
 	intr->data = data;
 	intr->subdev = subdev;
 	intr->leaves = leaves;
-	intr->stat = kcalloc(leaves, sizeof(*intr->stat), GFP_KERNEL);
-	intr->mask = kcalloc(leaves, sizeof(*intr->mask), GFP_KERNEL);
+	intr->stat = kzalloc_objs(*intr->stat, leaves);
+	intr->mask = kzalloc_objs(*intr->mask, leaves);
 	if (!intr->stat || !intr->mask) {
 		kfree(intr->stat);
 		return -ENOMEM;

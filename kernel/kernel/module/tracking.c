@@ -15,12 +15,11 @@
 #include "internal.h"
 
 static LIST_HEAD(unloaded_tainted_modules);
+extern struct dentry *mod_debugfs_root;
 
 int try_add_tainted_module(struct module *mod)
 {
 	struct mod_unload_taint *mod_taint;
-
-	module_assert_mutex_or_preempt();
 
 	if (!mod->taints)
 		goto out;
@@ -34,7 +33,7 @@ int try_add_tainted_module(struct module *mod)
 		}
 	}
 
-	mod_taint = kmalloc(sizeof(*mod_taint), GFP_KERNEL);
+	mod_taint = kmalloc_obj(*mod_taint);
 	if (unlikely(!mod_taint))
 		return -ENOMEM;
 	strscpy(mod_taint->name, mod->name, MODULE_NAME_LEN);
@@ -120,12 +119,8 @@ static const struct file_operations unloaded_tainted_modules_fops = {
 
 static int __init unloaded_tainted_modules_init(void)
 {
-	struct dentry *dir;
-
-	dir = debugfs_create_dir("modules", NULL);
-	debugfs_create_file("unloaded_tainted", 0444, dir, NULL,
+	debugfs_create_file("unloaded_tainted", 0444, mod_debugfs_root, NULL,
 			    &unloaded_tainted_modules_fops);
-
 	return 0;
 }
 module_init(unloaded_tainted_modules_init);

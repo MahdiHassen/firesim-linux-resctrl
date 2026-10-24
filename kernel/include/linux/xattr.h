@@ -16,8 +16,13 @@
 #include <linux/types.h>
 #include <linux/spinlock.h>
 #include <linux/mm.h>
+#include <linux/rhashtable-types.h>
 #include <linux/user_namespace.h>
 #include <uapi/linux/xattr.h>
+
+/* List of all open_how "versions". */
+#define XATTR_ARGS_SIZE_VER0	16 /* sizeof first published struct */
+#define XATTR_ARGS_SIZE_LATEST	XATTR_ARGS_SIZE_VER0
 
 struct inode;
 struct dentry;
@@ -42,10 +47,26 @@ struct xattr_handler {
 		   struct inode *inode, const char *name, void *buffer,
 		   size_t size);
 	int (*set)(const struct xattr_handler *,
-		   struct user_namespace *mnt_userns, struct dentry *dentry,
+		   struct mnt_idmap *idmap, struct dentry *dentry,
 		   struct inode *inode, const char *name, const void *buffer,
 		   size_t size, int flags);
 };
+
+/**
+ * xattr_handler_can_list - check whether xattr can be listed
+ * @handler: handler for this type of xattr
+ * @dentry: dentry whose inode xattr to list
+ *
+ * Determine whether the xattr associated with @dentry can be listed given
+ * @handler.
+ *
+ * Return: true if xattr can be listed, false if not.
+ */
+static inline bool xattr_handler_can_list(const struct xattr_handler *handler,
+					  struct dentry *dentry)
+{
+	return handler && (!handler->list || handler->list(dentry));
+}
 
 const char *xattr_full_name(const struct xattr_handler *, const char *);
 
@@ -56,58 +77,96 @@ struct xattr {
 };
 
 ssize_t __vfs_getxattr(struct dentry *, struct inode *, const char *, void *, size_t);
-ssize_t vfs_getxattr(struct user_namespace *, struct dentry *, const char *,
+ssize_t vfs_getxattr(struct mnt_idmap *, struct dentry *, const char *,
 		     void *, size_t);
 ssize_t vfs_listxattr(struct dentry *d, char *list, size_t size);
-int __vfs_setxattr(struct user_namespace *, struct dentry *, struct inode *,
+int __vfs_setxattr(struct mnt_idmap *, struct dentry *, struct inode *,
 		   const char *, const void *, size_t, int);
-int __vfs_setxattr_noperm(struct user_namespace *, struct dentry *,
+int __vfs_setxattr_noperm(struct mnt_idmap *, struct dentry *,
 			  const char *, const void *, size_t, int);
-int __vfs_setxattr_locked(struct user_namespace *, struct dentry *,
+int __vfs_setxattr_locked(struct mnt_idmap *, struct dentry *,
 			  const char *, const void *, size_t, int,
-			  struct inode **);
-int vfs_setxattr(struct user_namespace *, struct dentry *, const char *,
+			  struct delegated_inode *);
+int vfs_setxattr(struct mnt_idmap *, struct dentry *, const char *,
 		 const void *, size_t, int);
-int __vfs_removexattr(struct user_namespace *, struct dentry *, const char *);
-int __vfs_removexattr_locked(struct user_namespace *, struct dentry *,
-			     const char *, struct inode **);
-int vfs_removexattr(struct user_namespace *, struct dentry *, const char *);
+int __vfs_removexattr(struct mnt_idmap *, struct dentry *, const char *);
+int __vfs_removexattr_locked(struct mnt_idmap *, struct dentry *,
+			     const char *, struct delegated_inode *);
+int vfs_removexattr(struct mnt_idmap *, struct dentry *, const char *);
 
 ssize_t generic_listxattr(struct dentry *dentry, char *buffer, size_t buffer_size);
-int vfs_getxattr_alloc(struct user_namespace *mnt_userns,
+int vfs_getxattr_alloc(struct mnt_idmap *idmap,
 		       struct dentry *dentry, const char *name,
 		       char **xattr_value, size_t size, gfp_t flags);
 
-int xattr_supported_namespace(struct inode *inode, const char *prefix);
+int xattr_supports_user_prefix(struct inode *inode);
 
 static inline const char *xattr_prefix(const struct xattr_handler *handler)
 {
 	return handler->prefix ?: handler->name;
 }
 
-struct simple_xattrs {
-	struct rb_root rb_root;
-	rwlock_t lock;
+struct simple_xattr_cache {
+	struct rhashtable *ht;
 };
 
 struct simple_xattr {
-	struct rb_node rb_node;
+	struct rhash_head hash_node;
+	struct list_head *parent;
+	struct list_head node;
+	struct rcu_head rcu;
 	char *name;
 	size_t size;
-	char value[];
+	char value[] __counted_by(size);
 };
 
-void simple_xattrs_init(struct simple_xattrs *xattrs);
-void simple_xattrs_free(struct simple_xattrs *xattrs);
+#define SIMPLE_XATTR_MAX_NR		128
+#define SIMPLE_XATTR_MAX_SIZE		(128 << 10)
+
+struct simple_xattr_limits {
+	atomic_t	nr_xattrs;	/* current user.* xattr count */
+	atomic_t	xattr_size;	/* current total user.* value bytes */
+};
+
+static inline void simple_xattr_limits_init(struct simple_xattr_limits *limits)
+{
+	atomic_set(&limits->nr_xattrs, 0);
+	atomic_set(&limits->xattr_size, 0);
+}
+
+void simple_xattrs_free(struct simple_xattr_cache *cache, struct list_head *xattrs,
+			size_t *freed_space);
+size_t simple_xattr_space(const char *name, size_t size);
 struct simple_xattr *simple_xattr_alloc(const void *value, size_t size);
-int simple_xattr_get(struct simple_xattrs *xattrs, const char *name,
-		     void *buffer, size_t size);
-int simple_xattr_set(struct simple_xattrs *xattrs, const char *name,
-		     const void *value, size_t size, int flags,
-		     ssize_t *removed_size);
-ssize_t simple_xattr_list(struct inode *inode, struct simple_xattrs *xattrs,
+void simple_xattr_free(struct simple_xattr *xattr);
+void simple_xattr_free_rcu(struct simple_xattr *xattr);
+int simple_xattr_get(struct simple_xattr_cache *cache, struct list_head *xattrs,
+		     const char *name, void *buffer, size_t size);
+struct simple_xattr *simple_xattr_set(struct simple_xattr_cache *cache,
+				      struct list_head *xattrs,
+				      const char *name, const void *value,
+				      size_t size, int flags);
+int simple_xattr_set_limited(struct simple_xattr_cache *cache,
+			     struct list_head *xattrs,
+			     struct simple_xattr_limits *limits,
+			     const char *name, const void *value,
+			     size_t size, int flags);
+ssize_t simple_xattr_list(struct inode *inode, struct list_head *xattrs,
 			  char *buffer, size_t size);
-void simple_xattr_add(struct simple_xattrs *xattrs,
-		      struct simple_xattr *new_xattr);
+int simple_xattr_add(struct simple_xattr_cache *cache, struct list_head *xattrs,
+		     struct simple_xattr *new_xattr);
+int simple_xattr_add_limited(struct simple_xattr_cache *cache,
+			     struct list_head *xattrs,
+			     struct simple_xattr_limits *limits,
+			     struct simple_xattr *new_xattr);
+int xattr_list_one(char **buffer, ssize_t *remaining_size, const char *name);
+
+void simple_xattr_cache_cleanup(struct simple_xattr_cache *cache);
+
+DEFINE_CLASS(simple_xattr,
+	     struct simple_xattr *,
+	     if (!IS_ERR_OR_NULL(_T)) simple_xattr_free(_T),
+	     simple_xattr_alloc(value, size),
+	     const void *value, size_t size)
 
 #endif	/* _LINUX_XATTR_H */

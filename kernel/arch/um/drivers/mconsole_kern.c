@@ -87,7 +87,7 @@ static irqreturn_t mconsole_interrupt(int irq, void *dev_id)
 		if (req.cmd->context == MCONSOLE_INTR)
 			(*req.cmd->handler)(&req);
 		else {
-			new = kmalloc(sizeof(*new), GFP_NOWAIT);
+			new = kmalloc_obj(*new, GFP_NOWAIT);
 			if (new == NULL)
 				mconsole_reply(&req, "Out of memory", 1, 0);
 			else {
@@ -554,7 +554,7 @@ struct mconsole_output {
 
 static DEFINE_SPINLOCK(client_lock);
 static LIST_HEAD(clients);
-static char console_buf[MCONSOLE_MAX_DATA];
+static char console_buf[MCONSOLE_MAX_DATA] __nonstring;
 
 static void console_write(struct console *console, const char *string,
 			  unsigned int len)
@@ -567,7 +567,7 @@ static void console_write(struct console *console, const char *string,
 
 	while (len > 0) {
 		n = min((size_t) len, ARRAY_SIZE(console_buf));
-		strncpy(console_buf, string, n);
+		memcpy(console_buf, string, n);
 		string += n;
 		len -= n;
 

@@ -36,11 +36,15 @@
 extern struct shared_info *HYPERVISOR_shared_info;
 extern struct start_info *xen_start_info;
 
+#include <asm/bug.h>
+#include <asm/cpuid/api.h>
 #include <asm/processor.h>
+
+#define XEN_SIGNATURE "XenVMMXenVMM"
 
 static inline uint32_t xen_cpuid_base(void)
 {
-	return hypervisor_cpuid_base("XenVMMXenVMM", 2);
+	return cpuid_base_hypervisor(XEN_SIGNATURE, 2);
 }
 
 struct pci_dev;
@@ -59,6 +63,17 @@ void xen_arch_unregister_cpu(int num);
 #ifdef CONFIG_PVH
 void __init xen_pvh_init(struct boot_params *boot_params);
 void __init mem_map_via_hcall(struct boot_params *boot_params_p);
+#endif
+
+bool xen_is_cpu_lazy_mode(void);
+
+#if defined(CONFIG_XEN_DOM0) && defined(CONFIG_ACPI)
+void xen_sanitize_proc_cap_bits(uint32_t *buf);
+#else
+static inline void xen_sanitize_proc_cap_bits(uint32_t *buf)
+{
+	BUG();
+}
 #endif
 
 #endif /* _ASM_X86_XEN_HYPERVISOR_H */

@@ -7,7 +7,7 @@
 #include "i915_scatterlist.h"
 #include "i915_ttm_buddy_manager.h"
 
-#include <drm/drm_buddy.h>
+#include <linux/gpu_buddy.h>
 #include <drm/drm_mm.h>
 
 #include <linux/slab.h>
@@ -56,7 +56,7 @@ static const struct i915_refct_sgt_ops rsgt_ops = {
 /**
  * i915_refct_sgt_init - Initialize a struct i915_refct_sgt with default ops
  * @rsgt: The struct i915_refct_sgt to initialize.
- * size: The size of the underlying memory buffer.
+ * @size: The size of the underlying memory buffer.
  */
 void i915_refct_sgt_init(struct i915_refct_sgt *rsgt, size_t size)
 {
@@ -90,14 +90,21 @@ struct i915_refct_sgt *i915_rsgt_from_mm_node(const struct drm_mm_node *node,
 
 	GEM_BUG_ON(!max_segment);
 
-	rsgt = kmalloc(sizeof(*rsgt), GFP_KERNEL);
+	rsgt = kmalloc_obj(*rsgt, GFP_KERNEL | __GFP_NOWARN);
 	if (!rsgt)
 		return ERR_PTR(-ENOMEM);
 
 	i915_refct_sgt_init(rsgt, node->size << PAGE_SHIFT);
 	st = &rsgt->table;
+	/* restricted by sg_alloc_table */
+	if (WARN_ON(overflows_type(DIV_ROUND_UP_ULL(node->size, segment_pages),
+				   unsigned int))) {
+		i915_refct_sgt_put(rsgt);
+		return ERR_PTR(-E2BIG);
+	}
+
 	if (sg_alloc_table(st, DIV_ROUND_UP_ULL(node->size, segment_pages),
-			   GFP_KERNEL)) {
+			   GFP_KERNEL | __GFP_NOWARN)) {
 		i915_refct_sgt_put(rsgt);
 		return ERR_PTR(-ENOMEM);
 	}
@@ -160,9 +167,9 @@ struct i915_refct_sgt *i915_rsgt_from_buddy_resource(struct ttm_resource *res,
 	struct i915_ttm_buddy_resource *bman_res = to_ttm_buddy_resource(res);
 	const u64 size = res->size;
 	const u32 max_segment = round_down(UINT_MAX, page_alignment);
-	struct drm_buddy *mm = bman_res->mm;
+	struct gpu_buddy *mm = bman_res->mm;
 	struct list_head *blocks = &bman_res->blocks;
-	struct drm_buddy_block *block;
+	struct gpu_buddy_block *block;
 	struct i915_refct_sgt *rsgt;
 	struct scatterlist *sg;
 	struct sg_table *st;
@@ -171,13 +178,19 @@ struct i915_refct_sgt *i915_rsgt_from_buddy_resource(struct ttm_resource *res,
 	GEM_BUG_ON(list_empty(blocks));
 	GEM_BUG_ON(!max_segment);
 
-	rsgt = kmalloc(sizeof(*rsgt), GFP_KERNEL);
+	rsgt = kmalloc_obj(*rsgt, GFP_KERNEL | __GFP_NOWARN);
 	if (!rsgt)
 		return ERR_PTR(-ENOMEM);
 
 	i915_refct_sgt_init(rsgt, size);
 	st = &rsgt->table;
-	if (sg_alloc_table(st, PFN_UP(res->size), GFP_KERNEL)) {
+	/* restricted by sg_alloc_table */
+	if (WARN_ON(overflows_type(PFN_UP(res->size), unsigned int))) {
+		i915_refct_sgt_put(rsgt);
+		return ERR_PTR(-E2BIG);
+	}
+
+	if (sg_alloc_table(st, PFN_UP(res->size), GFP_KERNEL | __GFP_NOWARN)) {
 		i915_refct_sgt_put(rsgt);
 		return ERR_PTR(-ENOMEM);
 	}
@@ -189,8 +202,8 @@ struct i915_refct_sgt *i915_rsgt_from_buddy_resource(struct ttm_resource *res,
 	list_for_each_entry(block, blocks, link) {
 		u64 block_size, offset;
 
-		block_size = min_t(u64, size, drm_buddy_block_size(mm, block));
-		offset = drm_buddy_block_offset(block);
+		block_size = min_t(u64, size, gpu_buddy_block_size(mm, block));
+		offset = gpu_buddy_block_offset(block);
 
 		while (block_size) {
 			u64 len;

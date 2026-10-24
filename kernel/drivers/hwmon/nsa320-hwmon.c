@@ -20,8 +20,6 @@
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/of.h>
-#include <linux/of_device.h>
-#include <linux/of_platform.h>
 #include <linux/platform_device.h>
 
 /* Tests for error return values rely upon this value being < 0x80 */
@@ -155,6 +153,7 @@ static const struct of_device_id of_nsa320_hwmon_match[] = {
 	{ .compatible = "zyxel,nsa320-mcu", },
 	{ },
 };
+MODULE_DEVICE_TABLE(of, of_nsa320_hwmon_match);
 
 static int nsa320_hwmon_probe(struct platform_device *pdev)
 {
@@ -193,13 +192,12 @@ static struct platform_driver nsa320_hwmon_driver = {
 	.probe = nsa320_hwmon_probe,
 	.driver = {
 		.name = "nsa320-hwmon",
-		.of_match_table = of_match_ptr(of_nsa320_hwmon_match),
+		.of_match_table = of_nsa320_hwmon_match,
 	},
 };
 
 module_platform_driver(nsa320_hwmon_driver);
 
-MODULE_DEVICE_TABLE(of, of_nsa320_hwmon_match);
 MODULE_AUTHOR("Peter Schildmann <linux@schildmann.info>");
 MODULE_AUTHOR("Adam Baker <linux@baker-net.org.uk>");
 MODULE_DESCRIPTION("NSA320 Hardware Monitoring");

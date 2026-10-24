@@ -8,7 +8,7 @@
  *		eric miao <eric.miao@marvell.com>
  *
  * Links to reference manuals for some of the supported PWM chips can be found
- * in Documentation/arm/marvell.rst.
+ * in Documentation/arch/arm/marvell.rst.
  *
  * Limitations:
  * - When PWM is stopped, the current PWM period stops abruptly at the next
@@ -23,7 +23,8 @@
 #include <linux/clk.h>
 #include <linux/io.h>
 #include <linux/pwm.h>
-#include <linux/of_device.h>
+#include <linux/of.h>
+#include <linux/reset.h>
 
 #include <asm/div64.h>
 
@@ -48,7 +49,6 @@ MODULE_DEVICE_TABLE(platform, pwm_id_table);
 #define PWMDCR_FD	(1 << 10)
 
 struct pxa_pwm_chip {
-	struct pwm_chip	chip;
 	struct device	*dev;
 
 	struct clk	*clk;
@@ -57,7 +57,7 @@ struct pxa_pwm_chip {
 
 static inline struct pxa_pwm_chip *to_pxa_pwm_chip(struct pwm_chip *chip)
 {
-	return container_of(chip, struct pxa_pwm_chip, chip);
+	return pwmchip_get_drvdata(chip);
 }
 
 /*
@@ -134,7 +134,6 @@ static int pxa_pwm_apply(struct pwm_chip *chip, struct pwm_device *pwm,
 
 static const struct pwm_ops pxa_pwm_ops = {
 	.apply = pxa_pwm_apply,
-	.owner = THIS_MODULE,
 };
 
 #ifdef CONFIG_OF
@@ -156,51 +155,53 @@ MODULE_DEVICE_TABLE(of, pwm_of_match);
 #define pwm_of_match NULL
 #endif
 
-static const struct platform_device_id *pxa_pwm_get_id_dt(struct device *dev)
-{
-	const struct of_device_id *id = of_match_device(pwm_of_match, dev);
-
-	return id ? id->data : NULL;
-}
-
 static int pwm_probe(struct platform_device *pdev)
 {
 	const struct platform_device_id *id = platform_get_device_id(pdev);
+	struct pwm_chip *chip;
 	struct pxa_pwm_chip *pc;
+	struct clk *bus_clk;
+	struct device *dev = &pdev->dev;
+	struct reset_control *rst;
 	int ret = 0;
 
 	if (IS_ENABLED(CONFIG_OF) && id == NULL)
-		id = pxa_pwm_get_id_dt(&pdev->dev);
+		id = of_device_get_match_data(dev);
 
 	if (id == NULL)
 		return -EINVAL;
 
-	pc = devm_kzalloc(&pdev->dev, sizeof(*pc), GFP_KERNEL);
-	if (pc == NULL)
-		return -ENOMEM;
+	chip = devm_pwmchip_alloc(dev, (id->driver_data & HAS_SECONDARY_PWM) ? 2 : 1,
+				  sizeof(*pc));
+	if (IS_ERR(chip))
+		return PTR_ERR(chip);
+	pc = to_pxa_pwm_chip(chip);
 
-	pc->clk = devm_clk_get(&pdev->dev, NULL);
+	bus_clk = devm_clk_get_optional_enabled(dev, "bus");
+	if (IS_ERR(bus_clk))
+		return dev_err_probe(dev, PTR_ERR(bus_clk), "Failed to get bus clock\n");
+
+	/* Get named func clk if bus clock is valid */
+	pc->clk = devm_clk_get(dev, bus_clk ? "func" : NULL);
 	if (IS_ERR(pc->clk))
-		return PTR_ERR(pc->clk);
+		return dev_err_probe(dev, PTR_ERR(pc->clk), "Failed to get clock\n");
 
-	pc->chip.dev = &pdev->dev;
-	pc->chip.ops = &pxa_pwm_ops;
-	pc->chip.npwm = (id->driver_data & HAS_SECONDARY_PWM) ? 2 : 1;
+	rst = devm_reset_control_get_optional_exclusive_deasserted(dev, NULL);
+	if (IS_ERR(rst))
+		return PTR_ERR(rst);
 
-	if (IS_ENABLED(CONFIG_OF)) {
-		pc->chip.of_xlate = of_pwm_single_xlate;
-		pc->chip.of_pwm_n_cells = 1;
-	}
+	chip->ops = &pxa_pwm_ops;
+
+	if (IS_ENABLED(CONFIG_OF))
+		chip->of_xlate = of_pwm_single_xlate;
 
 	pc->mmio_base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(pc->mmio_base))
 		return PTR_ERR(pc->mmio_base);
 
-	ret = devm_pwmchip_add(&pdev->dev, &pc->chip);
-	if (ret < 0) {
-		dev_err(&pdev->dev, "pwmchip_add() failed: %d\n", ret);
-		return ret;
-	}
+	ret = devm_pwmchip_add(dev, chip);
+	if (ret < 0)
+		return dev_err_probe(dev, ret, "pwmchip_add() failed\n");
 
 	return 0;
 }
@@ -216,4 +217,5 @@ static struct platform_driver pwm_driver = {
 
 module_platform_driver(pwm_driver);
 
+MODULE_DESCRIPTION("PXA Pulse Width Modulator driver");
 MODULE_LICENSE("GPL v2");

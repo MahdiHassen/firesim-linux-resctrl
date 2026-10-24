@@ -22,14 +22,11 @@
 #include <linux/slab.h>
 #include <linux/tty.h>
 #include <linux/tty_driver.h>
-#include <linux/tty_flip.h>
 #include <linux/module.h>
-#include <linux/moduleparam.h>
 #include <linux/seq_file.h>
 #include <linux/spinlock.h>
 #include <linux/mutex.h>
 #include <linux/list.h>
-#include <linux/uaccess.h>
 #include <linux/serial.h>
 #include <linux/usb.h>
 #include <linux/usb/serial.h>
@@ -361,8 +358,7 @@ static void serial_cleanup(struct tty_struct *tty)
 	module_put(owner);
 }
 
-static int serial_write(struct tty_struct *tty, const unsigned char *buf,
-								int count)
+static ssize_t serial_write(struct tty_struct *tty, const u8 *buf, size_t count)
 {
 	struct usb_serial_port *port = tty->driver_data;
 	int retval = -ENODEV;
@@ -370,7 +366,7 @@ static int serial_write(struct tty_struct *tty, const unsigned char *buf,
 	if (port->serial->dev->state == USB_STATE_NOTATTACHED)
 		goto exit;
 
-	dev_dbg(&port->dev, "%s - %d byte(s)\n", __func__, count);
+	dev_dbg(&port->dev, "%s - %zu byte(s)\n", __func__, count);
 
 	retval = port->serial->type->write(tty, port, buf, count);
 	if (retval < 0)
@@ -539,9 +535,9 @@ static int serial_break(struct tty_struct *tty, int break_state)
 	dev_dbg(&port->dev, "%s\n", __func__);
 
 	if (port->serial->type->break_ctl)
-		port->serial->type->break_ctl(tty, break_state);
+		return port->serial->type->break_ctl(tty, break_state);
 
-	return 0;
+	return -ENOTTY;
 }
 
 static int serial_proc_show(struct seq_file *m, void *v)
@@ -689,7 +685,7 @@ static struct usb_serial *create_serial(struct usb_device *dev,
 {
 	struct usb_serial *serial;
 
-	serial = kzalloc(sizeof(*serial), GFP_KERNEL);
+	serial = kzalloc_obj(*serial);
 	if (!serial)
 		return NULL;
 	serial->dev = usb_get_dev(dev);
@@ -707,14 +703,12 @@ static const struct usb_device_id *match_dynamic_id(struct usb_interface *intf,
 {
 	struct usb_dynid *dynid;
 
-	spin_lock(&drv->dynids.lock);
+	guard(mutex)(&usb_dynids_lock);
 	list_for_each_entry(dynid, &drv->dynids.list, node) {
 		if (usb_match_one_id(intf, &dynid->id)) {
-			spin_unlock(&drv->dynids.lock);
 			return &dynid->id;
 		}
 	}
-	spin_unlock(&drv->dynids.lock);
 	return NULL;
 }
 
@@ -754,7 +748,7 @@ static struct usb_serial_driver *search_serial_device(
 	return NULL;
 }
 
-static int serial_port_carrier_raised(struct tty_port *port)
+static bool serial_port_carrier_raised(struct tty_port *port)
 {
 	struct usb_serial_port *p = container_of(port, struct usb_serial_port, port);
 	struct usb_serial_driver *drv = p->serial->type;
@@ -762,10 +756,10 @@ static int serial_port_carrier_raised(struct tty_port *port)
 	if (drv->carrier_raised)
 		return drv->carrier_raised(p);
 	/* No carrier control - don't block */
-	return 1;
+	return true;
 }
 
-static void serial_port_dtr_rts(struct tty_port *port, int on)
+static void serial_port_dtr_rts(struct tty_port *port, bool on)
 {
 	struct usb_serial_port *p = container_of(port, struct usb_serial_port, port);
 	struct usb_serial_driver *drv = p->serial->type;
@@ -1008,7 +1002,7 @@ static int usb_serial_probe(struct usb_interface *interface,
 	}
 
 	/* descriptor matches, let's find the endpoints needed */
-	epds = kzalloc(sizeof(*epds), GFP_KERNEL);
+	epds = kzalloc_obj(*epds);
 	if (!epds) {
 		retval = -ENOMEM;
 		goto err_release_sibling;
@@ -1062,7 +1056,7 @@ static int usb_serial_probe(struct usb_interface *interface,
 
 	dev_dbg(ddev, "setting up %d port structure(s)\n", max_endpoints);
 	for (i = 0; i < max_endpoints; ++i) {
-		port = kzalloc(sizeof(struct usb_serial_port), GFP_KERNEL);
+		port = kzalloc_obj(struct usb_serial_port);
 		if (!port) {
 			retval = -ENOMEM;
 			goto err_free_epds;
@@ -1179,7 +1173,6 @@ static void usb_serial_disconnect(struct usb_interface *interface)
 	struct usb_serial *serial = usb_get_intfdata(interface);
 	struct device *dev = &interface->dev;
 	struct usb_serial_port *port;
-	struct tty_struct *tty;
 
 	/* sibling interface is cleaning up */
 	if (!serial)
@@ -1194,11 +1187,7 @@ static void usb_serial_disconnect(struct usb_interface *interface)
 
 	for (i = 0; i < serial->num_ports; ++i) {
 		port = serial->port[i];
-		tty = tty_port_tty_get(&port->port);
-		if (tty) {
-			tty_vhangup(tty);
-			tty_kref_put(tty);
-		}
+		tty_port_tty_vhangup(&port->port);
 		usb_serial_port_poison_urbs(port);
 		wake_up_interruptible(&port->port.delta_msr_wait);
 		cancel_work_sync(&port->work);
@@ -1460,17 +1449,18 @@ static void usb_serial_deregister(struct usb_serial_driver *device)
 }
 
 /**
- * usb_serial_register_drivers - register drivers for a usb-serial module
+ * __usb_serial_register_drivers - register drivers for a usb-serial module
  * @serial_drivers: NULL-terminated array of pointers to drivers to be registered
+ * @owner: owning module
  * @name: name of the usb_driver for this set of @serial_drivers
  * @id_table: list of all devices this @serial_drivers set binds to
  *
  * Registers all the drivers in the @serial_drivers array, and dynamically
  * creates a struct usb_driver with the name @name and id_table of @id_table.
  */
-int usb_serial_register_drivers(struct usb_serial_driver *const serial_drivers[],
-				const char *name,
-				const struct usb_device_id *id_table)
+int __usb_serial_register_drivers(struct usb_serial_driver *const serial_drivers[],
+				  struct module *owner, const char *name,
+				  const struct usb_device_id *id_table)
 {
 	int rc;
 	struct usb_driver *udriver;
@@ -1489,7 +1479,7 @@ int usb_serial_register_drivers(struct usb_serial_driver *const serial_drivers[]
 	 * Suspend/resume support is implemented in the usb-serial core,
 	 * so fill in the PM-related fields in udriver.
 	 */
-	udriver = kzalloc(sizeof(*udriver), GFP_KERNEL);
+	udriver = kzalloc_obj(*udriver);
 	if (!udriver)
 		return -ENOMEM;
 
@@ -1515,6 +1505,7 @@ int usb_serial_register_drivers(struct usb_serial_driver *const serial_drivers[]
 
 	for (sd = serial_drivers; *sd; ++sd) {
 		(*sd)->usb_driver = udriver;
+		(*sd)->driver.owner = owner;
 		rc = usb_serial_register(*sd);
 		if (rc)
 			goto err_deregister_drivers;
@@ -1522,7 +1513,7 @@ int usb_serial_register_drivers(struct usb_serial_driver *const serial_drivers[]
 
 	/* Now set udriver's id_table and look for matches */
 	udriver->id_table = id_table;
-	rc = driver_attach(&udriver->drvwrap.driver);
+	rc = driver_attach(&udriver->driver);
 	return 0;
 
 err_deregister_drivers:
@@ -1533,7 +1524,7 @@ err_free_driver:
 	kfree(udriver);
 	return rc;
 }
-EXPORT_SYMBOL_GPL(usb_serial_register_drivers);
+EXPORT_SYMBOL_GPL(__usb_serial_register_drivers);
 
 /**
  * usb_serial_deregister_drivers - deregister drivers for a usb-serial module

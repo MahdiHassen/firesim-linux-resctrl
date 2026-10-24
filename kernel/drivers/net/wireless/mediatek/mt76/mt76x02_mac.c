@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: ISC
+// SPDX-License-Identifier: BSD-3-Clause-Clear
 /*
  * Copyright (C) 2016 Felix Fietkau <nbd@nbd.name>
  * Copyright (C) 2018 Stanislaw Gruszka <stf_xl@wp.pl>
@@ -564,9 +564,7 @@ void mt76x02_send_tx_status(struct mt76x02_dev *dev,
 
 	rcu_read_lock();
 
-	if (stat->wcid < MT76x02_N_WCIDS)
-		wcid = rcu_dereference(dev->mt76.wcid[stat->wcid]);
-
+	wcid = mt76_wcid_ptr(dev, stat->wcid);
 	if (wcid && wcid->sta) {
 		void *priv;
 
@@ -631,8 +629,11 @@ void mt76x02_send_tx_status(struct mt76x02_dev *dev,
 
 	mt76_tx_status_unlock(mdev, &list);
 
-	if (!status.skb)
+	if (!status.skb) {
+		spin_lock_bh(&dev->mt76.rx_lock);
 		ieee80211_tx_status_ext(mt76_hw(dev), &status);
+		spin_unlock_bh(&dev->mt76.rx_lock);
+	}
 
 	if (!len)
 		goto out;
@@ -850,7 +851,8 @@ int mt76x02_mac_process_rx(struct mt76x02_dev *dev, struct sk_buff *skb,
 	if (WARN_ON_ONCE(len > skb->len))
 		return -EINVAL;
 
-	pskb_trim(skb, len);
+	if (pskb_trim(skb, len))
+		return -EINVAL;
 
 	status->chains = BIT(0);
 	signal = mt76x02_mac_get_rssi(dev, rxwi->rssi[0], 0);

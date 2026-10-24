@@ -133,7 +133,7 @@
 
 		key-vol-up {
 			label = "Volume up";
-			gpios = <&pm8998_gpio 6 GPIO_ACTIVE_LOW>;
+			gpios = <&pm8998_gpios 6 GPIO_ACTIVE_LOW>;
 			linux,code = <KEY_VOLUMEUP>;
 			debounce-interval = <15>;
 			wakeup-source;
@@ -213,7 +213,6 @@
 
 		rmi4-f1a@1a {
 			reg = <0x1a>;
-			syna,codes = <KEY_BACK KEY_APPSELECT>;
 		};
 	};
 };
@@ -278,7 +277,7 @@
 	};
 };
 
-&pm8998_gpio {
+&pm8998_gpios {
 	vol_up_key_default: vol-up-key-default-state {
 		pins = "gpio6";
 		function = "normal";
@@ -528,7 +527,6 @@
 		function = "gpio";
 		drive-strength = <2>;
 		bias-disable;
-		input-enable;
 	};
 
 	mdss_dsi_active_state: mdss-dsi-active-state {
@@ -545,14 +543,7 @@
 		bias-pull-down;
 	};
 
-	mdss_te_active_state: mdss-te-active-state {
-		pins = "gpio10";
-		function = "mdp_vsync_a";
-		drive-strength = <2>;
-		bias-pull-down;
-	};
-
-	mdss_te_suspend_state: mdss-te-suspend-state {
+	mdss_te_state: mdss-te-state {
 		pins = "gpio10";
 		function = "mdp_vsync_a";
 		drive-strength = <2>;
@@ -620,7 +611,6 @@
 		function = "gpio";
 		drive-strength = <16>;
 		bias-pull-up;
-		input-enable;
 	};
 
 	ts_int_suspend_state: ts-int-suspend-state {
@@ -642,7 +632,6 @@
 		function = "gpio";
 		bias-pull-down;
 		drive-strength = <2>;
-		input-enable;
 	};
 
 	wsa_leftspk_pwr_n_state: wsa-leftspk-pwr-n-state {
@@ -671,6 +660,7 @@
 	vcc-supply = <&vreg_l20a_2p95>;
 	vccq-supply = <&vreg_l26a_1p2>;
 	vccq2-supply = <&vreg_s4a_1p8>;
+	vdd-hba-supply = <&vreg_l26a_1p2>;
 	vcc-max-microamp = <750000>;
 	vccq-max-microamp = <560000>;
 	vccq2-max-microamp = <750000>;
@@ -680,7 +670,6 @@
 &ufsphy {
 	vdda-phy-supply = <&vreg_l1a_0p875>;
 	vdda-pll-supply = <&vreg_l2a_1p2>;
-	vddp-ref-clk-supply = <&vreg_l26a_1p2>;
 	status = "okay";
 };
 

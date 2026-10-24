@@ -402,14 +402,15 @@ static int mt6332_regulator_probe(struct platform_device *pdev)
 }
 
 static const struct platform_device_id mt6332_platform_ids[] = {
-	{"mt6332-regulator", 0},
-	{ /* sentinel */ },
+	{ .name = "mt6332-regulator" },
+	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(platform, mt6332_platform_ids);
 
 static struct platform_driver mt6332_regulator_driver = {
 	.driver = {
 		.name = "mt6332-regulator",
+		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
 	},
 	.probe = mt6332_regulator_probe,
 	.id_table = mt6332_platform_ids,

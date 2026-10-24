@@ -21,7 +21,7 @@
 #include <linux/gpio/consumer.h>
 #include <linux/of.h>
 #include <linux/slab.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 struct eeti_ts {
 	struct i2c_client *client;
@@ -89,7 +89,7 @@ static irqreturn_t eeti_ts_isr(int irq, void *dev_id)
 	struct eeti_ts *eeti = dev_id;
 	int error;
 
-	mutex_lock(&eeti->mutex);
+	guard(mutex)(&eeti->mutex);
 
 	do {
 		/*
@@ -109,13 +109,12 @@ static irqreturn_t eeti_ts_isr(int irq, void *dev_id)
 
 	} while (eeti->running && eeti->attn_gpio);
 
-	mutex_unlock(&eeti->mutex);
 	return IRQ_HANDLED;
 }
 
 static void eeti_ts_start(struct eeti_ts *eeti)
 {
-	mutex_lock(&eeti->mutex);
+	guard(mutex)(&eeti->mutex);
 
 	eeti->running = true;
 	enable_irq(eeti->client->irq);
@@ -127,8 +126,6 @@ static void eeti_ts_start(struct eeti_ts *eeti)
 	 */
 	if (eeti->attn_gpio && gpiod_get_value_cansleep(eeti->attn_gpio))
 		eeti_ts_read(eeti);
-
-	mutex_unlock(&eeti->mutex);
 }
 
 static void eeti_ts_stop(struct eeti_ts *eeti)
@@ -232,18 +229,16 @@ static int eeti_ts_probe(struct i2c_client *client)
 	return 0;
 }
 
-static int __maybe_unused eeti_ts_suspend(struct device *dev)
+static int eeti_ts_suspend(struct device *dev)
 {
 	struct i2c_client *client = to_i2c_client(dev);
 	struct eeti_ts *eeti = i2c_get_clientdata(client);
 	struct input_dev *input_dev = eeti->input;
 
-	mutex_lock(&input_dev->mutex);
-
-	if (input_device_enabled(input_dev))
-		eeti_ts_stop(eeti);
-
-	mutex_unlock(&input_dev->mutex);
+	scoped_guard(mutex, &input_dev->mutex) {
+		if (input_device_enabled(input_dev))
+			eeti_ts_stop(eeti);
+	}
 
 	if (device_may_wakeup(&client->dev))
 		enable_irq_wake(client->irq);
@@ -251,7 +246,7 @@ static int __maybe_unused eeti_ts_suspend(struct device *dev)
 	return 0;
 }
 
-static int __maybe_unused eeti_ts_resume(struct device *dev)
+static int eeti_ts_resume(struct device *dev)
 {
 	struct i2c_client *client = to_i2c_client(dev);
 	struct eeti_ts *eeti = i2c_get_clientdata(client);
@@ -260,20 +255,18 @@ static int __maybe_unused eeti_ts_resume(struct device *dev)
 	if (device_may_wakeup(&client->dev))
 		disable_irq_wake(client->irq);
 
-	mutex_lock(&input_dev->mutex);
-
-	if (input_device_enabled(input_dev))
-		eeti_ts_start(eeti);
-
-	mutex_unlock(&input_dev->mutex);
+	scoped_guard(mutex, &input_dev->mutex) {
+		if (input_device_enabled(input_dev))
+			eeti_ts_start(eeti);
+	}
 
 	return 0;
 }
 
-static SIMPLE_DEV_PM_OPS(eeti_ts_pm, eeti_ts_suspend, eeti_ts_resume);
+static DEFINE_SIMPLE_DEV_PM_OPS(eeti_ts_pm, eeti_ts_suspend, eeti_ts_resume);
 
 static const struct i2c_device_id eeti_ts_id[] = {
-	{ "eeti_ts", 0 },
+	{ .name = "eeti_ts" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, eeti_ts_id);
@@ -288,10 +281,10 @@ static const struct of_device_id of_eeti_ts_match[] = {
 static struct i2c_driver eeti_ts_driver = {
 	.driver = {
 		.name = "eeti_ts",
-		.pm = &eeti_ts_pm,
+		.pm = pm_sleep_ptr(&eeti_ts_pm),
 		.of_match_table = of_match_ptr(of_eeti_ts_match),
 	},
-	.probe_new = eeti_ts_probe,
+	.probe = eeti_ts_probe,
 	.id_table = eeti_ts_id,
 };
 

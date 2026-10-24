@@ -14,6 +14,7 @@
 
 struct mptcp_info;
 struct mptcp_sock;
+struct mptcp_pm_addr_entry;
 struct seq_file;
 
 /* MPTCP sk_buff extension data */
@@ -26,7 +27,9 @@ struct mptcp_ext {
 	u32		subflow_seq;
 	u16		data_len;
 	__sum16		csum;
-	u8		use_map:1,
+
+	struct_group(flags,
+		u8	use_map:1,
 			dsn64:1,
 			data_fin:1,
 			use_ack:1,
@@ -34,9 +37,10 @@ struct mptcp_ext {
 			mpc_map:1,
 			frozen:1,
 			reset_transient:1;
-	u8		reset_reason:4,
+		u8	reset_reason:4,
 			csum_reqd:1,
 			infinite_map:1;
+	); /* end of flags group */
 };
 
 #define MPTCPOPT_HMAC_LEN	20
@@ -68,7 +72,8 @@ struct mptcp_out_options {
 	u8 reset_reason:4,
 	   reset_transient:1,
 	   csum_reqd:1,
-	   allow_join_id0:1;
+	   allow_join_id0:1,
+	   drop_ts:1;
 	union {
 		struct {
 			u64 sndr_key;
@@ -96,6 +101,35 @@ struct mptcp_out_options {
 #endif
 };
 
+#define MPTCP_SCHED_NAME_MAX	16
+#define MPTCP_SCHED_MAX		128
+#define MPTCP_SCHED_BUF_MAX	(MPTCP_SCHED_NAME_MAX * MPTCP_SCHED_MAX)
+
+struct mptcp_sched_ops {
+	int (*get_send)(struct mptcp_sock *msk);
+	int (*get_retrans)(struct mptcp_sock *msk);
+
+	char			name[MPTCP_SCHED_NAME_MAX];
+	struct module		*owner;
+	struct list_head	list;
+
+	void (*init)(struct mptcp_sock *msk);
+	void (*release)(struct mptcp_sock *msk);
+} ____cacheline_aligned_in_smp;
+
+#define MPTCP_PM_NAME_MAX	16
+#define MPTCP_PM_MAX		128
+#define MPTCP_PM_BUF_MAX	(MPTCP_PM_NAME_MAX * MPTCP_PM_MAX)
+
+struct mptcp_pm_ops {
+	char			name[MPTCP_PM_NAME_MAX];
+	struct module		*owner;
+	struct list_head	list;
+
+	void (*init)(struct mptcp_sock *msk);
+	void (*release)(struct mptcp_sock *msk);
+} ____cacheline_aligned_in_smp;
+
 #ifdef CONFIG_MPTCP
 void mptcp_init(void);
 
@@ -119,9 +153,9 @@ bool mptcp_syn_options(struct sock *sk, const struct sk_buff *skb,
 		       unsigned int *size, struct mptcp_out_options *opts);
 bool mptcp_synack_options(const struct request_sock *req, unsigned int *size,
 			  struct mptcp_out_options *opts);
-bool mptcp_established_options(struct sock *sk, struct sk_buff *skb,
-			       unsigned int *size, unsigned int remaining,
-			       struct mptcp_out_options *opts);
+int mptcp_established_options(struct sock *sk, struct sk_buff *skb,
+			      unsigned int remaining, bool has_ts,
+			      struct mptcp_out_options *opts);
 bool mptcp_incoming_options(struct sock *sk, struct sk_buff *skb);
 
 void mptcp_write_options(struct tcphdr *th, __be32 *ptr, struct tcp_sock *tp,
@@ -199,6 +233,8 @@ static inline __be32 mptcp_reset_option(const struct sk_buff *skb)
 
 	return htonl(0u);
 }
+
+void mptcp_active_detect_blackhole(struct sock *sk, bool expired);
 #else
 
 static inline void mptcp_init(void)
@@ -230,15 +266,6 @@ static inline bool mptcp_syn_options(struct sock *sk, const struct sk_buff *skb,
 static inline bool mptcp_synack_options(const struct request_sock *req,
 					unsigned int *size,
 					struct mptcp_out_options *opts)
-{
-	return false;
-}
-
-static inline bool mptcp_established_options(struct sock *sk,
-					     struct sk_buff *skb,
-					     unsigned int *size,
-					     unsigned int remaining,
-					     struct mptcp_out_options *opts)
 {
 	return false;
 }
@@ -283,6 +310,8 @@ static inline struct request_sock *mptcp_subflow_reqsk_alloc(const struct reques
 }
 
 static inline __be32 mptcp_reset_option(const struct sk_buff *skb)  { return htonl(0u); }
+
+static inline void mptcp_active_detect_blackhole(struct sock *sk, bool expired) { }
 #endif /* CONFIG_MPTCP */
 
 #if IS_ENABLED(CONFIG_MPTCP_IPV6)

@@ -7,7 +7,8 @@
 #include <linux/delay.h>
 #include <linux/iommu.h>
 #include <linux/module.h>
-#include <linux/of_device.h>
+#include <linux/of.h>
+#include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
 #include <linux/reset.h>
 
@@ -70,22 +71,15 @@ static int gr2d_init(struct host1x_client *client)
 		goto free;
 	}
 
-	pm_runtime_enable(client->dev);
-	pm_runtime_use_autosuspend(client->dev);
-	pm_runtime_set_autosuspend_delay(client->dev, 200);
-
 	err = tegra_drm_register_client(dev->dev_private, drm);
 	if (err < 0) {
 		dev_err(client->dev, "failed to register client: %d\n", err);
-		goto disable_rpm;
+		goto detach_iommu;
 	}
 
 	return 0;
 
-disable_rpm:
-	pm_runtime_dont_use_autosuspend(client->dev);
-	pm_runtime_force_suspend(client->dev);
-
+detach_iommu:
 	host1x_client_iommu_detach(client);
 free:
 	host1x_syncpt_put(client->syncpts[0]);
@@ -105,9 +99,6 @@ static int gr2d_exit(struct host1x_client *client)
 	err = tegra_drm_unregister_client(tegra, drm);
 	if (err < 0)
 		return err;
-
-	pm_runtime_dont_use_autosuspend(client->dev);
-	pm_runtime_force_suspend(client->dev);
 
 	host1x_client_iommu_detach(client);
 	host1x_syncpt_put(client->syncpts[0]);
@@ -282,32 +273,31 @@ static int gr2d_probe(struct platform_device *pdev)
 	if (err)
 		return err;
 
-	err = host1x_client_register(&gr2d->client.base);
-	if (err < 0) {
-		dev_err(dev, "failed to register host1x client: %d\n", err);
-		return err;
-	}
-
 	/* initialize address register map */
 	for (i = 0; i < ARRAY_SIZE(gr2d_addr_regs); i++)
 		set_bit(gr2d_addr_regs[i], gr2d->addr_regs);
 
-	return 0;
-}
+	pm_runtime_enable(dev);
 
-static int gr2d_remove(struct platform_device *pdev)
-{
-	struct gr2d *gr2d = platform_get_drvdata(pdev);
-	int err;
-
-	err = host1x_client_unregister(&gr2d->client.base);
+	err = host1x_client_register(&gr2d->client.base);
 	if (err < 0) {
-		dev_err(&pdev->dev, "failed to unregister host1x client: %d\n",
-			err);
+		pm_runtime_disable(dev);
+		dev_err(dev, "failed to register host1x client: %d\n", err);
 		return err;
 	}
 
+	pm_runtime_use_autosuspend(dev);
+	pm_runtime_set_autosuspend_delay(dev, 500);
+
 	return 0;
+}
+
+static void gr2d_remove(struct platform_device *pdev)
+{
+	struct gr2d *gr2d = platform_get_drvdata(pdev);
+
+	pm_runtime_disable(&pdev->dev);
+	host1x_client_unregister(&gr2d->client.base);
 }
 
 static int __maybe_unused gr2d_runtime_suspend(struct device *dev)

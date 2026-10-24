@@ -108,7 +108,7 @@ static void qs_thaw(struct ata_port *ap);
 static int qs_prereset(struct ata_link *link, unsigned long deadline);
 static void qs_error_handler(struct ata_port *ap);
 
-static struct scsi_host_template qs_ata_sht = {
+static const struct scsi_host_template qs_ata_sht = {
 	ATA_BASE_SHT(DRV_NAME),
 	.sg_tablesize		= QS_MAX_PRD,
 	.dma_boundary		= QS_DMA_BOUNDARY,
@@ -123,8 +123,8 @@ static struct ata_port_operations qs_ata_ops = {
 
 	.freeze			= qs_freeze,
 	.thaw			= qs_thaw,
-	.prereset		= qs_prereset,
-	.softreset		= ATA_OP_NULL,
+	.reset.prereset		= qs_prereset,
+	.reset.softreset	= ATA_OP_NULL,
 	.error_handler		= qs_error_handler,
 	.lost_interrupt		= ATA_OP_NULL,
 
@@ -146,8 +146,7 @@ static const struct ata_port_info qs_port_info[] = {
 };
 
 static const struct pci_device_id qs_ata_pci_tbl[] = {
-	{ PCI_VDEVICE(PDC, 0x2068), board_2068_idx },
-
+	{ PCI_VDEVICE(PDC, 0x2068), .driver_data = board_2068_idx },
 	{ }	/* terminate list */
 };
 
@@ -220,6 +219,7 @@ static int qs_scr_read(struct ata_link *link, unsigned int sc_reg, u32 *val)
 }
 
 static void qs_error_handler(struct ata_port *ap)
+	__must_hold(&ap->host->eh_mutex)
 {
 	qs_enter_reg_mode(ap);
 	ata_sff_error_handler(ap);

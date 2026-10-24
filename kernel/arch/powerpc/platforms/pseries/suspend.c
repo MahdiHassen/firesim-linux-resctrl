@@ -7,12 +7,14 @@
 #include <linux/delay.h>
 #include <linux/suspend.h>
 #include <linux/stat.h>
+#include <linux/sysfs.h>
 #include <asm/firmware.h>
 #include <asm/hvcall.h>
 #include <asm/machdep.h>
 #include <asm/mmu.h>
 #include <asm/rtas.h>
 #include <asm/topology.h>
+#include "pseries.h"
 
 static struct device suspend_dev;
 
@@ -120,12 +122,12 @@ static ssize_t show_hibernate(struct device *dev,
 			      struct device_attribute *attr,
 			      char *buf)
 {
-	return sprintf(buf, "%d\n", KERN_DT_UPDATE);
+	return sysfs_emit(buf, "%d\n", KERN_DT_UPDATE);
 }
 
 static DEVICE_ATTR(hibernate, 0644, show_hibernate, store_hibernate);
 
-static struct bus_type suspend_subsys = {
+static const struct bus_type suspend_subsys = {
 	.name = "power",
 	.dev_name = "power",
 };
@@ -143,6 +145,7 @@ static const struct platform_suspend_ops pseries_suspend_ops = {
  **/
 static int pseries_suspend_sysfs_register(struct device *dev)
 {
+	struct device *dev_root;
 	int rc;
 
 	if ((rc = subsys_system_register(&suspend_subsys, NULL)))
@@ -151,8 +154,13 @@ static int pseries_suspend_sysfs_register(struct device *dev)
 	dev->id = 0;
 	dev->bus = &suspend_subsys;
 
-	if ((rc = device_create_file(suspend_subsys.dev_root, &dev_attr_hibernate)))
-		goto subsys_unregister;
+	dev_root = bus_get_dev_root(&suspend_subsys);
+	if (dev_root) {
+		rc = device_create_file(dev_root, &dev_attr_hibernate);
+		put_device(dev_root);
+		if (rc)
+			goto subsys_unregister;
+	}
 
 	return 0;
 

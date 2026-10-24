@@ -30,12 +30,12 @@
 
 #include <drm/drm_mm.h>
 
-#include "gt/intel_ggtt_fencing.h"
 #include "gem/i915_gem_object.h"
-
-#include "i915_gem_gtt.h"
+#include "gt/intel_ggtt_fencing.h"
 
 #include "i915_active.h"
+#include "i915_gem_gtt.h"
+#include "i915_ptr_util.h"
 #include "i915_request.h"
 #include "i915_vma_resource.h"
 #include "i915_vma_types.h"
@@ -125,13 +125,59 @@ static inline bool i915_vma_is_closed(const struct i915_vma *vma)
 	return !list_empty(&vma->closed_link);
 }
 
+/* Internal use only. */
+static inline u64 __i915_vma_size(const struct i915_vma *vma)
+{
+	return vma->node.size - 2 * vma->guard;
+}
+
+/**
+ * i915_vma_size - Obtain the va range size of the vma
+ * @vma: The vma
+ *
+ * GPU virtual address space may be allocated with padding. This
+ * function returns the effective virtual address range size
+ * with padding subtracted.
+ *
+ * Return: The effective virtual address range size.
+ */
+static inline u64 i915_vma_size(const struct i915_vma *vma)
+{
+	GEM_BUG_ON(!drm_mm_node_allocated(&vma->node));
+	return __i915_vma_size(vma);
+}
+
+/* Internal use only. */
+static inline u64 __i915_vma_offset(const struct i915_vma *vma)
+{
+	/* The actual start of the vma->pages is after the guard pages. */
+	return vma->node.start + vma->guard;
+}
+
+/**
+ * i915_vma_offset - Obtain the va offset of the vma
+ * @vma: The vma
+ *
+ * GPU virtual address space may be allocated with padding. This
+ * function returns the effective virtual address offset the gpu
+ * should use to access the bound data.
+ *
+ * Return: The effective virtual address offset.
+ */
+static inline u64 i915_vma_offset(const struct i915_vma *vma)
+{
+	GEM_BUG_ON(!drm_mm_node_allocated(&vma->node));
+	return __i915_vma_offset(vma);
+}
+
 static inline u32 i915_ggtt_offset(const struct i915_vma *vma)
 {
 	GEM_BUG_ON(!i915_vma_is_ggtt(vma));
 	GEM_BUG_ON(!drm_mm_node_allocated(&vma->node));
-	GEM_BUG_ON(upper_32_bits(vma->node.start));
-	GEM_BUG_ON(upper_32_bits(vma->node.start + vma->node.size - 1));
-	return lower_32_bits(vma->node.start);
+	GEM_BUG_ON(upper_32_bits(i915_vma_offset(vma)));
+	GEM_BUG_ON(upper_32_bits(i915_vma_offset(vma) +
+				 i915_vma_size(vma) - 1));
+	return lower_32_bits(i915_vma_offset(vma));
 }
 
 static inline u32 i915_ggtt_pin_bias(struct i915_vma *vma)
@@ -204,7 +250,7 @@ i915_vma_compare(struct i915_vma *vma,
 
 struct i915_vma_work *i915_vma_work(void);
 int i915_vma_bind(struct i915_vma *vma,
-		  enum i915_cache_level cache_level,
+		  unsigned int pat_index,
 		  u32 flags,
 		  struct i915_vma_work *work,
 		  struct i915_vma_resource *vma_res);
@@ -243,26 +289,8 @@ int __must_check
 i915_vma_pin_ww(struct i915_vma *vma, struct i915_gem_ww_ctx *ww,
 		u64 size, u64 alignment, u64 flags);
 
-static inline int __must_check
-i915_vma_pin(struct i915_vma *vma, u64 size, u64 alignment, u64 flags)
-{
-	struct i915_gem_ww_ctx ww;
-	int err;
-
-	i915_gem_ww_ctx_init(&ww, true);
-retry:
-	err = i915_gem_object_lock(vma->obj, &ww);
-	if (!err)
-		err = i915_vma_pin_ww(vma, &ww, size, alignment, flags);
-	if (err == -EDEADLK) {
-		err = i915_gem_ww_ctx_backoff(&ww);
-		if (!err)
-			goto retry;
-	}
-	i915_gem_ww_ctx_fini(&ww);
-
-	return err;
-}
+int __must_check
+i915_vma_pin(struct i915_vma *vma, u64 size, u64 alignment, u64 flags);
 
 int i915_ggtt_pin(struct i915_vma *vma, struct i915_gem_ww_ctx *ww,
 		  u32 align, unsigned int flags);
@@ -307,6 +335,11 @@ static inline bool i915_node_color_differs(const struct drm_mm_node *node,
 	return drm_mm_node_allocated(node) && node->color != color;
 }
 
+static inline void __iomem *i915_vma_get_iomap(struct i915_vma *vma)
+{
+	return READ_ONCE(vma->iomap);
+}
+
 /**
  * i915_vma_pin_iomap - calls ioremap_wc to map the GGTT VMA via the aperture
  * @vma: VMA to iomap
@@ -343,7 +376,6 @@ void i915_vma_unpin_iomap(struct i915_vma *vma);
  * i915_vma_unpin_fence().
  *
  * Returns:
- *
  * True if the vma has a fence, false otherwise.
  */
 int __must_check i915_vma_pin_fence(struct i915_vma *vma);
@@ -388,6 +420,8 @@ static inline void i915_vma_clear_scanout(struct i915_vma *vma)
 {
 	clear_bit(I915_VMA_SCANOUT_BIT, __i915_vma_flags(vma));
 }
+
+void i915_ggtt_clear_scanout(struct drm_i915_gem_object *obj);
 
 #define for_each_until(cond) if (cond) break; else
 

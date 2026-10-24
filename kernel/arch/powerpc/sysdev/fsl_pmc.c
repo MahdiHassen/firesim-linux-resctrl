@@ -13,9 +13,8 @@
 #include <linux/export.h>
 #include <linux/suspend.h>
 #include <linux/delay.h>
-#include <linux/device.h>
 #include <linux/of_address.h>
-#include <linux/of_platform.h>
+#include <linux/platform_device.h>
 
 struct pmc_regs {
 	__be32 devdisr;

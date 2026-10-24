@@ -78,42 +78,43 @@ static u32 rvu_npc_toeplitz_hash(const u64 *data, u64 *key, size_t data_bit_len,
 	return hash_out;
 }
 
-u32 npc_field_hash_calc(u64 *ldata, struct npc_mcam_kex_hash *mkex_hash,
-			u64 *secret_key, u8 intf, u8 hash_idx)
+u32 npc_field_hash_calc(u64 *ldata, struct npc_get_field_hash_info_rsp rsp,
+			u8 intf, u8 hash_idx)
 {
 	u64 hash_key[3];
 	u64 data_padded[2];
 	u32 field_hash;
 
-	hash_key[0] = secret_key[1] << 31;
-	hash_key[0] |= secret_key[2];
-	hash_key[1] = secret_key[1] >> 33;
-	hash_key[1] |= secret_key[0] << 31;
-	hash_key[2] = secret_key[0] >> 33;
+	hash_key[0] = rsp.secret_key[1] << 31;
+	hash_key[0] |= rsp.secret_key[2];
+	hash_key[1] = rsp.secret_key[1] >> 33;
+	hash_key[1] |= rsp.secret_key[0] << 31;
+	hash_key[2] = rsp.secret_key[0] >> 33;
 
-	data_padded[0] = mkex_hash->hash_mask[intf][hash_idx][0] & ldata[0];
-	data_padded[1] = mkex_hash->hash_mask[intf][hash_idx][1] & ldata[1];
+	data_padded[0] = rsp.hash_mask[intf][hash_idx][0] & ldata[0];
+	data_padded[1] = rsp.hash_mask[intf][hash_idx][1] & ldata[1];
 	field_hash = rvu_npc_toeplitz_hash(data_padded, hash_key, 128, 159);
 
-	field_hash &= mkex_hash->hash_ctrl[intf][hash_idx] >> 32;
-	field_hash |= mkex_hash->hash_ctrl[intf][hash_idx];
+	field_hash &= FIELD_GET(GENMASK(63, 32), rsp.hash_ctrl[intf][hash_idx]);
+	field_hash += FIELD_GET(GENMASK(31, 0), rsp.hash_ctrl[intf][hash_idx]);
 	return field_hash;
 }
 
-static u64 npc_update_use_hash(int lt, int ld)
+static u64 npc_update_use_hash(struct rvu *rvu, int blkaddr,
+			       u8 intf, int lid, int lt, int ld)
 {
-	u64 cfg = 0;
+	u8 hdr, key;
+	u64 cfg;
 
-	switch (lt) {
-	case NPC_LT_LC_IP6:
-		/* Update use_hash(bit-20) and bytesm1 (bit-16:19)
-		 * in KEX_LD_CFG
-		 */
-		cfg = KEX_LD_CFG_USE_HASH(0x1, 0x03,
-					  ld ? 0x8 : 0x18,
-					  0x1, 0x0, 0x10);
-		break;
-	}
+	cfg = rvu_read64(rvu, blkaddr, NPC_AF_INTFX_LIDX_LTX_LDX_CFG(intf, lid, lt, ld));
+	hdr = FIELD_GET(NPC_HDR_OFFSET, cfg);
+	key = FIELD_GET(NPC_KEY_OFFSET, cfg);
+
+	/* Update use_hash(bit-20) to 'true' and
+	 * bytesm1(bit-16:19) to '0x3' in KEX_LD_CFG
+	 */
+	cfg = KEX_LD_CFG_USE_HASH(0x1, 0x03,
+				  hdr, 0x1, 0x0, key);
 
 	return cfg;
 }
@@ -124,6 +125,9 @@ static void npc_program_mkex_hash_rx(struct rvu *rvu, int blkaddr,
 	struct npc_mcam_kex_hash *mkex_hash = rvu->kpu.mkex_hash;
 	int lid, lt, ld, hash_cnt = 0;
 
+	if (is_cn20k(rvu->pdev))
+		return;
+
 	if (is_npc_intf_tx(intf))
 		return;
 
@@ -132,12 +136,13 @@ static void npc_program_mkex_hash_rx(struct rvu *rvu, int blkaddr,
 		for (lt = 0; lt < NPC_MAX_LT; lt++) {
 			for (ld = 0; ld < NPC_MAX_LD; ld++) {
 				if (mkex_hash->lid_lt_ld_hash_en[intf][lid][lt][ld]) {
-					u64 cfg = npc_update_use_hash(lt, ld);
+					u64 cfg;
 
-					hash_cnt++;
 					if (hash_cnt == NPC_MAX_HASH)
 						return;
 
+					cfg = npc_update_use_hash(rvu, blkaddr,
+								  intf, lid, lt, ld);
 					/* Set updated KEX configuration */
 					SET_KEX_LD(intf, lid, lt, ld, cfg);
 					/* Set HASH configuration */
@@ -149,6 +154,8 @@ static void npc_program_mkex_hash_rx(struct rvu *rvu, int blkaddr,
 							     mkex_hash->hash_mask[intf][ld][1]);
 					SET_KEX_LD_HASH_CTRL(intf, ld,
 							     mkex_hash->hash_ctrl[intf][ld]);
+
+					hash_cnt++;
 				}
 			}
 		}
@@ -161,6 +168,9 @@ static void npc_program_mkex_hash_tx(struct rvu *rvu, int blkaddr,
 	struct npc_mcam_kex_hash *mkex_hash = rvu->kpu.mkex_hash;
 	int lid, lt, ld, hash_cnt = 0;
 
+	if (is_cn20k(rvu->pdev))
+		return;
+
 	if (is_npc_intf_rx(intf))
 		return;
 
@@ -169,12 +179,13 @@ static void npc_program_mkex_hash_tx(struct rvu *rvu, int blkaddr,
 		for (lt = 0; lt < NPC_MAX_LT; lt++) {
 			for (ld = 0; ld < NPC_MAX_LD; ld++)
 				if (mkex_hash->lid_lt_ld_hash_en[intf][lid][lt][ld]) {
-					u64 cfg = npc_update_use_hash(lt, ld);
+					u64 cfg;
 
-					hash_cnt++;
 					if (hash_cnt == NPC_MAX_HASH)
 						return;
 
+					cfg = npc_update_use_hash(rvu, blkaddr,
+								  intf, lid, lt, ld);
 					/* Set updated KEX configuration */
 					SET_KEX_LD(intf, lid, lt, ld, cfg);
 					/* Set HASH configuration */
@@ -187,8 +198,6 @@ static void npc_program_mkex_hash_tx(struct rvu *rvu, int blkaddr,
 					SET_KEX_LD_HASH_CTRL(intf, ld,
 							     mkex_hash->hash_ctrl[intf][ld]);
 					hash_cnt++;
-					if (hash_cnt == NPC_MAX_HASH)
-						return;
 				}
 		}
 	}
@@ -200,10 +209,8 @@ void npc_config_secret_key(struct rvu *rvu, int blkaddr)
 	struct rvu_hwinfo *hw = rvu->hw;
 	u8 intf;
 
-	if (!hwcap->npc_hash_extract) {
-		dev_info(rvu->dev, "HW does not support secret key configuration\n");
+	if (!hwcap->npc_hash_extract)
 		return;
-	}
 
 	for (intf = 0; intf < hw->npc_intfs; intf++) {
 		rvu_write64(rvu, blkaddr, NPC_AF_INTFX_SECRET_KEY0(intf),
@@ -217,15 +224,57 @@ void npc_config_secret_key(struct rvu *rvu, int blkaddr)
 
 void npc_program_mkex_hash(struct rvu *rvu, int blkaddr)
 {
+	struct npc_mcam_kex_hash *mh = rvu->kpu.mkex_hash;
 	struct hw_cap *hwcap = &rvu->hw->cap;
+	u8 intf, ld, hdr_offset, byte_len;
 	struct rvu_hwinfo *hw = rvu->hw;
-	u8 intf;
+	u64 cfg;
 
-	if (!hwcap->npc_hash_extract) {
-		dev_dbg(rvu->dev, "Field hash extract feature is not supported\n");
+	if (is_cn20k(rvu->pdev))
 		return;
+
+	/* Check if hardware supports hash extraction */
+	if (!hwcap->npc_hash_extract)
+		return;
+
+	/* Check if IPv6 source/destination address
+	 * should be hash enabled.
+	 * Hashing reduces 128bit SIP/DIP fields to 32bit
+	 * so that 224 bit X2 key can be used for IPv6 based filters as well,
+	 * which in turn results in more number of MCAM entries available for
+	 * use.
+	 *
+	 * Hashing of IPV6 SIP/DIP is enabled in below scenarios
+	 * 1. If the silicon variant supports hashing feature
+	 * 2. If the number of bytes of IP addr being extracted is 4 bytes ie
+	 *    32bit. The assumption here is that if user wants 8bytes of LSB of
+	 *    IP addr or full 16 bytes then his intention is not to use 32bit
+	 *    hash.
+	 */
+	for (intf = 0; intf < hw->npc_intfs; intf++) {
+		for (ld = 0; ld < NPC_MAX_LD; ld++) {
+			cfg = rvu_read64(rvu, blkaddr,
+					 NPC_AF_INTFX_LIDX_LTX_LDX_CFG(intf,
+								       NPC_LID_LC,
+								       NPC_LT_LC_IP6,
+								       ld));
+			hdr_offset = FIELD_GET(NPC_HDR_OFFSET, cfg);
+			byte_len = FIELD_GET(NPC_BYTESM, cfg);
+			/* Hashing of IPv6 source/destination address should be
+			 * enabled if,
+			 * hdr_offset == 8 (offset of source IPv6 address) or
+			 * hdr_offset == 24 (offset of destination IPv6)
+			 * address) and the number of byte to be
+			 * extracted is 4. As per hardware configuration
+			 * byte_len should be == actual byte_len - 1.
+			 * Hence byte_len is checked against 3 but nor 4.
+			 */
+			if ((hdr_offset == 8 || hdr_offset == 24) && byte_len == 3)
+				mh->lid_lt_ld_hash_en[intf][NPC_LID_LC][NPC_LT_LC_IP6][ld] = true;
+		}
 	}
 
+	/* Update hash configuration if the field is hash enabled */
 	for (intf = 0; intf < hw->npc_intfs; intf++) {
 		npc_program_mkex_hash_rx(rvu, blkaddr, intf);
 		npc_program_mkex_hash_tx(rvu, blkaddr, intf);
@@ -233,7 +282,7 @@ void npc_program_mkex_hash(struct rvu *rvu, int blkaddr)
 }
 
 void npc_update_field_hash(struct rvu *rvu, u8 intf,
-			   struct mcam_entry *entry,
+			   struct mcam_entry_mdata *mdata,
 			   int blkaddr,
 			   u64 features,
 			   struct flow_msg *pkt,
@@ -242,11 +291,15 @@ void npc_update_field_hash(struct rvu *rvu, u8 intf,
 			   struct flow_msg *omask)
 {
 	struct npc_mcam_kex_hash *mkex_hash = rvu->kpu.mkex_hash;
-	struct npc_get_secret_key_req req;
-	struct npc_get_secret_key_rsp rsp;
+	struct npc_get_field_hash_info_req req;
+	struct npc_get_field_hash_info_rsp rsp;
+	u8 hash_idx, lid, ltype, ltype_mask;
 	u64 ldata[2], cfg;
 	u32 field_hash;
-	u8 hash_idx;
+	bool en;
+
+	if (is_cn20k(rvu->pdev))
+		return;
 
 	if (!rvu->hw->cap.npc_hash_extract) {
 		dev_dbg(rvu->dev, "%s: Field hash extract feature is not supported\n", __func__);
@@ -254,74 +307,75 @@ void npc_update_field_hash(struct rvu *rvu, u8 intf,
 	}
 
 	req.intf = intf;
-	rvu_mbox_handler_npc_get_secret_key(rvu, &req, &rsp);
+	rvu_mbox_handler_npc_get_field_hash_info(rvu, &req, &rsp);
 
 	for (hash_idx = 0; hash_idx < NPC_MAX_HASH; hash_idx++) {
 		cfg = rvu_read64(rvu, blkaddr, NPC_AF_INTFX_HASHX_CFG(intf, hash_idx));
-		if ((cfg & BIT_ULL(11)) && (cfg & BIT_ULL(12))) {
-			u8 lid = (cfg & GENMASK_ULL(10, 8)) >> 8;
-			u8 ltype = (cfg & GENMASK_ULL(7, 4)) >> 4;
-			u8 ltype_mask = cfg & GENMASK_ULL(3, 0);
+		en = !!(cfg & BIT_ULL(11)) && (cfg & BIT_ULL(12));
+		if (!en)
+			continue;
 
-			if (mkex_hash->lid_lt_ld_hash_en[intf][lid][ltype][hash_idx]) {
-				switch (ltype & ltype_mask) {
-				/* If hash extract enabled is supported for IPv6 then
-				 * 128 bit IPv6 source and destination addressed
-				 * is hashed to 32 bit value.
-				 */
-				case NPC_LT_LC_IP6:
-					if (features & BIT_ULL(NPC_SIP_IPV6)) {
-						u32 src_ip[IPV6_WORDS];
+		lid = (cfg & GENMASK_ULL(10, 8)) >> 8;
+		ltype = (cfg & GENMASK_ULL(7, 4)) >> 4;
+		ltype_mask = cfg & GENMASK_ULL(3, 0);
 
-						be32_to_cpu_array(src_ip, pkt->ip6src, IPV6_WORDS);
-						ldata[0] = (u64)src_ip[0] << 32 | src_ip[1];
-						ldata[1] = (u64)src_ip[2] << 32 | src_ip[3];
-						field_hash = npc_field_hash_calc(ldata,
-										 mkex_hash,
-										 rsp.secret_key,
-										 intf,
-										 hash_idx);
-						npc_update_entry(rvu, NPC_SIP_IPV6, entry,
-								 field_hash, 0, 32, 0, intf);
-						memcpy(&opkt->ip6src, &pkt->ip6src,
-						       sizeof(pkt->ip6src));
-						memcpy(&omask->ip6src, &mask->ip6src,
-						       sizeof(mask->ip6src));
-						break;
-					}
+		if (!mkex_hash->lid_lt_ld_hash_en[intf][lid][ltype][hash_idx])
+			continue;
 
-					if (features & BIT_ULL(NPC_DIP_IPV6)) {
-						u32 dst_ip[IPV6_WORDS];
+		/* If hash extract enabled is supported for IPv6 then
+		 * 128 bit IPv6 source and destination addressed
+		 * is hashed to 32 bit value.
+		 */
+		if ((ltype & ltype_mask) != NPC_LT_LC_IP6)
+			continue;
 
-						be32_to_cpu_array(dst_ip, pkt->ip6dst, IPV6_WORDS);
-						ldata[0] = (u64)dst_ip[0] << 32 | dst_ip[1];
-						ldata[1] = (u64)dst_ip[2] << 32 | dst_ip[3];
-						field_hash = npc_field_hash_calc(ldata,
-										 mkex_hash,
-										 rsp.secret_key,
-										 intf,
-										 hash_idx);
-						npc_update_entry(rvu, NPC_DIP_IPV6, entry,
-								 field_hash, 0, 32, 0, intf);
-						memcpy(&opkt->ip6dst, &pkt->ip6dst,
-						       sizeof(pkt->ip6dst));
-						memcpy(&omask->ip6dst, &mask->ip6dst,
-						       sizeof(mask->ip6dst));
-					}
-					break;
-				}
-			}
+		/* ld[0] == hash_idx[0] == Source IPv6
+		 * ld[1] == hash_idx[1] == Destination IPv6
+		 */
+		if ((features & BIT_ULL(NPC_SIP_IPV6)) && !hash_idx) {
+			u32 src_ip[IPV6_WORDS];
+
+			be32_to_cpu_array(src_ip, pkt->ip6src, IPV6_WORDS);
+			ldata[1] = (u64)src_ip[0] << 32 | src_ip[1];
+			ldata[0] = (u64)src_ip[2] << 32 | src_ip[3];
+			field_hash = npc_field_hash_calc(ldata, rsp, intf,
+							 hash_idx);
+			npc_update_entry(rvu, NPC_SIP_IPV6, mdata, field_hash,
+					 0, GENMASK(31, 0), 0, intf);
+			memcpy(&opkt->ip6src, &pkt->ip6src,
+			       sizeof(pkt->ip6src));
+			memcpy(&omask->ip6src, &mask->ip6src,
+			       sizeof(mask->ip6src));
+			continue;
+		}
+
+		if ((features & BIT_ULL(NPC_DIP_IPV6)) && hash_idx) {
+			u32 dst_ip[IPV6_WORDS];
+
+			be32_to_cpu_array(dst_ip, pkt->ip6dst, IPV6_WORDS);
+			ldata[1] = (u64)dst_ip[0] << 32 | dst_ip[1];
+			ldata[0] = (u64)dst_ip[2] << 32 | dst_ip[3];
+			field_hash = npc_field_hash_calc(ldata, rsp, intf,
+							 hash_idx);
+			npc_update_entry(rvu, NPC_DIP_IPV6, mdata,
+					 field_hash, 0, GENMASK(31, 0),
+					 0, intf);
+			memcpy(&opkt->ip6dst, &pkt->ip6dst,
+			       sizeof(pkt->ip6dst));
+			memcpy(&omask->ip6dst, &mask->ip6dst,
+			       sizeof(mask->ip6dst));
+			continue;
 		}
 	}
 }
 
-int rvu_mbox_handler_npc_get_secret_key(struct rvu *rvu,
-					struct npc_get_secret_key_req *req,
-					struct npc_get_secret_key_rsp *rsp)
+int rvu_mbox_handler_npc_get_field_hash_info(struct rvu *rvu,
+					     struct npc_get_field_hash_info_req *req,
+					     struct npc_get_field_hash_info_rsp *rsp)
 {
 	u64 *secret_key = rsp->secret_key;
 	u8 intf = req->intf;
-	int blkaddr;
+	int i, j, blkaddr;
 
 	blkaddr = rvu_get_blkaddr(rvu, BLKTYPE_NPC, 0);
 	if (blkaddr < 0) {
@@ -333,23 +387,20 @@ int rvu_mbox_handler_npc_get_secret_key(struct rvu *rvu,
 	secret_key[1] = rvu_read64(rvu, blkaddr, NPC_AF_INTFX_SECRET_KEY1(intf));
 	secret_key[2] = rvu_read64(rvu, blkaddr, NPC_AF_INTFX_SECRET_KEY2(intf));
 
+	for (i = 0; i < NPC_MAX_HASH; i++) {
+		for (j = 0; j < NPC_MAX_HASH_MASK; j++) {
+			rsp->hash_mask[NIX_INTF_RX][i][j] =
+				GET_KEX_LD_HASH_MASK(NIX_INTF_RX, i, j);
+			rsp->hash_mask[NIX_INTF_TX][i][j] =
+				GET_KEX_LD_HASH_MASK(NIX_INTF_TX, i, j);
+		}
+	}
+
+	for (i = 0; i < NPC_MAX_INTF; i++)
+		for (j = 0; j < NPC_MAX_HASH; j++)
+			rsp->hash_ctrl[i][j] = GET_KEX_LD_HASH_CTRL(i, j);
+
 	return 0;
-}
-
-/**
- *	rvu_npc_exact_mac2u64 - utility function to convert mac address to u64.
- *	@mac_addr: MAC address.
- *	Return: mdata for exact match table.
- */
-static u64 rvu_npc_exact_mac2u64(u8 *mac_addr)
-{
-	u64 mac = 0;
-	int index;
-
-	for (index = ETH_ALEN - 1; index >= 0; index--)
-		mac |= ((u64)*mac_addr++) << (8 * index);
-
-	return mac;
 }
 
 /**
@@ -362,7 +413,7 @@ static u64 rvu_npc_exact_mac2u64(u8 *mac_addr)
  */
 static u64 rvu_exact_prepare_mdata(u8 *mac, u16 chan, u16 ctype, u64 mask)
 {
-	u64 ldata = rvu_npc_exact_mac2u64(mac);
+	u64 ldata = ether_addr_to_u64(mac);
 
 	/* Please note that mask is 48bit which excludes chan and ctype.
 	 * Increase mask bits if we need to include them as well.
@@ -550,7 +601,7 @@ static u64 rvu_exact_prepare_table_entry(struct rvu *rvu, bool enable,
 					 u8 ctype, u16 chan, u8 *mac_addr)
 
 {
-	u64 ldata = rvu_npc_exact_mac2u64(mac_addr);
+	u64 ldata = ether_addr_to_u64(mac_addr);
 
 	/* Enable or disable */
 	u64 mdata = FIELD_PREP(GENMASK_ULL(63, 63), enable ? 1 : 0);
@@ -758,7 +809,7 @@ static int rvu_npc_exact_add_to_list(struct rvu *rvu, enum npc_exact_opc_type op
 		return -EFAULT;
 	}
 
-	entry = kmalloc(sizeof(*entry), GFP_KERNEL);
+	entry = kmalloc_obj(*entry);
 	if (!entry) {
 		rvu_npc_exact_free_id(rvu, *seq_id);
 		dev_err(rvu->dev, "%s: Memory allocation failed\n", __func__);
@@ -1169,7 +1220,9 @@ static u16 __rvu_npc_exact_cmd_rules_cnt_update(struct rvu *rvu, int drop_mcam_i
 	if (promisc)
 		goto done;
 
-	/* If all rules are deleted and not already in promisc mode; disable cam */
+	/* If all rules are deleted and not already in promisc mode;
+	 * disable cam
+	 */
 	if (!*cnt && val < 0) {
 		*enable_or_disable_cam = true;
 		goto done;
@@ -1425,12 +1478,11 @@ static int rvu_npc_exact_update_table_entry(struct rvu *rvu, u8 cgx_id, u8 lmac_
 int rvu_npc_exact_promisc_disable(struct rvu *rvu, u16 pcifunc)
 {
 	struct npc_exact_table *table;
-	int pf = rvu_get_pf(pcifunc);
+	int pf = rvu_get_pf(rvu->pdev, pcifunc);
 	u8 cgx_id, lmac_id;
 	u32 drop_mcam_idx;
 	bool *promisc;
 	bool rc;
-	u32 cnt;
 
 	table = rvu->hw->table;
 
@@ -1453,17 +1505,14 @@ int rvu_npc_exact_promisc_disable(struct rvu *rvu, u16 pcifunc)
 		return LMAC_AF_ERR_INVALID_PARAM;
 	}
 	*promisc = false;
-	cnt = __rvu_npc_exact_cmd_rules_cnt_update(rvu, drop_mcam_idx, 0, NULL);
 	mutex_unlock(&table->lock);
 
-	/* If no dmac filter entries configured, disable drop rule */
-	if (!cnt)
-		rvu_npc_enable_mcam_by_entry_index(rvu, drop_mcam_idx, NIX_INTF_RX, false);
-	else
-		rvu_npc_enable_mcam_by_entry_index(rvu, drop_mcam_idx, NIX_INTF_RX, !*promisc);
+	/* Enable drop rule */
+	rvu_npc_enable_mcam_by_entry_index(rvu, drop_mcam_idx, NIX_INTF_RX,
+					   true);
 
-	dev_dbg(rvu->dev, "%s: disabled  promisc mode (cgx=%d lmac=%d, cnt=%d)\n",
-		__func__, cgx_id, lmac_id, cnt);
+	dev_dbg(rvu->dev, "%s: disabled  promisc mode (cgx=%d lmac=%d)\n",
+		__func__, cgx_id, lmac_id);
 	return 0;
 }
 
@@ -1476,12 +1525,11 @@ int rvu_npc_exact_promisc_disable(struct rvu *rvu, u16 pcifunc)
 int rvu_npc_exact_promisc_enable(struct rvu *rvu, u16 pcifunc)
 {
 	struct npc_exact_table *table;
-	int pf = rvu_get_pf(pcifunc);
+	int pf = rvu_get_pf(rvu->pdev, pcifunc);
 	u8 cgx_id, lmac_id;
 	u32 drop_mcam_idx;
 	bool *promisc;
 	bool rc;
-	u32 cnt;
 
 	table = rvu->hw->table;
 
@@ -1504,17 +1552,14 @@ int rvu_npc_exact_promisc_enable(struct rvu *rvu, u16 pcifunc)
 		return LMAC_AF_ERR_INVALID_PARAM;
 	}
 	*promisc = true;
-	cnt = __rvu_npc_exact_cmd_rules_cnt_update(rvu, drop_mcam_idx, 0, NULL);
 	mutex_unlock(&table->lock);
 
-	/* If no dmac filter entries configured, disable drop rule */
-	if (!cnt)
-		rvu_npc_enable_mcam_by_entry_index(rvu, drop_mcam_idx, NIX_INTF_RX, false);
-	else
-		rvu_npc_enable_mcam_by_entry_index(rvu, drop_mcam_idx, NIX_INTF_RX, !*promisc);
+	/*  disable drop rule */
+	rvu_npc_enable_mcam_by_entry_index(rvu, drop_mcam_idx, NIX_INTF_RX,
+					   false);
 
-	dev_dbg(rvu->dev, "%s: Enabled promisc mode (cgx=%d lmac=%d cnt=%d)\n",
-		__func__, cgx_id, lmac_id, cnt);
+	dev_dbg(rvu->dev, "%s: Enabled promisc mode (cgx=%d lmac=%d)\n",
+		__func__, cgx_id, lmac_id);
 	return 0;
 }
 
@@ -1528,7 +1573,7 @@ int rvu_npc_exact_promisc_enable(struct rvu *rvu, u16 pcifunc)
 int rvu_npc_exact_mac_addr_reset(struct rvu *rvu, struct cgx_mac_addr_reset_req *req,
 				 struct msg_rsp *rsp)
 {
-	int pf = rvu_get_pf(req->hdr.pcifunc);
+	int pf = rvu_get_pf(rvu->pdev, req->hdr.pcifunc);
 	u32 seq_id = req->index;
 	struct rvu_pfvf *pfvf;
 	u8 cgx_id, lmac_id;
@@ -1561,7 +1606,7 @@ int rvu_npc_exact_mac_addr_update(struct rvu *rvu,
 				  struct cgx_mac_addr_update_req *req,
 				  struct cgx_mac_addr_update_rsp *rsp)
 {
-	int pf = rvu_get_pf(req->hdr.pcifunc);
+	int pf = rvu_get_pf(rvu->pdev, req->hdr.pcifunc);
 	struct npc_exact_table_entry *entry;
 	struct npc_exact_table *table;
 	struct rvu_pfvf *pfvf;
@@ -1643,7 +1688,7 @@ int rvu_npc_exact_mac_addr_add(struct rvu *rvu,
 			       struct cgx_mac_addr_add_req *req,
 			       struct cgx_mac_addr_add_rsp *rsp)
 {
-	int pf = rvu_get_pf(req->hdr.pcifunc);
+	int pf = rvu_get_pf(rvu->pdev, req->hdr.pcifunc);
 	struct rvu_pfvf *pfvf;
 	u8 cgx_id, lmac_id;
 	int rc = 0;
@@ -1679,7 +1724,7 @@ int rvu_npc_exact_mac_addr_del(struct rvu *rvu,
 			       struct cgx_mac_addr_del_req *req,
 			       struct msg_rsp *rsp)
 {
-	int pf = rvu_get_pf(req->hdr.pcifunc);
+	int pf = rvu_get_pf(rvu->pdev, req->hdr.pcifunc);
 	int rc;
 
 	rc = rvu_npc_exact_del_table_entry_by_id(rvu, req->index);
@@ -1704,7 +1749,7 @@ int rvu_npc_exact_mac_addr_del(struct rvu *rvu,
 int rvu_npc_exact_mac_addr_set(struct rvu *rvu, struct cgx_mac_addr_set_or_get *req,
 			       struct cgx_mac_addr_set_or_get *rsp)
 {
-	int pf = rvu_get_pf(req->hdr.pcifunc);
+	int pf = rvu_get_pf(rvu->pdev, req->hdr.pcifunc);
 	u32 seq_id = req->index;
 	struct rvu_pfvf *pfvf;
 	u8 cgx_id, lmac_id;
@@ -1842,6 +1887,9 @@ int rvu_npc_exact_init(struct rvu *rvu)
 	u64 cfg;
 	bool rc;
 
+	if (is_cn20k(rvu->pdev))
+		return 0;
+
 	/* Read NPC_AF_CONST3 and check for have exact
 	 * match functionality is present
 	 */
@@ -1853,24 +1901,18 @@ int rvu_npc_exact_init(struct rvu *rvu)
 
 	/* Check exact match feature is supported */
 	npc_const3 = rvu_read64(rvu, blkaddr, NPC_AF_CONST3);
-	if (!(npc_const3 & BIT_ULL(62))) {
-		dev_info(rvu->dev, "%s: No support for exact match support\n",
-			 __func__);
+	if (!(npc_const3 & BIT_ULL(62)))
 		return 0;
-	}
 
 	/* Check if kex profile has enabled EXACT match nibble */
 	cfg = rvu_read64(rvu, blkaddr, NPC_AF_INTFX_KEX_CFG(NIX_INTF_RX));
-	if (!(cfg & NPC_EXACT_NIBBLE_HIT)) {
-		dev_info(rvu->dev, "%s: NPC exact match nibble not enabled in KEX profile\n",
-			 __func__);
+	if (!(cfg & NPC_EXACT_NIBBLE_HIT))
 		return 0;
-	}
 
 	/* Set capability to true */
 	rvu->hw->cap.npc_exact_match_enabled = true;
 
-	table = kzalloc(sizeof(*table), GFP_KERNEL);
+	table = kzalloc_obj(*table);
 	if (!table)
 		return -ENOMEM;
 
@@ -1878,9 +1920,9 @@ int rvu_npc_exact_init(struct rvu *rvu)
 	rvu->hw->table = table;
 
 	/* Read table size, ways and depth */
-	table->mem_table.depth = FIELD_GET(GENMASK_ULL(31, 24), npc_const3);
 	table->mem_table.ways = FIELD_GET(GENMASK_ULL(19, 16), npc_const3);
-	table->cam_table.depth = FIELD_GET(GENMASK_ULL(15, 0), npc_const3);
+	table->mem_table.depth = FIELD_GET(GENMASK_ULL(15, 0), npc_const3);
+	table->cam_table.depth = FIELD_GET(GENMASK_ULL(31, 24), npc_const3);
 
 	dev_dbg(rvu->dev, "%s: NPC exact match 4way_2k table(ways=%d, depth=%d)\n",
 		__func__,  table->mem_table.ways, table->cam_table.depth);
@@ -1975,7 +2017,7 @@ int rvu_npc_exact_init(struct rvu *rvu)
 		}
 
 		/* Filter rules are only for PF */
-		pcifunc = RVU_PFFUNC(i, 0);
+		pcifunc = RVU_PFFUNC(rvu->pdev, i, 0);
 
 		dev_dbg(rvu->dev,
 			"%s:Drop rule cgx=%d lmac=%d chan(val=0x%llx, mask=0x%llx\n",

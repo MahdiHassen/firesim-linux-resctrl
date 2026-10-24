@@ -115,7 +115,7 @@ int usbnet_generic_cdc_bind(struct usbnet *dev, struct usb_interface *intf)
 	int				len = intf->cur_altsetting->extralen;
 	struct usb_interface_descriptor	*d;
 	struct cdc_state		*info = (void *) &dev->data;
-	int				status;
+	int				status = -ENODEV;
 	int				rndis;
 	bool				android_rndis_quirk = false;
 	struct usb_driver		*driver = driver_of(intf);
@@ -169,10 +169,13 @@ int usbnet_generic_cdc_bind(struct usbnet *dev, struct usb_interface *intf)
 	info->header = header.usb_cdc_header_desc;
 	info->ether = header.usb_cdc_ether_desc;
 	if (!info->u) {
-		if (rndis)
+		if (rndis) {
 			goto skip;
-		else /* in that case a quirk is mandatory */
+		} else {
+			/* in that case a quirk is mandatory */
+			dev_err(&dev->udev->dev, "No union descriptors\n");
 			goto bad_desc;
+		}
 	}
 	/* we need a master/control interface (what we're
 	 * probed with) and a slave/data interface; union
@@ -192,18 +195,20 @@ int usbnet_generic_cdc_bind(struct usbnet *dev, struct usb_interface *intf)
 			android_rndis_quirk = true;
 			goto skip;
 		}
+		dev_err(&intf->dev, "bad CDC descriptors\n");
 		goto bad_desc;
 	}
 	if (info->control != intf) {
-		dev_dbg(&intf->dev, "bogus CDC Union\n");
 		/* Ambit USB Cable Modem (and maybe others)
 		 * interchanges master and slave interface.
 		 */
 		if (info->data == intf) {
 			info->data = info->control;
 			info->control = intf;
-		} else
+		} else {
+			dev_err(&intf->dev, "bogus CDC Union\n");
 			goto bad_desc;
+		}
 	}
 
 	/* some devices merge these - skip class check */
@@ -213,7 +218,7 @@ int usbnet_generic_cdc_bind(struct usbnet *dev, struct usb_interface *intf)
 	/* a data interface altsetting does the real i/o */
 	d = &info->data->cur_altsetting->desc;
 	if (d->bInterfaceClass != USB_CLASS_CDC_DATA) {
-		dev_dbg(&intf->dev, "slave class %u\n", d->bInterfaceClass);
+		dev_err(&intf->dev, "slave class %u\n", d->bInterfaceClass);
 		goto bad_desc;
 	}
 skip:
@@ -227,7 +232,7 @@ skip:
 	if (rndis && is_rndis(&intf->cur_altsetting->desc) &&
 	    header.usb_cdc_acm_descriptor &&
 	    header.usb_cdc_acm_descriptor->bmCapabilities) {
-		dev_dbg(&intf->dev,
+		dev_err(&intf->dev,
 			"ACM capabilities %02x, not really RNDIS?\n",
 			header.usb_cdc_acm_descriptor->bmCapabilities);
 		goto bad_desc;
@@ -242,14 +247,14 @@ skip:
 
 	if (header.usb_cdc_mdlm_desc &&
 	    memcmp(header.usb_cdc_mdlm_desc->bGUID, mbm_guid, 16)) {
-		dev_dbg(&intf->dev, "GUID doesn't match\n");
+		dev_err(&intf->dev, "GUID doesn't match\n");
 		goto bad_desc;
 	}
 
 	if (header.usb_cdc_mdlm_detail_desc &&
 		header.usb_cdc_mdlm_detail_desc->bLength <
 			(sizeof(struct usb_cdc_mdlm_detail_desc) + 1)) {
-		dev_dbg(&intf->dev, "Descriptor too short\n");
+		dev_err(&intf->dev, "Descriptor too short\n");
 		goto bad_desc;
 	}
 
@@ -267,7 +272,7 @@ skip:
 		info->control = usb_ifnum_to_if(dev->udev, 0);
 		info->data = usb_ifnum_to_if(dev->udev, 1);
 		if (!info->control || !info->data || info->control != intf) {
-			dev_dbg(&intf->dev,
+			dev_err(&intf->dev,
 				"rndis: master #0/%p slave #1/%p\n",
 				info->control,
 				info->data);
@@ -275,7 +280,7 @@ skip:
 		}
 
 	} else if (!info->header || (!rndis && !info->ether)) {
-		dev_dbg(&intf->dev, "missing cdc %s%s%sdescriptor\n",
+		dev_err(&intf->dev, "missing cdc %s%s%sdescriptor\n",
 			info->header ? "" : "header ",
 			info->u ? "" : "union ",
 			info->ether ? "" : "ether ");
@@ -287,16 +292,15 @@ skip:
 	 */
 	if (info->data != info->control) {
 		status = usb_driver_claim_interface(driver, info->data, dev);
-		if (status < 0)
-			return status;
+		if (status < 0) {
+			dev_err(&intf->dev, "Second interface unclaimable\n");
+			goto bad_desc;
+		}
 	}
 	status = usbnet_get_endpoints(dev, info->data);
 	if (status < 0) {
-		/* ensure immediate exit from usbnet_disconnect */
-		usb_set_intfdata(info->data, NULL);
-		if (info->data != info->control)
-			usb_driver_release_interface(driver, info->data);
-		return status;
+		dev_dbg(&intf->dev, "Mandatory endpoints missing\n");
+		goto bail_out_and_release;
 	}
 
 	/* status endpoint: optional for CDC Ethernet, not RNDIS (or ACM) */
@@ -316,10 +320,9 @@ skip:
 		}
 	}
 	if (rndis && !dev->status) {
-		dev_dbg(&intf->dev, "missing RNDIS status endpoint\n");
-		usb_set_intfdata(info->data, NULL);
-		usb_driver_release_interface(driver, info->data);
-		return -ENODEV;
+		dev_err(&intf->dev, "missing RNDIS status endpoint\n");
+		status = -ENODEV;
+		goto bail_out_and_release;
 	}
 
 	/* override ethtool_ops */
@@ -327,9 +330,12 @@ skip:
 
 	return 0;
 
+bail_out_and_release:
+	usb_set_intfdata(info->data, NULL);
+	if (info->data != info->control)
+		usb_driver_release_interface(driver, info->data);
 bad_desc:
-	dev_info(&dev->udev->dev, "bad CDC descriptors\n");
-	return -ENODEV;
+	return status;
 }
 EXPORT_SYMBOL_GPL(usbnet_generic_cdc_bind);
 
@@ -418,7 +424,8 @@ void usbnet_cdc_status(struct usbnet *dev, struct urb *urb)
 	case USB_CDC_NOTIFY_NETWORK_CONNECTION:
 		netif_dbg(dev, timer, dev->net, "CDC: carrier %s\n",
 			  event->wValue ? "on" : "off");
-		usbnet_link_change(dev, !!event->wValue, 0);
+		if (netif_carrier_ok(dev->net) != !!event->wValue)
+			usbnet_link_change(dev, !!event->wValue, 0);
 		break;
 	case USB_CDC_NOTIFY_SPEED_CHANGE:	/* tx/rx rates */
 		netif_dbg(dev, timer, dev->net, "CDC: speed change (len %d)\n",
@@ -618,6 +625,13 @@ static const struct usb_device_id	products[] = {
 	.match_flags	=   USB_DEVICE_ID_MATCH_INT_INFO
 			  | USB_DEVICE_ID_MATCH_DEVICE,
 	.idVendor		= 0x04DD,
+	.idProduct		= 0x8005,   /* A-300 */
+	ZAURUS_FAKE_INTERFACE,
+	.driver_info        = 0,
+}, {
+	.match_flags    =   USB_DEVICE_ID_MATCH_INT_INFO
+			  | USB_DEVICE_ID_MATCH_DEVICE,
+	.idVendor		= 0x04DD,
 	.idProduct		= 0x8006,	/* B-500/SL-5600 */
 	ZAURUS_MASTER_INTERFACE,
 	.driver_info		= 0,
@@ -625,9 +639,23 @@ static const struct usb_device_id	products[] = {
 	.match_flags    =   USB_DEVICE_ID_MATCH_INT_INFO
 			  | USB_DEVICE_ID_MATCH_DEVICE,
 	.idVendor		= 0x04DD,
+	.idProduct		= 0x8006,   /* B-500/SL-5600 */
+	ZAURUS_FAKE_INTERFACE,
+	.driver_info        = 0,
+}, {
+	.match_flags    =   USB_DEVICE_ID_MATCH_INT_INFO
+			  | USB_DEVICE_ID_MATCH_DEVICE,
+	.idVendor		= 0x04DD,
 	.idProduct		= 0x8007,	/* C-700 */
 	ZAURUS_MASTER_INTERFACE,
 	.driver_info		= 0,
+}, {
+	.match_flags    =   USB_DEVICE_ID_MATCH_INT_INFO
+			  | USB_DEVICE_ID_MATCH_DEVICE,
+	.idVendor		= 0x04DD,
+	.idProduct		= 0x8007,   /* C-700 */
+	ZAURUS_FAKE_INTERFACE,
+	.driver_info        = 0,
 }, {
 	.match_flags    =   USB_DEVICE_ID_MATCH_INT_INFO
 		 | USB_DEVICE_ID_MATCH_DEVICE,
@@ -747,81 +775,9 @@ static const struct usb_device_id	products[] = {
 	.driver_info = 0,
 },
 
-/* Realtek RTL8152 Based USB 2.0 Ethernet Adapters */
-{
-	USB_DEVICE_AND_INTERFACE_INFO(REALTEK_VENDOR_ID, 0x8152, USB_CLASS_COMM,
-			USB_CDC_SUBCLASS_ETHERNET, USB_CDC_PROTO_NONE),
-	.driver_info = 0,
-},
-
 /* Realtek RTL8153 Based USB 3.0 Ethernet Adapters */
 {
 	USB_DEVICE_AND_INTERFACE_INFO(REALTEK_VENDOR_ID, 0x8153, USB_CLASS_COMM,
-			USB_CDC_SUBCLASS_ETHERNET, USB_CDC_PROTO_NONE),
-	.driver_info = 0,
-},
-
-/* Samsung USB Ethernet Adapters */
-{
-	USB_DEVICE_AND_INTERFACE_INFO(SAMSUNG_VENDOR_ID, 0xa101, USB_CLASS_COMM,
-			USB_CDC_SUBCLASS_ETHERNET, USB_CDC_PROTO_NONE),
-	.driver_info = 0,
-},
-
-#if IS_ENABLED(CONFIG_USB_RTL8152)
-/* Linksys USB3GIGV1 Ethernet Adapter */
-{
-	USB_DEVICE_AND_INTERFACE_INFO(LINKSYS_VENDOR_ID, 0x0041, USB_CLASS_COMM,
-			USB_CDC_SUBCLASS_ETHERNET, USB_CDC_PROTO_NONE),
-	.driver_info = 0,
-},
-#endif
-
-/* Lenovo ThinkPad OneLink+ Dock (based on Realtek RTL8153) */
-{
-	USB_DEVICE_AND_INTERFACE_INFO(LENOVO_VENDOR_ID, 0x3054, USB_CLASS_COMM,
-			USB_CDC_SUBCLASS_ETHERNET, USB_CDC_PROTO_NONE),
-	.driver_info = 0,
-},
-
-/* ThinkPad USB-C Dock (based on Realtek RTL8153) */
-{
-	USB_DEVICE_AND_INTERFACE_INFO(LENOVO_VENDOR_ID, 0x3062, USB_CLASS_COMM,
-			USB_CDC_SUBCLASS_ETHERNET, USB_CDC_PROTO_NONE),
-	.driver_info = 0,
-},
-
-/* ThinkPad Thunderbolt 3 Dock (based on Realtek RTL8153) */
-{
-	USB_DEVICE_AND_INTERFACE_INFO(LENOVO_VENDOR_ID, 0x3069, USB_CLASS_COMM,
-			USB_CDC_SUBCLASS_ETHERNET, USB_CDC_PROTO_NONE),
-	.driver_info = 0,
-},
-
-/* ThinkPad Thunderbolt 3 Dock Gen 2 (based on Realtek RTL8153) */
-{
-	USB_DEVICE_AND_INTERFACE_INFO(LENOVO_VENDOR_ID, 0x3082, USB_CLASS_COMM,
-			USB_CDC_SUBCLASS_ETHERNET, USB_CDC_PROTO_NONE),
-	.driver_info = 0,
-},
-
-/* Lenovo Thinkpad USB 3.0 Ethernet Adapters (based on Realtek RTL8153) */
-{
-	USB_DEVICE_AND_INTERFACE_INFO(LENOVO_VENDOR_ID, 0x7205, USB_CLASS_COMM,
-			USB_CDC_SUBCLASS_ETHERNET, USB_CDC_PROTO_NONE),
-	.driver_info = 0,
-},
-
-/* Lenovo USB C to Ethernet Adapter (based on Realtek RTL8153) */
-{
-	USB_DEVICE_AND_INTERFACE_INFO(LENOVO_VENDOR_ID, 0x720c, USB_CLASS_COMM,
-			USB_CDC_SUBCLASS_ETHERNET, USB_CDC_PROTO_NONE),
-	.driver_info = 0,
-},
-
-/* Lenovo USB-C Travel Hub (based on Realtek RTL8153) */
-{
-	USB_DEVICE_AND_INTERFACE_INFO(LENOVO_VENDOR_ID, 0x7214, USB_CLASS_COMM,
 			USB_CDC_SUBCLASS_ETHERNET, USB_CDC_PROTO_NONE),
 	.driver_info = 0,
 },
@@ -833,44 +789,9 @@ static const struct usb_device_id	products[] = {
 	.driver_info = 0,
 },
 
-/* ThinkPad USB-C Dock Gen 2 (based on Realtek RTL8153) */
+/* Lenovo ThinkPad Hybrid USB-C with USB-A Dock (40af0135eu, based on Realtek RTL8153) */
 {
-	USB_DEVICE_AND_INTERFACE_INFO(LENOVO_VENDOR_ID, 0xa387, USB_CLASS_COMM,
-			USB_CDC_SUBCLASS_ETHERNET, USB_CDC_PROTO_NONE),
-	.driver_info = 0,
-},
-
-/* NVIDIA Tegra USB 3.0 Ethernet Adapters (based on Realtek RTL8153) */
-{
-	USB_DEVICE_AND_INTERFACE_INFO(NVIDIA_VENDOR_ID, 0x09ff, USB_CLASS_COMM,
-			USB_CDC_SUBCLASS_ETHERNET, USB_CDC_PROTO_NONE),
-	.driver_info = 0,
-},
-
-/* Microsoft Surface 2 dock (based on Realtek RTL8152) */
-{
-	USB_DEVICE_AND_INTERFACE_INFO(MICROSOFT_VENDOR_ID, 0x07ab, USB_CLASS_COMM,
-			USB_CDC_SUBCLASS_ETHERNET, USB_CDC_PROTO_NONE),
-	.driver_info = 0,
-},
-
-/* Microsoft Surface Ethernet Adapter (based on Realtek RTL8153) */
-{
-	USB_DEVICE_AND_INTERFACE_INFO(MICROSOFT_VENDOR_ID, 0x07c6, USB_CLASS_COMM,
-			USB_CDC_SUBCLASS_ETHERNET, USB_CDC_PROTO_NONE),
-	.driver_info = 0,
-},
-
-/* Microsoft Surface Ethernet Adapter (based on Realtek RTL8153B) */
-{
-	USB_DEVICE_AND_INTERFACE_INFO(MICROSOFT_VENDOR_ID, 0x0927, USB_CLASS_COMM,
-			USB_CDC_SUBCLASS_ETHERNET, USB_CDC_PROTO_NONE),
-	.driver_info = 0,
-},
-
-/* TP-LINK UE300 USB 3.0 Ethernet Adapters (based on Realtek RTL8153) */
-{
-	USB_DEVICE_AND_INTERFACE_INFO(TPLINK_VENDOR_ID, 0x0601, USB_CLASS_COMM,
+	USB_DEVICE_AND_INTERFACE_INFO(LENOVO_VENDOR_ID, 0xa359, USB_CLASS_COMM,
 			USB_CDC_SUBCLASS_ETHERNET, USB_CDC_PROTO_NONE),
 	.driver_info = 0,
 },
@@ -986,6 +907,12 @@ static const struct usb_device_id	products[] = {
 }, {
 	/* U-blox SARA-U2 */
 	USB_DEVICE_AND_INTERFACE_INFO(UBLOX_VENDOR_ID, 0x1104, USB_CLASS_COMM,
+				      USB_CDC_SUBCLASS_ETHERNET,
+				      USB_CDC_PROTO_NONE),
+	.driver_info = (unsigned long)&wwan_info,
+}, {
+	/* U-blox LARA-R6 01B */
+	USB_DEVICE_AND_INTERFACE_INFO(UBLOX_VENDOR_ID, 0x1313, USB_CLASS_COMM,
 				      USB_CDC_SUBCLASS_ETHERNET,
 				      USB_CDC_PROTO_NONE),
 	.driver_info = (unsigned long)&wwan_info,

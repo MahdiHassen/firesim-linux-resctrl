@@ -295,17 +295,14 @@ svcxdr_decode_sattr3(struct svc_rqst *rqstp, struct xdr_stream *xdr,
 static bool
 svcxdr_decode_sattrguard3(struct xdr_stream *xdr, struct nfsd3_sattrargs *args)
 {
-	__be32 *p;
 	u32 check;
 
 	if (xdr_stream_decode_bool(xdr, &check) < 0)
 		return false;
 	if (check) {
-		p = xdr_inline_decode(xdr, XDR_UNIT * 2);
-		if (!p)
+		if (!svcxdr_decode_nfstime3(xdr, &args->guardtime))
 			return false;
 		args->check_guard = 1;
-		args->guardtime = be32_to_cpup(p);
 	} else
 		args->check_guard = 0;
 
@@ -828,7 +825,8 @@ nfs3svc_encode_readlinkres(struct svc_rqst *rqstp, struct xdr_stream *xdr)
 			return false;
 		if (xdr_stream_encode_u32(xdr, resp->len) < 0)
 			return false;
-		xdr_write_pages(xdr, resp->pages, 0, resp->len);
+		svcxdr_encode_opaque_pages(rqstp, xdr, resp->pages, 0,
+					   resp->len);
 		if (svc_encode_result_payload(rqstp, head->iov_len, resp->len) < 0)
 			return false;
 		break;
@@ -859,8 +857,9 @@ nfs3svc_encode_readres(struct svc_rqst *rqstp, struct xdr_stream *xdr)
 			return false;
 		if (xdr_stream_encode_u32(xdr, resp->count) < 0)
 			return false;
-		xdr_write_pages(xdr, resp->pages, rqstp->rq_res.page_base,
-				resp->count);
+		svcxdr_encode_opaque_pages(rqstp, xdr, resp->pages,
+					   rqstp->rq_res.page_base,
+					   resp->count);
 		if (svc_encode_result_payload(rqstp, head->iov_len, resp->count) < 0)
 			return false;
 		break;
@@ -961,7 +960,8 @@ nfs3svc_encode_readdirres(struct svc_rqst *rqstp, struct xdr_stream *xdr)
 			return false;
 		if (!svcxdr_encode_cookieverf3(xdr, resp->verf))
 			return false;
-		xdr_write_pages(xdr, dirlist->pages, 0, dirlist->len);
+		svcxdr_encode_opaque_pages(rqstp, xdr, dirlist->pages, 0,
+					   dirlist->len);
 		/* no more entries */
 		if (xdr_stream_encode_item_absent(xdr) < 0)
 			return false;
@@ -1001,7 +1001,9 @@ compose_entry_fh(struct nfsd3_readdirres *cd, struct svc_fh *fhp,
 		} else
 			dchild = dget(dparent);
 	} else
-		dchild = lookup_positive_unlocked(name, dparent, namlen);
+		dchild = lookup_one_positive_unlocked(&nop_mnt_idmap,
+						      &QSTR_LEN(name, namlen),
+						      dparent);
 	if (IS_ERR(dchild))
 		return rv;
 	if (d_mountpoint(dchild))
@@ -1067,7 +1069,7 @@ svcxdr_encode_entry3_common(struct nfsd3_readdirres *resp, const char *name,
  *
  * Return values:
  *   %0: Entry was successfully encoded.
- *   %-EINVAL: An encoding problem occured, secondary status code in resp->common.err
+ *   %-EINVAL: An encoding problem occurred, secondary status code in resp->common.err
  *
  * On exit, the following fields are updated:
  *   - resp->xdr
@@ -1142,7 +1144,7 @@ out_noattrs:
  *
  * Return values:
  *   %0: Entry was successfully encoded.
- *   %-EINVAL: An encoding problem occured, secondary status code in resp->common.err
+ *   %-EINVAL: An encoding problem occurred, secondary status code in resp->common.err
  *
  * On exit, the following fields are updated:
  *   - resp->xdr

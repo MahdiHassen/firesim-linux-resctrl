@@ -110,13 +110,25 @@ static inline int arp_packet_match(const struct arphdr *arphdr,
 	arpptr += dev->addr_len;
 	memcpy(&src_ipaddr, arpptr, sizeof(u32));
 	arpptr += sizeof(u32);
-	tgt_devaddr = arpptr;
-	arpptr += dev->addr_len;
+
+	if (IS_ENABLED(CONFIG_FIREWIRE_NET) && dev->type == ARPHRD_IEEE1394) {
+		if (unlikely(memchr_inv(arpinfo->tgt_devaddr.mask, 0,
+					sizeof(arpinfo->tgt_devaddr.mask))))
+			return 0;
+
+		tgt_devaddr = NULL;
+	} else {
+		tgt_devaddr = arpptr;
+		arpptr += dev->addr_len;
+	}
 	memcpy(&tgt_ipaddr, arpptr, sizeof(u32));
 
 	if (NF_INVF(arpinfo, ARPT_INV_SRCDEVADDR,
 		    arp_devaddr_compare(&arpinfo->src_devaddr, src_devaddr,
-					dev->addr_len)) ||
+					dev->addr_len)))
+		return 0;
+
+	if (tgt_devaddr &&
 	    NF_INVF(arpinfo, ARPT_INV_TGTDEVADDR,
 		    arp_devaddr_compare(&arpinfo->tgt_devaddr, tgt_devaddr,
 					dev->addr_len)))
@@ -690,14 +702,12 @@ static int copy_entries_to_user(unsigned int total_size,
 		const struct xt_entry_target *t;
 
 		e = loc_cpu_entry + off;
-		if (copy_to_user(userptr + off, e, sizeof(*e))) {
-			ret = -EFAULT;
-			goto free_counters;
-		}
-		if (copy_to_user(userptr + off
+		if (copy_to_user(userptr + off, e,
+				 offsetof(struct arpt_entry, counters)) ||
+		    copy_to_user(userptr + off
 				 + offsetof(struct arpt_entry, counters),
 				 &counters[num],
-				 sizeof(counters[num])) != 0) {
+				 sizeof(counters[num]))) {
 			ret = -EFAULT;
 			goto free_counters;
 		}
@@ -826,7 +836,7 @@ static int get_info(struct net *net, void __user *user, const int *len)
 		       sizeof(info.underflow));
 		info.num_entries = private->number;
 		info.size = private->size;
-		strcpy(info.name, name);
+		strscpy(info.name, name);
 
 		if (copy_to_user(user, &info, *len) != 0)
 			ret = -EFAULT;
@@ -956,6 +966,8 @@ static int do_replace(struct net *net, sockptr_t arg, unsigned int len)
 	void *loc_cpu_entry;
 	struct arpt_entry *iter;
 
+	if (len < sizeof(tmp))
+		return -EINVAL;
 	if (copy_from_sockptr(&tmp, arg, sizeof(tmp)) != 0)
 		return -EFAULT;
 
@@ -963,6 +975,8 @@ static int do_replace(struct net *net, sockptr_t arg, unsigned int len)
 	if (tmp.num_counters >= INT_MAX / sizeof(struct xt_counters))
 		return -ENOMEM;
 	if (tmp.num_counters == 0)
+		return -EINVAL;
+	if ((u64)len < (u64)tmp.size + sizeof(tmp))
 		return -EINVAL;
 
 	tmp.name[sizeof(tmp.name)-1] = 0;
@@ -1254,6 +1268,8 @@ static int compat_do_replace(struct net *net, sockptr_t arg, unsigned int len)
 	void *loc_cpu_entry;
 	struct arpt_entry *iter;
 
+	if (len < sizeof(tmp))
+		return -EINVAL;
 	if (copy_from_sockptr(&tmp, arg, sizeof(tmp)) != 0)
 		return -EFAULT;
 
@@ -1261,6 +1277,8 @@ static int compat_do_replace(struct net *net, sockptr_t arg, unsigned int len)
 	if (tmp.num_counters >= INT_MAX / sizeof(struct xt_counters))
 		return -ENOMEM;
 	if (tmp.num_counters == 0)
+		return -EINVAL;
+	if ((u64)len < (u64)tmp.size + sizeof(tmp))
 		return -EINVAL;
 
 	tmp.name[sizeof(tmp.name)-1] = 0;
@@ -1307,9 +1325,8 @@ static int compat_copy_entry_to_user(struct arpt_entry *e, void __user **dstptr,
 
 	origsize = *size;
 	ce = *dstptr;
-	if (copy_to_user(ce, e, sizeof(struct arpt_entry)) != 0 ||
-	    copy_to_user(&ce->counters, &counters[i],
-	    sizeof(counters[i])) != 0)
+	if (copy_to_user(ce, e, offsetof(struct compat_arpt_entry, counters)) ||
+	    copy_to_user(&ce->counters, &counters[i], sizeof(counters[i])))
 		return -EFAULT;
 
 	*dstptr += sizeof(struct compat_arpt_entry);
@@ -1410,6 +1427,8 @@ static int do_arpt_set_ctl(struct sock *sk, int cmd, sockptr_t arg,
 
 	if (!ns_capable(sock_net(sk)->user_ns, CAP_NET_ADMIN))
 		return -EPERM;
+	if (!xt_compat_check())
+		return -EPERM;
 
 	switch (cmd) {
 	case ARPT_SO_SET_REPLACE:
@@ -1437,6 +1456,8 @@ static int do_arpt_get_ctl(struct sock *sk, int cmd, void __user *user, int *len
 	int ret;
 
 	if (!ns_capable(sock_net(sk)->user_ns, CAP_NET_ADMIN))
+		return -EPERM;
+	if (!xt_compat_check())
 		return -EPERM;
 
 	switch (cmd) {
@@ -1481,12 +1502,10 @@ static int do_arpt_get_ctl(struct sock *sk, int cmd, void __user *user, int *len
 
 static void __arpt_unregister_table(struct net *net, struct xt_table *table)
 {
-	struct xt_table_info *private;
-	void *loc_cpu_entry;
+	struct xt_table_info *private = table->private;
 	struct module *table_owner = table->me;
+	void *loc_cpu_entry;
 	struct arpt_entry *iter;
-
-	private = xt_unregister_table(table);
 
 	/* Decrease module usage counts and free resources */
 	loc_cpu_entry = private->entries;
@@ -1495,6 +1514,7 @@ static void __arpt_unregister_table(struct net *net, struct xt_table *table)
 	if (private->number > private->initial_entries)
 		module_put(table_owner);
 	xt_free_table_info(private);
+	kfree(table);
 }
 
 int arpt_register_table(struct net *net,
@@ -1502,13 +1522,11 @@ int arpt_register_table(struct net *net,
 			const struct arpt_replace *repl,
 			const struct nf_hook_ops *template_ops)
 {
-	struct nf_hook_ops *ops;
-	unsigned int num_ops;
-	int ret, i;
-	struct xt_table_info *newinfo;
 	struct xt_table_info bootstrap = {0};
-	void *loc_cpu_entry;
+	struct xt_table_info *newinfo;
 	struct xt_table *new_table;
+	void *loc_cpu_entry;
+	int ret;
 
 	newinfo = xt_alloc_table_info(repl->size);
 	if (!newinfo)
@@ -1523,52 +1541,22 @@ int arpt_register_table(struct net *net,
 		return ret;
 	}
 
-	new_table = xt_register_table(net, table, &bootstrap, newinfo);
+	new_table = xt_register_table(net, table, template_ops, &bootstrap, newinfo);
 	if (IS_ERR(new_table)) {
+		struct arpt_entry *iter;
+
+		xt_entry_foreach(iter, loc_cpu_entry, newinfo->size)
+			cleanup_entry(iter, net);
 		xt_free_table_info(newinfo);
 		return PTR_ERR(new_table);
 	}
 
-	num_ops = hweight32(table->valid_hooks);
-	if (num_ops == 0) {
-		ret = -EINVAL;
-		goto out_free;
-	}
-
-	ops = kmemdup(template_ops, sizeof(*ops) * num_ops, GFP_KERNEL);
-	if (!ops) {
-		ret = -ENOMEM;
-		goto out_free;
-	}
-
-	for (i = 0; i < num_ops; i++)
-		ops[i].priv = new_table;
-
-	new_table->ops = ops;
-
-	ret = nf_register_net_hooks(net, ops, num_ops);
-	if (ret != 0)
-		goto out_free;
-
-	return ret;
-
-out_free:
-	__arpt_unregister_table(net, new_table);
 	return ret;
 }
-
-void arpt_unregister_table_pre_exit(struct net *net, const char *name)
-{
-	struct xt_table *table = xt_find_table(net, NFPROTO_ARP, name);
-
-	if (table)
-		nf_unregister_net_hooks(net, table->ops, hweight32(table->valid_hooks));
-}
-EXPORT_SYMBOL(arpt_unregister_table_pre_exit);
 
 void arpt_unregister_table(struct net *net, const char *name)
 {
-	struct xt_table *table = xt_find_table(net, NFPROTO_ARP, name);
+	struct xt_table *table = xt_unregister_table_exit(net, NFPROTO_ARP, name);
 
 	if (table)
 		__arpt_unregister_table(net, table);

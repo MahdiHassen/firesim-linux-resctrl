@@ -3,15 +3,6 @@
 /*
  * Support for Intel Camera Imaging ISP subsystem.
  * Copyright (c) 2015, Intel Corporation.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
  */
 
 #ifndef _IA_CSS_TYPES_H
@@ -23,6 +14,8 @@
  * to be used in software layers that do not access the CSS API
  * directly but still need to forward parameters for it.
  */
+
+#include <linux/videodev2.h>
 
 #include <type_support.h>
 
@@ -83,6 +76,8 @@ struct ia_css_state_memory_offsets;
 
 /* Virtual address within the CSS address space. */
 typedef u32 ia_css_ptr;
+
+#define SIZE_OF_IA_CSS_PTR		sizeof(uint32_t)
 
 /* Generic resolution structure.
  */
@@ -435,21 +430,13 @@ struct ia_css_point {
 };
 
 /**
- * This specifies the region
- */
-struct ia_css_region {
-	struct ia_css_point origin; /** Starting point coordinates for the region */
-	struct ia_css_resolution resolution; /** Region resolution */
-};
-
-/**
  * Digital zoom:
  * This feature is currently available only for video, but will become
  * available for preview and capture as well.
  * Set the digital zoom factor, this is a logarithmic scale. The actual zoom
  * factor will be 64/x.
  * Setting dx or dy to 0 disables digital zoom for that direction.
- * New API change for Digital zoom:(added struct ia_css_region zoom_region)
+ *
  * zoom_region specifies the origin of the zoom region and width and
  * height of that region.
  * origin : This is the coordinate (x,y) within the effective input resolution
@@ -462,7 +449,7 @@ struct ia_css_region {
 struct ia_css_dz_config {
 	u32 dx; /** Horizontal zoom factor */
 	u32 dy; /** Vertical zoom factor */
-	struct ia_css_region zoom_region; /** region for zoom */
+	struct v4l2_rect zoom_region; /** region for zoom */
 };
 
 /* The still capture mode, this can be RAW (simply copy sensor input to DDR),

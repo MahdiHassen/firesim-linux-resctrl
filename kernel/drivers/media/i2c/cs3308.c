@@ -79,7 +79,7 @@ static int cs3308_probe(struct i2c_client *client)
 	v4l_info(client, "chip found @ 0x%x (%s)\n",
 		 client->addr << 1, client->adapter->name);
 
-	sd = kzalloc(sizeof(struct v4l2_subdev), GFP_KERNEL);
+	sd = kzalloc_obj(struct v4l2_subdev);
 	if (sd == NULL)
 		return -ENOMEM;
 
@@ -109,7 +109,7 @@ static void cs3308_remove(struct i2c_client *client)
 /* ----------------------------------------------------------------------- */
 
 static const struct i2c_device_id cs3308_id[] = {
-	{ "cs3308", 0 },
+	{ .name = "cs3308" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, cs3308_id);
@@ -118,7 +118,7 @@ static struct i2c_driver cs3308_driver = {
 	.driver = {
 		.name   = "cs3308",
 	},
-	.probe_new      = cs3308_probe,
+	.probe          = cs3308_probe,
 	.remove         = cs3308_remove,
 	.id_table       = cs3308_id,
 };

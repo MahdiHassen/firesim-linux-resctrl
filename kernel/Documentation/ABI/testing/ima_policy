@@ -20,9 +20,10 @@ Description:
 		  rule format: action [condition ...]
 
 		  action: measure | dont_measure | appraise | dont_appraise |
-			  audit | hash | dont_hash
+			  audit | dont_audit | hash | dont_hash
 		  condition:= base | lsm  [option]
 			base:	[[func=] [mask=] [fsmagic=] [fsuuid=] [fsname=]
+				[fs_subtype=]
 				[uid=] [euid=] [gid=] [egid=]
 				[fowner=] [fgroup=]]
 			lsm:	[[subj_user=] [subj_role=] [subj_type=]
@@ -35,7 +36,7 @@ Description:
 				[FIRMWARE_CHECK]
 				[KEXEC_KERNEL_CHECK] [KEXEC_INITRAMFS_CHECK]
 				[KEXEC_CMDLINE] [KEY_CHECK] [CRITICAL_DATA]
-				[SETXATTR_CHECK]
+				[SETXATTR_CHECK][MMAP_CHECK_REQPROT]
 			mask:= [[^]MAY_READ] [[^]MAY_WRITE] [[^]MAY_APPEND]
 			       [[^]MAY_EXEC]
 			fsmagic:= hex value
@@ -52,14 +53,11 @@ Description:
 			    where 'imasig' is the original or the signature
 				format v2.
 			    where 'modsig' is an appended signature,
-			    where 'sigv3' is the signature format v3. (Currently
-				limited to fsverity digest based signatures
-				stored in security.ima xattr. Requires
-				specifying "digest_type=verity" first.)
+			    where 'sigv3' is the signature format v3.
 
-			appraise_flag:= [check_blacklist]
-			Currently, blacklist check is only for files signed with appended
-			signature.
+			appraise_flag:= [check_blacklist] (deprecated)
+			Setting the check_blacklist flag is no longer necessary.
+			All appraisal functions set it by default.
 			digest_type:= verity
 			    Require fs-verity's file digest instead of the
 			    regular IMA file hash.
@@ -184,6 +182,11 @@ Description:
 
 			appraise func=BPRM_CHECK digest_type=verity \
 				appraise_type=sigv3
+
+		Example of a regular IMA file hash 'appraise' rule requiring
+		signature version 3 format stored in security.ima xattr.
+
+			appraise func=BPRM_CHECK appraise_type=sigv3
 
 		All of these policy rules could, for example, be constrained
 		either based on a filesystem's UUID (fsuuid) or based on LSM

@@ -1,3 +1,5 @@
-# SPDX-License-Identifier: GPL-2.0-only
+obj-$(CONFIG_ARM64_MPAM_DRIVER)			+= mpam.o
+mpam-y						+= mpam_devices.o
+mpam-$(CONFIG_ARM64_MPAM_RESCTRL_FS)		+= mpam_resctrl.o
 
-obj-$(CONFIG_RISCV_ISA_SSQOSID) += riscv/
+ccflags-$(CONFIG_ARM64_MPAM_DRIVER_DEBUG)	+= -DDEBUG

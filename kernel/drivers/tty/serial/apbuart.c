@@ -22,9 +22,6 @@
 #include <linux/kthread.h>
 #include <linux/device.h>
 #include <linux/of.h>
-#include <linux/of_device.h>
-#include <linux/of_platform.h>
-#include <linux/of_irq.h>
 #include <linux/platform_device.h>
 #include <linux/io.h>
 #include <linux/serial_core.h>
@@ -70,8 +67,9 @@ static void apbuart_stop_rx(struct uart_port *port)
 
 static void apbuart_rx_chars(struct uart_port *port)
 {
-	unsigned int status, ch, rsr, flag;
+	unsigned int status, rsr;
 	unsigned int max_chars = port->fifosize;
+	u8 ch, flag;
 
 	status = UART_GET_STATUS(port);
 
@@ -124,7 +122,7 @@ static void apbuart_tx_chars(struct uart_port *port)
 {
 	u8 ch;
 
-	uart_port_tx_limited(port, ch, port->fifosize >> 1,
+	uart_port_tx_limited(port, ch, port->fifosize,
 		true,
 		UART_PUT_CHAR(port, ch),
 		({}));
@@ -135,7 +133,7 @@ static irqreturn_t apbuart_int(int irq, void *dev_id)
 	struct uart_port *port = dev_id;
 	unsigned int status;
 
-	spin_lock(&port->lock);
+	uart_port_lock(port);
 
 	status = UART_GET_STATUS(port);
 	if (status & UART_STATUS_DR)
@@ -143,7 +141,7 @@ static irqreturn_t apbuart_int(int irq, void *dev_id)
 	if (status & UART_STATUS_THE)
 		apbuart_tx_chars(port);
 
-	spin_unlock(&port->lock);
+	uart_port_unlock(port);
 
 	return IRQ_HANDLED;
 }
@@ -212,8 +210,6 @@ static void apbuart_set_termios(struct uart_port *port,
 
 	/* Ask the core to calculate the divisor for us. */
 	baud = uart_get_baud_rate(port, termios, old, 0, port->uartclk / 16);
-	if (baud == 0)
-		panic("invalid baudrate %i\n", port->uartclk / 16);
 
 	/* uart_get_divisor calc a *16 uart freq, apbuart is *8 */
 	quot = (uart_get_divisor(port, baud)) * 2;
@@ -230,7 +226,7 @@ static void apbuart_set_termios(struct uart_port *port,
 	if (termios->c_cflag & CRTSCTS)
 		cr |= UART_CTRL_FL;
 
-	spin_lock_irqsave(&port->lock, flags);
+	uart_port_lock_irqsave(port, &flags);
 
 	/* Update the per-port timeout. */
 	uart_update_timeout(port, termios->c_cflag, baud);
@@ -253,7 +249,7 @@ static void apbuart_set_termios(struct uart_port *port,
 	UART_PUT_SCAL(port, quot);
 	UART_PUT_CTRL(port, cr);
 
-	spin_unlock_irqrestore(&port->lock, flags);
+	uart_port_unlock_irqrestore(port, flags);
 }
 
 static const char *apbuart_type(struct uart_port *port)
@@ -507,7 +503,7 @@ console_initcall(apbuart_console_init);
 
 static struct uart_driver grlib_apbuart_driver = {
 	.owner = THIS_MODULE,
-	.driver_name = "serial",
+	.driver_name = "serial_apbuart",
 	.dev_name = "ttyS",
 	.major = SERIAL_APBUART_MAJOR,
 	.minor = SERIAL_APBUART_MINOR,

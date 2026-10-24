@@ -5,7 +5,7 @@
 #include <linux/init.h>
 #include <linux/io.h>
 #include <linux/module.h>
-#include <linux/of_device.h>
+#include <linux/of.h>
 #include <linux/slab.h>
 #include <sound/core.h>
 #include <sound/pcm.h>
@@ -1298,7 +1298,6 @@ static int audio_clk_init(struct platform_device *pdev,
 static int cygnus_ssp_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
-	struct device_node *child_node;
 	struct cygnus_audio *cygaud;
 	int err;
 	int node_count;
@@ -1331,16 +1330,15 @@ static int cygnus_ssp_probe(struct platform_device *pdev)
 
 	active_port_count = 0;
 
-	for_each_available_child_of_node(pdev->dev.of_node, child_node) {
+	for_each_available_child_of_node_scoped(pdev->dev.of_node, child_node) {
 		err = parse_ssp_child_node(pdev, child_node, cygaud,
 					&cygnus_ssp_dai[active_port_count]);
 
 		/* negative is err, 0 is active and good, 1 is disabled */
-		if (err < 0) {
-			of_node_put(child_node);
+		if (err < 0)
 			return err;
-		}
-		else if (!err) {
+
+		if (!err) {
 			dev_dbg(dev, "Activating DAI: %s\n",
 				cygnus_ssp_dai[active_port_count].name);
 			active_port_count++;
@@ -1377,11 +1375,9 @@ static int cygnus_ssp_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int cygnus_ssp_remove(struct platform_device *pdev)
+static void cygnus_ssp_remove(struct platform_device *pdev)
 {
 	cygnus_soc_platform_unregister(&pdev->dev);
-
-	return 0;
 }
 
 static const struct of_device_id cygnus_ssp_of_match[] = {

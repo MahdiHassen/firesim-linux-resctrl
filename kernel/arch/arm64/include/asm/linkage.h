@@ -1,12 +1,12 @@
 #ifndef __ASM_LINKAGE_H
 #define __ASM_LINKAGE_H
 
-#ifdef __ASSEMBLY__
+#ifdef __ASSEMBLER__
 #include <asm/assembler.h>
 #endif
 
-#define __ALIGN		.align 2
-#define __ALIGN_STR	".align 2"
+#define __ALIGN		.balign CONFIG_FUNCTION_ALIGNMENT
+#define __ALIGN_STR	".balign " #CONFIG_FUNCTION_ALIGNMENT
 
 /*
  * When using in-kernel BTI we need to ensure that PCS-conformant
@@ -42,5 +42,9 @@
 #define SYM_TYPED_FUNC_START(name)				\
 	SYM_TYPED_START(name, SYM_L_GLOBAL, SYM_A_ALIGN)	\
 	bti c ;
+
+#define _THIS_IP_ ({ unsigned long __ip; asm volatile("adr %0, ." : "=r" (__ip)); __ip; })
+
+#define __bss_pgtbl __section(".bss..pgtbl") __aligned(PAGE_SIZE)
 
 #endif

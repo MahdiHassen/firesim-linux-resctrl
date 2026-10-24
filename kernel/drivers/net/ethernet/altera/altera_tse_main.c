@@ -27,14 +27,16 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/mii.h>
+#include <linux/mdio/mdio-regmap.h>
 #include <linux/netdevice.h>
-#include <linux/of_device.h>
+#include <linux/of.h>
 #include <linux/of_mdio.h>
 #include <linux/of_net.h>
-#include <linux/of_platform.h>
-#include <linux/pcs-altera-tse.h>
+#include <linux/pcs-lynx.h>
 #include <linux/phy.h>
 #include <linux/platform_device.h>
+#include <linux/property.h>
+#include <linux/regmap.h>
 #include <linux/skbuff.h>
 #include <asm/cacheflush.h>
 
@@ -79,8 +81,6 @@ MODULE_PARM_DESC(dma_tx_num, "Number of descriptors in the TX list");
 #define TSE_TX_THRESH(x)	(x->tx_ring_size / 4)
 
 #define TXQUEUESTOP_THRESHHOLD	2
-
-static const struct of_device_id altera_tse_ids[];
 
 static inline u32 tse_tx_avail(struct altera_tse_private *priv)
 {
@@ -258,14 +258,12 @@ static int alloc_init_skbufs(struct altera_tse_private *priv)
 	int i;
 
 	/* Create Rx ring buffer */
-	priv->rx_ring = kcalloc(rx_descs, sizeof(struct tse_buffer),
-				GFP_KERNEL);
+	priv->rx_ring = kzalloc_objs(struct tse_buffer, rx_descs);
 	if (!priv->rx_ring)
 		goto err_rx_ring;
 
 	/* Create Tx ring buffer */
-	priv->tx_ring = kcalloc(tx_descs, sizeof(struct tse_buffer),
-				GFP_KERNEL);
+	priv->tx_ring = kzalloc_objs(struct tse_buffer, tx_descs);
 	if (!priv->tx_ring)
 		goto err_tx_ring;
 
@@ -572,6 +570,7 @@ static netdev_tx_t tse_start_xmit(struct sk_buff *skb, struct net_device *dev)
 				  DMA_TO_DEVICE);
 	if (dma_mapping_error(priv->device, dma_addr)) {
 		netdev_err(priv->dev, "%s: DMA mapping error\n", __func__);
+		dev_kfree_skb_any(skb);
 		ret = NETDEV_TX_OK;
 		goto out;
 	}
@@ -788,7 +787,7 @@ static int tse_change_mtu(struct net_device *dev, int new_mtu)
 		return -EBUSY;
 	}
 
-	dev->mtu = new_mtu;
+	WRITE_ONCE(dev->mtu, new_mtu);
 	netdev_update_features(dev);
 
 	return 0;
@@ -891,9 +890,6 @@ static int tse_open(struct net_device *dev)
 	if (netif_msg_ifup(priv))
 		netdev_warn(dev, "device MAC address %pM\n",
 			    dev->dev_addr);
-
-	if ((priv->revision < 0xd00) || (priv->revision > 0xe00))
-		netdev_warn(dev, "TSE revision %x\n", priv->revision);
 
 	spin_lock(&priv->mac_cfg_lock);
 
@@ -1036,10 +1032,6 @@ static struct net_device_ops altera_tse_netdev_ops = {
 	.ndo_validate_addr	= eth_validate_addr,
 };
 
-static void alt_tse_mac_an_restart(struct phylink_config *config)
-{
-}
-
 static void alt_tse_mac_config(struct phylink_config *config, unsigned int mode,
 			       const struct phylink_link_state *state)
 {
@@ -1096,7 +1088,6 @@ static struct phylink_pcs *alt_tse_select_pcs(struct phylink_config *config,
 }
 
 static const struct phylink_mac_ops alt_tse_phylink_ops = {
-	.mac_an_restart = alt_tse_mac_an_restart,
 	.mac_config = alt_tse_mac_config,
 	.mac_link_down = alt_tse_mac_link_down,
 	.mac_link_up = alt_tse_mac_link_up,
@@ -1136,15 +1127,18 @@ static int request_and_map(struct platform_device *pdev, const char *name,
  */
 static int altera_tse_probe(struct platform_device *pdev)
 {
-	const struct of_device_id *of_id = NULL;
+	struct regmap_config pcs_regmap_cfg;
 	struct altera_tse_private *priv;
+	struct mdio_regmap_config mrc;
 	struct resource *control_port;
+	struct regmap *pcs_regmap;
 	struct resource *dma_res;
 	struct resource *pcs_res;
+	struct mii_bus *pcs_bus;
 	struct net_device *ndev;
 	void __iomem *descmap;
-	int pcs_reg_width = 2;
 	int ret = -ENODEV;
+	u32 revision;
 
 	ndev = alloc_etherdev(sizeof(struct altera_tse_private));
 	if (!ndev) {
@@ -1153,17 +1147,14 @@ static int altera_tse_probe(struct platform_device *pdev)
 	}
 
 	SET_NETDEV_DEV(ndev, &pdev->dev);
+	platform_set_drvdata(pdev, ndev);
 
 	priv = netdev_priv(ndev);
 	priv->device = &pdev->dev;
 	priv->dev = ndev;
 	priv->msg_enable = netif_msg_init(debug, default_msg_level);
 
-	of_id = of_match_device(altera_tse_ids, &pdev->dev);
-
-	if (of_id)
-		priv->dmaops = (struct altera_dmaops *)of_id->data;
-
+	priv->dmaops = device_get_match_data(&pdev->dev);
 
 	if (priv->dmaops &&
 	    priv->dmaops->altera_dtype == ALTERA_DTYPE_SGDMA) {
@@ -1255,17 +1246,40 @@ static int altera_tse_probe(struct platform_device *pdev)
 	if (ret)
 		goto err_free_netdev;
 
+	memset(&pcs_regmap_cfg, 0, sizeof(pcs_regmap_cfg));
+	memset(&mrc, 0, sizeof(mrc));
 	/* SGMII PCS address space. The location can vary depending on how the
 	 * IP is integrated. We can have a resource dedicated to it at a specific
 	 * address space, but if it's not the case, we fallback to the mdiophy0
 	 * from the MAC's address space
 	 */
-	ret = request_and_map(pdev, "pcs", &pcs_res,
-			      &priv->pcs_base);
+	ret = request_and_map(pdev, "pcs", &pcs_res, &priv->pcs_base);
 	if (ret) {
+		/* If we can't find a dedicated resource for the PCS, fallback
+		 * to the internal PCS, that has a different address stride
+		 */
 		priv->pcs_base = priv->mac_dev + tse_csroffs(mdio_phy0);
-		pcs_reg_width = 4;
+		pcs_regmap_cfg.reg_bits = 32;
+		/* Values are MDIO-like values, on 16 bits */
+		pcs_regmap_cfg.val_bits = 16;
+		pcs_regmap_cfg.reg_shift = REGMAP_UPSHIFT(2);
+	} else {
+		pcs_regmap_cfg.reg_bits = 16;
+		pcs_regmap_cfg.val_bits = 16;
+		pcs_regmap_cfg.reg_shift = REGMAP_UPSHIFT(1);
 	}
+
+	/* Create a regmap for the PCS so that it can be used by the PCS driver */
+	pcs_regmap = devm_regmap_init_mmio(&pdev->dev, priv->pcs_base,
+					   &pcs_regmap_cfg);
+	if (IS_ERR(pcs_regmap)) {
+		ret = PTR_ERR(pcs_regmap);
+		goto err_free_netdev;
+	}
+	mrc.regmap = pcs_regmap;
+	mrc.parent = &pdev->dev;
+	mrc.valid_addr = 0x0;
+	mrc.autoscan = false;
 
 	/* Rx IRQ */
 	priv->rx_irq = platform_get_irq_byname(pdev, "rx_irq");
@@ -1371,25 +1385,18 @@ static int altera_tse_probe(struct platform_device *pdev)
 	spin_lock_init(&priv->tx_lock);
 	spin_lock_init(&priv->rxdma_irq_lock);
 
-	netif_carrier_off(ndev);
-	ret = register_netdev(ndev);
-	if (ret) {
-		dev_err(&pdev->dev, "failed to register TSE net device\n");
-		goto err_register_netdev;
+	snprintf(mrc.name, MII_BUS_ID_SIZE, "%s-pcs-mii", dev_name(&pdev->dev));
+	pcs_bus = devm_mdio_regmap_register(&pdev->dev, &mrc);
+	if (IS_ERR(pcs_bus)) {
+		ret = PTR_ERR(pcs_bus);
+		goto err_init_pcs;
 	}
 
-	platform_set_drvdata(pdev, ndev);
-
-	priv->revision = ioread32(&priv->mac_dev->megacore_revision);
-
-	if (netif_msg_probe(priv))
-		dev_info(&pdev->dev, "Altera TSE MAC version %d.%d at 0x%08lx irq %d/%d\n",
-			 (priv->revision >> 8) & 0xff,
-			 priv->revision & 0xff,
-			 (unsigned long) control_port->start, priv->rx_irq,
-			 priv->tx_irq);
-
-	priv->pcs = alt_tse_pcs_create(ndev, priv->pcs_base, pcs_reg_width);
+	priv->pcs = lynx_pcs_create_mdiodev(pcs_bus, 0);
+	if (IS_ERR(priv->pcs)) {
+		ret = PTR_ERR(priv->pcs);
+		goto err_init_pcs;
+	}
 
 	priv->phylink_config.dev = &ndev->dev;
 	priv->phylink_config.type = PHYLINK_NETDEV;
@@ -1412,14 +1419,33 @@ static int altera_tse_probe(struct platform_device *pdev)
 	if (IS_ERR(priv->phylink)) {
 		dev_err(&pdev->dev, "failed to create phylink\n");
 		ret = PTR_ERR(priv->phylink);
-		goto err_init_phy;
+		goto err_init_phylink;
 	}
+
+	ret = register_netdev(ndev);
+	if (ret) {
+		dev_err(&pdev->dev, "failed to register TSE net device\n");
+		goto err_register_netdev;
+	}
+
+	revision = ioread32(&priv->mac_dev->megacore_revision);
+
+	if (revision < 0xd00 || revision > 0xe00)
+		netdev_warn(ndev, "TSE revision %x\n", revision);
+
+	if (netif_msg_probe(priv))
+		dev_info(&pdev->dev, "Altera TSE MAC version %d.%d at 0x%08lx irq %d/%d\n",
+			 (revision >> 8) & 0xff, revision & 0xff,
+			 (unsigned long)control_port->start, priv->rx_irq,
+			 priv->tx_irq);
 
 	return 0;
 
-err_init_phy:
-	unregister_netdev(ndev);
 err_register_netdev:
+	phylink_destroy(priv->phylink);
+err_init_phylink:
+	lynx_pcs_destroy(priv->pcs);
+err_init_pcs:
 	netif_napi_del(&priv->napi);
 	altera_tse_mdio_destroy(ndev);
 err_free_netdev:
@@ -1429,7 +1455,7 @@ err_free_netdev:
 
 /* Remove Altera TSE MAC device
  */
-static int altera_tse_remove(struct platform_device *pdev)
+static void altera_tse_remove(struct platform_device *pdev)
 {
 	struct net_device *ndev = platform_get_drvdata(pdev);
 	struct altera_tse_private *priv = netdev_priv(ndev);
@@ -1438,9 +1464,9 @@ static int altera_tse_remove(struct platform_device *pdev)
 	altera_tse_mdio_destroy(ndev);
 	unregister_netdev(ndev);
 	phylink_destroy(priv->phylink);
-	free_netdev(ndev);
+	lynx_pcs_destroy(priv->pcs);
 
-	return 0;
+	free_netdev(ndev);
 }
 
 static const struct altera_dmaops altera_dtype_sgdma = {

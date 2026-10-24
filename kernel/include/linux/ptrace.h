@@ -17,6 +17,7 @@ struct syscall_info {
 	struct seccomp_data	data;
 };
 
+bool ptracer_access_allowed(struct task_struct *tsk);
 extern int ptrace_access_vm(struct task_struct *tsk, unsigned long addr,
 			    void *buf, int len, unsigned int gup_flags);
 
@@ -391,6 +392,10 @@ static inline void user_single_step_report(struct pt_regs *regs)
 
 #ifndef current_user_stack_pointer
 #define current_user_stack_pointer() user_stack_pointer(current_pt_regs())
+#endif
+
+#ifndef exception_ip
+#define exception_ip(x) instruction_pointer(x)
 #endif
 
 extern int task_current_syscall(struct task_struct *target, struct syscall_info *info);

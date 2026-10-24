@@ -106,6 +106,10 @@ Global attributes
 `update_interval`
 		The interval at which the chip will update readings.
 
+`update_interval_us`
+		The interval at which the chip will update readings,
+		expressed in microseconds for finer resolution.
+
 
 ********
 Voltages
@@ -201,7 +205,7 @@ PWM
 		Pulse width modulation fan control.
 
 `pwm[1-*]_enable`
-		Fan speed control method:
+		Fan speed control method.
 
 `pwm[1-*]_mode`
 		direct current or pulse-width modulation.

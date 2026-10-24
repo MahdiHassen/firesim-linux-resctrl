@@ -195,21 +195,19 @@ static char *tomoyo_print_header(struct tomoyo_request_info *r)
 		if (i & 1) {
 			pos += snprintf(buffer + pos,
 					tomoyo_buffer_len - 1 - pos,
-					" path%u.parent={ uid=%u gid=%u ino=%lu perm=0%o }",
+					" path%u.parent={ uid=%u gid=%u ino=%llu perm=0%o }",
 					(i >> 1) + 1,
 					from_kuid(&init_user_ns, stat->uid),
 					from_kgid(&init_user_ns, stat->gid),
-					(unsigned long)stat->ino,
-					stat->mode & S_IALLUGO);
+					stat->ino, stat->mode & S_IALLUGO);
 			continue;
 		}
 		pos += snprintf(buffer + pos, tomoyo_buffer_len - 1 - pos,
-				" path%u={ uid=%u gid=%u ino=%lu major=%u minor=%u perm=0%o type=%s",
+				" path%u={ uid=%u gid=%u ino=%llu major=%u minor=%u perm=0%o type=%s",
 				(i >> 1) + 1,
 				from_kuid(&init_user_ns, stat->uid),
 				from_kgid(&init_user_ns, stat->gid),
-				(unsigned long)stat->ino,
-				MAJOR(dev), MINOR(dev),
+				stat->ino, MAJOR(dev), MINOR(dev),
 				mode & S_IALLUGO, tomoyo_filetype(mode));
 		if (S_ISCHR(mode) || S_ISBLK(mode)) {
 			dev = stat->rdev;
@@ -271,7 +269,7 @@ char *tomoyo_init_log(struct tomoyo_request_info *r, int len, const char *fmt,
 		/* +18 is for " symlink.target=\"%s\"" */
 		len += 18 + strlen(symlink);
 	}
-	len = tomoyo_round2(len);
+	len = kmalloc_size_roundup(len);
 	buf = kzalloc(len, GFP_NOFS);
 	if (!buf)
 		goto out;
@@ -376,18 +374,18 @@ void tomoyo_write_log2(struct tomoyo_request_info *r, int len, const char *fmt,
 	buf = tomoyo_init_log(r, len, fmt, args);
 	if (!buf)
 		goto out;
-	entry = kzalloc(sizeof(*entry), GFP_NOFS);
+	entry = kzalloc_obj(*entry, GFP_NOFS);
 	if (!entry) {
 		kfree(buf);
 		goto out;
 	}
 	entry->log = buf;
-	len = tomoyo_round2(strlen(buf) + 1);
+	len = kmalloc_size_roundup(strlen(buf) + 1);
 	/*
 	 * The entry->size is used for memory quota checks.
 	 * Don't go beyond strlen(entry->log).
 	 */
-	entry->size = len + tomoyo_round2(sizeof(*entry));
+	entry->size = len + kmalloc_size_roundup(sizeof(*entry));
 	spin_lock(&tomoyo_log_lock);
 	if (tomoyo_memory_quota[TOMOYO_MEMORY_AUDIT] &&
 	    tomoyo_memory_used[TOMOYO_MEMORY_AUDIT] + entry->size >=

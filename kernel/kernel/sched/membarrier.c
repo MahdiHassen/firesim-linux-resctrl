@@ -4,6 +4,8 @@
  *
  * membarrier system call
  */
+#include <uapi/linux/membarrier.h>
+#include "sched.h"
 
 /*
  * For documentation purposes, here are some membarrier ordering
@@ -159,7 +161,29 @@
 	| MEMBARRIER_CMD_PRIVATE_EXPEDITED				\
 	| MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED			\
 	| MEMBARRIER_PRIVATE_EXPEDITED_SYNC_CORE_BITMASK		\
-	| MEMBARRIER_PRIVATE_EXPEDITED_RSEQ_BITMASK)
+	| MEMBARRIER_PRIVATE_EXPEDITED_RSEQ_BITMASK			\
+	| MEMBARRIER_CMD_GET_REGISTRATIONS)
+
+/*
+ * Scoped guard for memory barriers on entry and exit.
+ * Matches memory barriers before & after rq->curr modification in scheduler.
+ */
+DEFINE_LOCK_GUARD_0(mb, smp_mb(), smp_mb())
+static DEFINE_MUTEX(membarrier_ipi_mutex);
+static DEFINE_PER_CPU(struct mutex, membarrier_cpu_mutexes);
+
+#define SERIALIZE_IPI() guard(mutex)(&membarrier_ipi_mutex)
+#define SERIALIZE_IPI_CPU(cpu_id) guard(mutex)(&per_cpu(membarrier_cpu_mutexes, cpu_id))
+
+static int __init membarrier_init(void)
+{
+	int i;
+
+	for_each_possible_cpu(i)
+		mutex_init(&per_cpu(membarrier_cpu_mutexes, i));
+	return 0;
+}
+core_initcall(membarrier_init);
 
 static void ipi_mb(void *info)
 {
@@ -193,7 +217,16 @@ static void ipi_rseq(void *info)
 	 * is negligible.
 	 */
 	smp_mb();
-	rseq_preempt(current);
+	/*
+	 * Legacy mode requires that IDs are written and the critical section is
+	 * evaluated. V2 optimized mode handles the critical section and IDs are
+	 * only updated if they change as a consequence of preemption after
+	 * return from this IPI.
+	 */
+	if (rseq_v2(current))
+		rseq_sched_switch_event(current);
+	else
+		rseq_force_update();
 }
 
 static void ipi_sync_rq_state(void *info)
@@ -243,22 +276,19 @@ void membarrier_update_current_mm(struct mm_struct *next_mm)
 
 static int membarrier_global_expedited(void)
 {
+	cpumask_var_t __free(free_cpumask_var) tmpmask = CPUMASK_VAR_NULL;
 	int cpu;
-	cpumask_var_t tmpmask;
 
 	if (num_online_cpus() == 1)
 		return 0;
 
-	/*
-	 * Matches memory barriers around rq->curr modification in
-	 * scheduler.
-	 */
-	smp_mb();	/* system call entry is not a mb. */
-
 	if (!zalloc_cpumask_var(&tmpmask, GFP_KERNEL))
 		return -ENOMEM;
 
-	cpus_read_lock();
+	guard(mb)();
+	SERIALIZE_IPI();
+	guard(cpus_read_lock)();
+
 	rcu_read_lock();
 	for_each_online_cpu(cpu) {
 		struct task_struct *p;
@@ -294,21 +324,11 @@ static int membarrier_global_expedited(void)
 	smp_call_function_many(tmpmask, ipi_mb, NULL, 1);
 	preempt_enable();
 
-	free_cpumask_var(tmpmask);
-	cpus_read_unlock();
-
-	/*
-	 * Memory barrier on the caller thread _after_ we finished
-	 * waiting for the last IPI. Matches memory barriers around
-	 * rq->curr modification in scheduler.
-	 */
-	smp_mb();	/* exit from system call is not a mb */
 	return 0;
 }
 
 static int membarrier_private_expedited(int flags, int cpu_id)
 {
-	cpumask_var_t tmpmask;
 	struct mm_struct *mm = current->mm;
 	smp_call_func_t ipi_func = ipi_mb;
 
@@ -319,6 +339,7 @@ static int membarrier_private_expedited(int flags, int cpu_id)
 		      MEMBARRIER_STATE_PRIVATE_EXPEDITED_SYNC_CORE_READY))
 			return -EPERM;
 		ipi_func = ipi_sync_core;
+		prepare_sync_core_cmd(mm);
 	} else if (flags == MEMBARRIER_FLAG_RSEQ) {
 		if (!IS_ENABLED(CONFIG_RSEQ))
 			return -EINVAL;
@@ -338,30 +359,50 @@ static int membarrier_private_expedited(int flags, int cpu_id)
 		return 0;
 
 	/*
-	 * Matches memory barriers around rq->curr modification in
+	 * Matches memory barriers after rq->curr modification in
 	 * scheduler.
+	 *
+	 * On RISC-V, this barrier pairing is also needed for the
+	 * SYNC_CORE command when switching between processes, cf.
+	 * the inline comments in membarrier_arch_switch_mm().
+	 *
+	 * Memory barrier on the caller thread _after_ we finished
+	 * waiting for the last IPI. Matches memory barriers before
+	 * rq->curr modification in scheduler.
 	 */
-	smp_mb();	/* system call entry is not a mb. */
-
-	if (cpu_id < 0 && !zalloc_cpumask_var(&tmpmask, GFP_KERNEL))
-		return -ENOMEM;
-
-	cpus_read_lock();
-
+	guard(mb)();
 	if (cpu_id >= 0) {
+		if (cpu_id >= nr_cpu_ids || !cpu_possible(cpu_id))
+			return 0;
+
+		SERIALIZE_IPI_CPU(cpu_id);
+		guard(cpus_read_lock)();
 		struct task_struct *p;
 
-		if (cpu_id >= nr_cpu_ids || !cpu_online(cpu_id))
-			goto out;
+		if (!cpu_online(cpu_id))
+			return 0;
+
 		rcu_read_lock();
 		p = rcu_dereference(cpu_rq(cpu_id)->curr);
 		if (!p || p->mm != mm) {
 			rcu_read_unlock();
-			goto out;
+			return 0;
 		}
 		rcu_read_unlock();
+		/*
+		 * smp_call_function_single() will call ipi_func() if cpu_id
+		 * is the calling CPU.
+		 */
+		smp_call_function_single(cpu_id, ipi_func, NULL, 1);
 	} else {
+		cpumask_var_t __free(free_cpumask_var) tmpmask = CPUMASK_VAR_NULL;
 		int cpu;
+
+		if (!zalloc_cpumask_var(&tmpmask, GFP_KERNEL))
+			return -ENOMEM;
+
+		SERIALIZE_IPI();
+		guard(cpus_read_lock)();
 
 		rcu_read_lock();
 		for_each_online_cpu(cpu) {
@@ -372,15 +413,6 @@ static int membarrier_private_expedited(int flags, int cpu_id)
 				__cpumask_set_cpu(cpu, tmpmask);
 		}
 		rcu_read_unlock();
-	}
-
-	if (cpu_id >= 0) {
-		/*
-		 * smp_call_function_single() will call ipi_func() if cpu_id
-		 * is the calling CPU.
-		 */
-		smp_call_function_single(cpu_id, ipi_func, NULL, 1);
-	} else {
 		/*
 		 * For regular membarrier, we can save a few cycles by
 		 * skipping the current cpu -- we're about to do smp_mb()
@@ -394,9 +426,9 @@ static int membarrier_private_expedited(int flags, int cpu_id)
 		 * membarrier, we will end up with some thread in the mm
 		 * running without a core sync.
 		 *
-		 * For RSEQ, don't rseq_preempt() the caller.  User code
-		 * is not supposed to issue syscalls at all from inside an
-		 * rseq critical section.
+		 * For RSEQ, don't invoke rseq_sched_switch_event() on the
+		 * caller.  User code is not supposed to issue syscalls at
+		 * all from inside an rseq critical section.
 		 */
 		if (flags != MEMBARRIER_FLAG_SYNC_CORE) {
 			preempt_disable();
@@ -406,18 +438,6 @@ static int membarrier_private_expedited(int flags, int cpu_id)
 			on_each_cpu_mask(tmpmask, ipi_func, NULL, true);
 		}
 	}
-
-out:
-	if (cpu_id < 0)
-		free_cpumask_var(tmpmask);
-	cpus_read_unlock();
-
-	/*
-	 * Memory barrier on the caller thread _after_ we finished
-	 * waiting for the last IPI. Matches memory barriers around
-	 * rq->curr modification in scheduler.
-	 */
-	smp_mb();	/* exit from system call is not a mb */
 
 	return 0;
 }
@@ -459,6 +479,7 @@ static int sync_runqueues_membarrier_state(struct mm_struct *mm)
 	 * between threads which are users of @mm has its membarrier state
 	 * updated.
 	 */
+	SERIALIZE_IPI();
 	cpus_read_lock();
 	rcu_read_lock();
 	for_each_online_cpu(cpu) {
@@ -538,6 +559,40 @@ static int membarrier_register_private_expedited(int flags)
 	atomic_or(ready_state, &mm->membarrier_state);
 
 	return 0;
+}
+
+static int membarrier_get_registrations(void)
+{
+	struct task_struct *p = current;
+	struct mm_struct *mm = p->mm;
+	int registrations_mask = 0, membarrier_state, i;
+	static const int states[] = {
+		MEMBARRIER_STATE_GLOBAL_EXPEDITED |
+			MEMBARRIER_STATE_GLOBAL_EXPEDITED_READY,
+		MEMBARRIER_STATE_PRIVATE_EXPEDITED |
+			MEMBARRIER_STATE_PRIVATE_EXPEDITED_READY,
+		MEMBARRIER_STATE_PRIVATE_EXPEDITED_SYNC_CORE |
+			MEMBARRIER_STATE_PRIVATE_EXPEDITED_SYNC_CORE_READY,
+		MEMBARRIER_STATE_PRIVATE_EXPEDITED_RSEQ |
+			MEMBARRIER_STATE_PRIVATE_EXPEDITED_RSEQ_READY
+	};
+	static const int registration_cmds[] = {
+		MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED,
+		MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED,
+		MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE,
+		MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_RSEQ
+	};
+	BUILD_BUG_ON(ARRAY_SIZE(states) != ARRAY_SIZE(registration_cmds));
+
+	membarrier_state = atomic_read(&mm->membarrier_state);
+	for (i = 0; i < ARRAY_SIZE(states); ++i) {
+		if (membarrier_state & states[i]) {
+			registrations_mask |= registration_cmds[i];
+			membarrier_state &= ~states[i];
+		}
+	}
+	WARN_ON_ONCE(membarrier_state != 0);
+	return registrations_mask;
 }
 
 /**
@@ -623,6 +678,8 @@ SYSCALL_DEFINE3(membarrier, int, cmd, unsigned int, flags, int, cpu_id)
 		return membarrier_private_expedited(MEMBARRIER_FLAG_RSEQ, cpu_id);
 	case MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_RSEQ:
 		return membarrier_register_private_expedited(MEMBARRIER_FLAG_RSEQ);
+	case MEMBARRIER_CMD_GET_REGISTRATIONS:
+		return membarrier_get_registrations();
 	default:
 		return -EINVAL;
 	}

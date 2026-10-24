@@ -243,7 +243,7 @@ static int do_flush(struct ordered_events *oe, bool show_progress)
 		if (iter->timestamp > limit)
 			break;
 		ret = oe->deliver(oe, iter);
-		if (ret)
+		if (ret < 0)
 			return ret;
 
 		ordered_events__delete(oe, iter);
@@ -284,7 +284,7 @@ static int __ordered_events__flush(struct ordered_events *oe, enum oe_flush how,
 	switch (how) {
 	case OE_FLUSH__FINAL:
 		show_progress = true;
-		__fallthrough;
+		fallthrough;
 	case OE_FLUSH__TOP:
 		oe->next_flush = ULLONG_MAX;
 		break;

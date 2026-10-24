@@ -16,6 +16,7 @@
 #include <linux/atomic.h>
 #include <linux/kstrtox.h>
 #include <linux/proc_fs.h>
+#include <linux/wait.h>
 
 /*
  * Each cache requires:
@@ -56,10 +57,14 @@ struct cache_head {
 	struct kref	ref;
 	unsigned long	flags;
 };
-#define	CACHE_VALID	0	/* Entry contains valid data */
-#define	CACHE_NEGATIVE	1	/* Negative entry - there is no match for the key */
-#define	CACHE_PENDING	2	/* An upcall has been sent but no reply received yet*/
-#define	CACHE_CLEANED	3	/* Entry has been cleaned from cache */
+
+/* cache_head.flags */
+enum {
+	CACHE_VALID,		/* Entry contains valid data */
+	CACHE_NEGATIVE,		/* Negative entry - there is no match for the key */
+	CACHE_PENDING,		/* An upcall has been sent but no reply received yet*/
+	CACHE_CLEANED,		/* Entry has been cleaned from cache */
+};
 
 #define	CACHE_NEW_EXPIRY 120	/* keep new things pending confirmation for 120 seconds */
 
@@ -74,6 +79,9 @@ struct cache_detail {
 
 	int			(*cache_upcall)(struct cache_detail *,
 						struct cache_head *);
+
+	int			(*cache_notify)(struct cache_detail *cd,
+						struct cache_head *h);
 
 	void			(*cache_request)(struct cache_detail *cd,
 						 struct cache_head *ch,
@@ -108,7 +116,11 @@ struct cache_detail {
 	int			entries;
 
 	/* fields for communication over channel */
-	struct list_head	queue;
+	struct list_head	requests;
+	struct list_head	readers;
+	spinlock_t		queue_lock;
+	wait_queue_head_t	queue_wait;
+	u64			next_seqno;
 
 	atomic_t		writers;		/* how many time is /channel open */
 	time64_t		last_close;		/* if no writers, when did last close */
@@ -180,9 +192,9 @@ sunrpc_cache_update(struct cache_detail *detail,
 		    struct cache_head *new, struct cache_head *old, int hash);
 
 extern int
-sunrpc_cache_pipe_upcall(struct cache_detail *detail, struct cache_head *h);
+sunrpc_cache_upcall(struct cache_detail *detail, struct cache_head *h);
 extern int
-sunrpc_cache_pipe_upcall_timeout(struct cache_detail *detail,
+sunrpc_cache_upcall_warn(struct cache_detail *detail,
 				 struct cache_head *h);
 
 
@@ -218,6 +230,8 @@ static inline bool cache_is_expired(struct cache_detail *detail, struct cache_he
 	return detail->flush_time >= h->last_refresh;
 }
 
+extern int cache_check_rcu(struct cache_detail *detail,
+		       struct cache_head *h, struct cache_req *rqstp);
 extern int cache_check(struct cache_detail *detail,
 		       struct cache_head *h, struct cache_req *rqstp);
 extern void cache_flush(void);
@@ -236,6 +250,14 @@ extern int sunrpc_cache_register_pipefs(struct dentry *parent, const char *,
 					umode_t, struct cache_detail *);
 extern void sunrpc_cache_unregister_pipefs(struct cache_detail *);
 extern void sunrpc_cache_unhash(struct cache_detail *, struct cache_head *);
+
+int sunrpc_cache_requests_count(struct cache_detail *cd);
+int sunrpc_cache_requests_snapshot(struct cache_detail *cd,
+				   struct cache_head **items,
+				   u64 *seqnos, int max,
+				   u64 min_seqno);
+int sunrpc_cache_notify(struct cache_detail *cd, struct cache_head *h,
+			u32 cache_type);
 
 /* Must store cache_detail in seq_file->private if using next three functions */
 extern void *cache_seq_start_rcu(struct seq_file *file, loff_t *pos);
@@ -300,17 +322,18 @@ static inline int get_time(char **bpp, time64_t *time)
 	return 0;
 }
 
-static inline time64_t get_expiry(char **bpp)
+static inline int get_expiry(char **bpp, time64_t *rvp)
 {
-	time64_t rv;
+	int error;
 	struct timespec64 boot;
 
-	if (get_time(bpp, &rv))
-		return 0;
-	if (rv < 0)
-		return 0;
+	error = get_time(bpp, rvp);
+	if (error)
+		return error;
+
 	getboottime64(&boot);
-	return rv - boot.tv_sec;
+	(*rvp) -= boot.tv_sec;
+	return 0;
 }
 
 #endif /*  _LINUX_SUNRPC_CACHE_H_ */

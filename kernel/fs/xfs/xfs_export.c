@@ -3,7 +3,7 @@
  * Copyright (c) 2004-2005 Silicon Graphics, Inc.
  * All Rights Reserved.
  */
-#include "xfs.h"
+#include "xfs_platform.h"
 #include "xfs_shared.h"
 #include "xfs_format.h"
 #include "xfs_log_format.h"
@@ -82,19 +82,19 @@ xfs_fs_encode_fh(
 
 	switch (fileid_type) {
 	case FILEID_INO32_GEN_PARENT:
-		fid->i32.parent_ino = XFS_I(parent)->i_ino;
+		fid->i32.parent_ino = parent->i_ino;
 		fid->i32.parent_gen = parent->i_generation;
 		fallthrough;
 	case FILEID_INO32_GEN:
-		fid->i32.ino = XFS_I(inode)->i_ino;
+		fid->i32.ino = inode->i_ino;
 		fid->i32.gen = inode->i_generation;
 		break;
 	case FILEID_INO32_GEN_PARENT | XFS_FILEID_TYPE_64FLAG:
-		fid64->parent_ino = XFS_I(parent)->i_ino;
+		fid64->parent_ino = parent->i_ino;
 		fid64->parent_gen = parent->i_generation;
 		fallthrough;
 	case FILEID_INO32_GEN | XFS_FILEID_TYPE_64FLAG:
-		fid64->ino = XFS_I(inode)->i_ino;
+		fid64->ino = inode->i_ino;
 		fid64->gen = inode->i_generation;
 		break;
 	}
@@ -102,7 +102,7 @@ xfs_fs_encode_fh(
 	return fileid_type;
 }
 
-STATIC struct inode *
+struct inode *
 xfs_nfs_get_inode(
 	struct super_block	*sb,
 	u64			ino,
@@ -146,7 +146,21 @@ xfs_nfs_get_inode(
 		return ERR_PTR(error);
 	}
 
-	if (VFS_I(ip)->i_generation != generation) {
+	/*
+	 * Reload the incore unlinked list to avoid failure in inodegc.
+	 * Use an unlocked check here because unrecovered unlinked inodes
+	 * should be somewhat rare.
+	 */
+	if (xfs_inode_unlinked_incomplete(ip)) {
+		error = xfs_inode_reload_unlinked(ip);
+		if (error) {
+			xfs_force_shutdown(mp, SHUTDOWN_CORRUPT_INCORE);
+			xfs_irele(ip);
+			return ERR_PTR(error);
+		}
+	}
+
+	if (VFS_I(ip)->i_generation != generation || IS_PRIVATE(VFS_I(ip))) {
 		xfs_irele(ip);
 		return ERR_PTR(-ESTALE);
 	}
@@ -230,8 +244,6 @@ const struct export_operations xfs_export_operations = {
 	.get_parent		= xfs_fs_get_parent,
 	.commit_metadata	= xfs_fs_nfs_commit_metadata,
 #ifdef CONFIG_EXPORTFS_BLOCK_OPS
-	.get_uuid		= xfs_fs_get_uuid,
-	.map_blocks		= xfs_fs_map_blocks,
-	.commit_blocks		= xfs_fs_commit_blocks,
+	.block_ops		= &xfs_export_block_ops,
 #endif
 };

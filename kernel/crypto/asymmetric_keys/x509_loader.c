@@ -20,7 +20,7 @@ int x509_load_certificate_list(const u8 cert_list[],
 		 */
 		if (end - p < 4)
 			goto dodgy_cert;
-		if (p[0] != 0x30 &&
+		if (p[0] != 0x30 ||
 		    p[1] != 0x82)
 			goto dodgy_cert;
 		plen = (p[2] << 8) | p[3];
@@ -55,3 +55,4 @@ dodgy_cert:
 	pr_err("Problem parsing in-kernel X.509 certificate list\n");
 	return 0;
 }
+EXPORT_SYMBOL_GPL(x509_load_certificate_list);

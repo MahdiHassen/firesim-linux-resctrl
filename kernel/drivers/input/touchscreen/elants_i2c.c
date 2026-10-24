@@ -40,7 +40,7 @@
 #include <linux/gpio/consumer.h>
 #include <linux/regulator/consumer.h>
 #include <linux/uuid.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 /* Device, Driver information */
 #define DEVICE_NAME	"elants_i2c"
@@ -303,15 +303,13 @@ static int elants_i2c_calibrate(struct elants_data *ts)
 	static const u8 rek[] = { CMD_HEADER_WRITE, 0x29, 0x00, 0x01 };
 	static const u8 rek_resp[] = { CMD_HEADER_REK, 0x66, 0x66, 0x66 };
 
-	disable_irq(client->irq);
+	scoped_guard(disable_irq, &client->irq) {
+		ts->state = ELAN_WAIT_RECALIBRATION;
+		reinit_completion(&ts->cmd_done);
 
-	ts->state = ELAN_WAIT_RECALIBRATION;
-	reinit_completion(&ts->cmd_done);
-
-	elants_i2c_send(client, w_flashkey, sizeof(w_flashkey));
-	elants_i2c_send(client, rek, sizeof(rek));
-
-	enable_irq(client->irq);
+		elants_i2c_send(client, w_flashkey, sizeof(w_flashkey));
+		elants_i2c_send(client, rek, sizeof(rek));
+	}
 
 	ret = wait_for_completion_interruptible_timeout(&ts->cmd_done,
 				msecs_to_jiffies(ELAN_CALI_TIMEOUT_MSEC));
@@ -906,17 +904,17 @@ static int elants_i2c_do_update_firmware(struct i2c_client *client,
 static int elants_i2c_fw_update(struct elants_data *ts)
 {
 	struct i2c_client *client = ts->client;
-	const struct firmware *fw;
-	char *fw_name;
 	int error;
 
-	fw_name = kasprintf(GFP_KERNEL, "elants_i2c_%04x.bin", ts->hw_version);
+	const char *fw_name __free(kfree) =
+		kasprintf(GFP_KERNEL, "elants_i2c_%04x.bin", ts->hw_version);
 	if (!fw_name)
 		return -ENOMEM;
 
 	dev_info(&client->dev, "requesting fw name = %s\n", fw_name);
+
+	const struct firmware *fw __free(firmware) = NULL;
 	error = request_firmware(&fw, fw_name, &client->dev);
-	kfree(fw_name);
 	if (error) {
 		dev_err(&client->dev, "failed to request firmware: %d\n",
 			error);
@@ -926,40 +924,32 @@ static int elants_i2c_fw_update(struct elants_data *ts)
 	if (fw->size % ELAN_FW_PAGESIZE) {
 		dev_err(&client->dev, "invalid firmware length: %zu\n",
 			fw->size);
-		error = -EINVAL;
-		goto out;
+		return -EINVAL;
 	}
 
-	disable_irq(client->irq);
+	scoped_guard(disable_irq, &client->irq) {
+		bool force_update = ts->iap_mode == ELAN_IAP_RECOVERY;
 
-	error = elants_i2c_do_update_firmware(client, fw,
-					ts->iap_mode == ELAN_IAP_RECOVERY);
-	if (error) {
-		dev_err(&client->dev, "firmware update failed: %d\n", error);
-		ts->iap_mode = ELAN_IAP_RECOVERY;
-		goto out_enable_irq;
+		error = elants_i2c_do_update_firmware(client, fw, force_update);
+		if (error) {
+			dev_err(&client->dev, "firmware update failed: %d\n",
+				error);
+		} else {
+			error = elants_i2c_initialize(ts);
+			if (error)
+				dev_err(&client->dev,
+					"failed to initialize device after firmware update: %d\n",
+					error);
+		}
+
+		ts->iap_mode = error ? ELAN_IAP_RECOVERY : ELAN_IAP_OPERATIONAL;
+		ts->state = ELAN_STATE_NORMAL;
 	}
-
-	error = elants_i2c_initialize(ts);
-	if (error) {
-		dev_err(&client->dev,
-			"failed to initialize device after firmware update: %d\n",
-			error);
-		ts->iap_mode = ELAN_IAP_RECOVERY;
-		goto out_enable_irq;
-	}
-
-	ts->iap_mode = ELAN_IAP_OPERATIONAL;
-
-out_enable_irq:
-	ts->state = ELAN_STATE_NORMAL;
-	enable_irq(client->irq);
 	msleep(100);
 
 	if (!error)
 		elants_i2c_calibrate(ts);
-out:
-	release_firmware(fw);
+
 	return error;
 }
 
@@ -1186,14 +1176,13 @@ static ssize_t calibrate_store(struct device *dev,
 	struct elants_data *ts = i2c_get_clientdata(client);
 	int error;
 
-	error = mutex_lock_interruptible(&ts->sysfs_mutex);
-	if (error)
-		return error;
+	scoped_cond_guard(mutex_intr, return -EINTR, &ts->sysfs_mutex) {
+		error = elants_i2c_calibrate(ts);
+		if (error)
+			return error;
+	}
 
-	error = elants_i2c_calibrate(ts);
-
-	mutex_unlock(&ts->sysfs_mutex);
-	return error ?: count;
+	return count;
 }
 
 static ssize_t write_update_fw(struct device *dev,
@@ -1204,15 +1193,13 @@ static ssize_t write_update_fw(struct device *dev,
 	struct elants_data *ts = i2c_get_clientdata(client);
 	int error;
 
-	error = mutex_lock_interruptible(&ts->sysfs_mutex);
-	if (error)
-		return error;
+	scoped_cond_guard(mutex_intr, return -EINTR, &ts->sysfs_mutex) {
+		error = elants_i2c_fw_update(ts);
+		if (error)
+			return error;
+	}
 
-	error = elants_i2c_fw_update(ts);
-	dev_dbg(dev, "firmware update result: %d\n", error);
-
-	mutex_unlock(&ts->sysfs_mutex);
-	return error ?: count;
+	return count;
 }
 
 static ssize_t show_iap_mode(struct device *dev,
@@ -1299,7 +1286,7 @@ static ELANTS_VERSION_ATTR(solution_version);
 static ELANTS_VERSION_ATTR(bc_version);
 static ELANTS_VERSION_ATTR(iap_version);
 
-static struct attribute *elants_attributes[] = {
+static struct attribute *elants_i2c_attrs[] = {
 	&dev_attr_calibrate.attr,
 	&dev_attr_update_fw.attr,
 	&dev_attr_iap_mode.attr,
@@ -1313,10 +1300,7 @@ static struct attribute *elants_attributes[] = {
 	&elants_ver_attr_iap_version.dattr.attr,
 	NULL
 };
-
-static const struct attribute_group elants_attribute_group = {
-	.attrs = elants_attributes,
-};
+ATTRIBUTE_GROUPS(elants_i2c);
 
 static int elants_i2c_power_on(struct elants_data *ts)
 {
@@ -1438,24 +1422,14 @@ static int elants_i2c_probe(struct i2c_client *client)
 	i2c_set_clientdata(client, ts);
 
 	ts->vcc33 = devm_regulator_get(&client->dev, "vcc33");
-	if (IS_ERR(ts->vcc33)) {
-		error = PTR_ERR(ts->vcc33);
-		if (error != -EPROBE_DEFER)
-			dev_err(&client->dev,
-				"Failed to get 'vcc33' regulator: %d\n",
-				error);
-		return error;
-	}
+	if (IS_ERR(ts->vcc33))
+		return dev_err_probe(&client->dev, PTR_ERR(ts->vcc33),
+				     "Failed to get 'vcc33' regulator\n");
 
 	ts->vccio = devm_regulator_get(&client->dev, "vccio");
-	if (IS_ERR(ts->vccio)) {
-		error = PTR_ERR(ts->vccio);
-		if (error != -EPROBE_DEFER)
-			dev_err(&client->dev,
-				"Failed to get 'vccio' regulator: %d\n",
-				error);
-		return error;
-	}
+	if (IS_ERR(ts->vccio))
+		return dev_err_probe(&client->dev, PTR_ERR(ts->vccio),
+				     "Failed to get 'vccio' regulator\n");
 
 	ts->reset_gpio = devm_gpiod_get(&client->dev, "reset", GPIOD_OUT_HIGH);
 	if (IS_ERR(ts->reset_gpio)) {
@@ -1562,17 +1536,10 @@ static int elants_i2c_probe(struct i2c_client *client)
 		return error;
 	}
 
-	error = devm_device_add_group(&client->dev, &elants_attribute_group);
-	if (error) {
-		dev_err(&client->dev, "failed to create sysfs attributes: %d\n",
-			error);
-		return error;
-	}
-
 	return 0;
 }
 
-static int __maybe_unused elants_i2c_suspend(struct device *dev)
+static int elants_i2c_suspend(struct device *dev)
 {
 	struct i2c_client *client = to_i2c_client(dev);
 	struct elants_data *ts = i2c_get_clientdata(client);
@@ -1611,7 +1578,7 @@ static int __maybe_unused elants_i2c_suspend(struct device *dev)
 	return 0;
 }
 
-static int __maybe_unused elants_i2c_resume(struct device *dev)
+static int elants_i2c_resume(struct device *dev)
 {
 	struct i2c_client *client = to_i2c_client(dev);
 	struct elants_data *ts = i2c_get_clientdata(client);
@@ -1644,13 +1611,13 @@ static int __maybe_unused elants_i2c_resume(struct device *dev)
 	return 0;
 }
 
-static SIMPLE_DEV_PM_OPS(elants_i2c_pm_ops,
-			 elants_i2c_suspend, elants_i2c_resume);
+static DEFINE_SIMPLE_DEV_PM_OPS(elants_i2c_pm_ops,
+				elants_i2c_suspend, elants_i2c_resume);
 
 static const struct i2c_device_id elants_i2c_id[] = {
-	{ DEVICE_NAME, EKTH3500 },
-	{ "ekth3500", EKTH3500 },
-	{ "ektf3624", EKTF3624 },
+	{ .name = DEVICE_NAME, .driver_data = EKTH3500 },
+	{ .name = "ekth3500", .driver_data = EKTH3500 },
+	{ .name = "ektf3624", .driver_data = EKTF3624 },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, elants_i2c_id);
@@ -1673,11 +1640,12 @@ MODULE_DEVICE_TABLE(of, elants_of_match);
 #endif
 
 static struct i2c_driver elants_i2c_driver = {
-	.probe_new = elants_i2c_probe,
+	.probe = elants_i2c_probe,
 	.id_table = elants_i2c_id,
 	.driver = {
 		.name = DEVICE_NAME,
-		.pm = &elants_i2c_pm_ops,
+		.dev_groups = elants_i2c_groups,
+		.pm = pm_sleep_ptr(&elants_i2c_pm_ops),
 		.acpi_match_table = ACPI_PTR(elants_acpi_id),
 		.of_match_table = of_match_ptr(elants_of_match),
 		.probe_type = PROBE_PREFER_ASYNCHRONOUS,

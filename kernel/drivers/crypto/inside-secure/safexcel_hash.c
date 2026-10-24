@@ -30,7 +30,7 @@ struct safexcel_ahash_ctx {
 	bool fb_init_done;
 	bool fb_do_setkey;
 
-	struct crypto_aes_ctx *aes;
+	struct aes_enckey *aes;
 	struct crypto_ahash *fback;
 	struct crypto_shash *shpre;
 	struct shash_desc *shdesc;
@@ -249,7 +249,9 @@ static int safexcel_handle_req_result(struct safexcel_crypto_priv *priv,
 	safexcel_complete(priv, ring);
 
 	if (sreq->nents) {
-		dma_unmap_sg(priv->dev, areq->src, sreq->nents, DMA_TO_DEVICE);
+		dma_unmap_sg(priv->dev, areq->src,
+			     sg_nents_for_len(areq->src, areq->nbytes),
+			     DMA_TO_DEVICE);
 		sreq->nents = 0;
 	}
 
@@ -289,14 +291,8 @@ static int safexcel_handle_req_result(struct safexcel_crypto_priv *priv,
 			return 1;
 		}
 
-		if (unlikely(sreq->digest == CONTEXT_CONTROL_DIGEST_XCM &&
-			     ctx->alg == CONTEXT_CONTROL_CRYPTO_ALG_CRC32)) {
-			/* Undo final XOR with 0xffffffff ...*/
-			*(__le32 *)areq->result = ~sreq->state[0];
-		} else {
-			memcpy(areq->result, sreq->state,
-			       crypto_ahash_digestsize(ahash));
-		}
+		memcpy(areq->result, sreq->state,
+		       crypto_ahash_digestsize(ahash));
 	}
 
 	cache_len = safexcel_queued_len(sreq);
@@ -497,7 +493,9 @@ unmap_result:
 			 DMA_FROM_DEVICE);
 unmap_sg:
 	if (req->nents) {
-		dma_unmap_sg(priv->dev, areq->src, req->nents, DMA_TO_DEVICE);
+		dma_unmap_sg(priv->dev, areq->src,
+			     sg_nents_for_len(areq->src, areq->nbytes),
+			     DMA_TO_DEVICE);
 		req->nents = 0;
 	}
 cdesc_rollback:
@@ -625,15 +623,16 @@ static int safexcel_ahash_exit_inv(struct crypto_tfm *tfm)
 	struct safexcel_crypto_priv *priv = ctx->base.priv;
 	EIP197_REQUEST_ON_STACK(req, ahash, EIP197_AHASH_REQ_SIZE);
 	struct safexcel_ahash_req *rctx = ahash_request_ctx_dma(req);
-	struct safexcel_inv_result result = {};
+	DECLARE_CRYPTO_WAIT(result);
 	int ring = ctx->base.ring;
+	int err;
 
 	memset(req, 0, EIP197_AHASH_REQ_SIZE);
 
 	/* create invalidation request */
 	init_completion(&result.completion);
 	ahash_request_set_callback(req, CRYPTO_TFM_REQ_MAY_BACKLOG,
-				   safexcel_inv_complete, &result);
+				   crypto_req_done, &result);
 
 	ahash_request_set_tfm(req, __crypto_ahash_cast(tfm));
 	ctx = crypto_tfm_ctx(req->base.tfm);
@@ -647,12 +646,11 @@ static int safexcel_ahash_exit_inv(struct crypto_tfm *tfm)
 	queue_work(priv->ring[ring].workqueue,
 		   &priv->ring[ring].work_data.work);
 
-	wait_for_completion(&result.completion);
+	err = crypto_wait_req(-EINPROGRESS, &result);
 
-	if (result.error) {
-		dev_warn(priv->dev, "hash: completion error (%d)\n",
-			 result.error);
-		return result.error;
+	if (err) {
+		dev_warn(priv->dev, "hash: completion error (%d)\n", err);
+		return err;
 	}
 
 	return 0;
@@ -1042,27 +1040,11 @@ static int safexcel_hmac_sha1_digest(struct ahash_request *areq)
 	return safexcel_ahash_finup(areq);
 }
 
-struct safexcel_ahash_result {
-	struct completion completion;
-	int error;
-};
-
-static void safexcel_ahash_complete(struct crypto_async_request *req, int error)
-{
-	struct safexcel_ahash_result *result = req->data;
-
-	if (error == -EINPROGRESS)
-		return;
-
-	result->error = error;
-	complete(&result->completion);
-}
-
 static int safexcel_hmac_init_pad(struct ahash_request *areq,
 				  unsigned int blocksize, const u8 *key,
 				  unsigned int keylen, u8 *ipad, u8 *opad)
 {
-	struct safexcel_ahash_result result;
+	DECLARE_CRYPTO_WAIT(result);
 	struct scatterlist sg;
 	int ret, i;
 	u8 *keydup;
@@ -1075,16 +1057,12 @@ static int safexcel_hmac_init_pad(struct ahash_request *areq,
 			return -ENOMEM;
 
 		ahash_request_set_callback(areq, CRYPTO_TFM_REQ_MAY_BACKLOG,
-					   safexcel_ahash_complete, &result);
+					   crypto_req_done, &result);
 		sg_init_one(&sg, keydup, keylen);
 		ahash_request_set_crypt(areq, &sg, ipad, keylen);
-		init_completion(&result.completion);
 
 		ret = crypto_ahash_digest(areq);
-		if (ret == -EINPROGRESS || ret == -EBUSY) {
-			wait_for_completion_interruptible(&result.completion);
-			ret = result.error;
-		}
+		ret = crypto_wait_req(ret, &result);
 
 		/* Avoid leaking */
 		kfree_sensitive(keydup);
@@ -1109,16 +1087,15 @@ static int safexcel_hmac_init_pad(struct ahash_request *areq,
 static int safexcel_hmac_init_iv(struct ahash_request *areq,
 				 unsigned int blocksize, u8 *pad, void *state)
 {
-	struct safexcel_ahash_result result;
 	struct safexcel_ahash_req *req;
+	DECLARE_CRYPTO_WAIT(result);
 	struct scatterlist sg;
 	int ret;
 
 	ahash_request_set_callback(areq, CRYPTO_TFM_REQ_MAY_BACKLOG,
-				   safexcel_ahash_complete, &result);
+				   crypto_req_done, &result);
 	sg_init_one(&sg, pad, blocksize);
 	ahash_request_set_crypt(areq, &sg, pad, blocksize);
-	init_completion(&result.completion);
 
 	ret = crypto_ahash_init(areq);
 	if (ret)
@@ -1129,14 +1106,9 @@ static int safexcel_hmac_init_iv(struct ahash_request *areq,
 	req->last_req = true;
 
 	ret = crypto_ahash_update(areq);
-	if (ret && ret != -EINPROGRESS && ret != -EBUSY)
-		return ret;
+	ret = crypto_wait_req(ret, &result);
 
-	wait_for_completion_interruptible(&result.completion);
-	if (result.error)
-		return result.error;
-
-	return crypto_ahash_export(areq, state);
+	return ret ?: crypto_ahash_export(areq, state);
 }
 
 static int __safexcel_hmac_setkey(const char *alg, const u8 *key,
@@ -1907,88 +1879,6 @@ struct safexcel_alg_template safexcel_alg_hmac_md5 = {
 	},
 };
 
-static int safexcel_crc32_cra_init(struct crypto_tfm *tfm)
-{
-	struct safexcel_ahash_ctx *ctx = crypto_tfm_ctx(tfm);
-	int ret = safexcel_ahash_cra_init(tfm);
-
-	/* Default 'key' is all zeroes */
-	memset(&ctx->base.ipad, 0, sizeof(u32));
-	return ret;
-}
-
-static int safexcel_crc32_init(struct ahash_request *areq)
-{
-	struct safexcel_ahash_ctx *ctx = crypto_ahash_ctx(crypto_ahash_reqtfm(areq));
-	struct safexcel_ahash_req *req = ahash_request_ctx_dma(areq);
-
-	memset(req, 0, sizeof(*req));
-
-	/* Start from loaded key */
-	req->state[0]	= cpu_to_le32(~ctx->base.ipad.word[0]);
-	/* Set processed to non-zero to enable invalidation detection */
-	req->len	= sizeof(u32);
-	req->processed	= sizeof(u32);
-
-	ctx->alg = CONTEXT_CONTROL_CRYPTO_ALG_CRC32;
-	req->digest = CONTEXT_CONTROL_DIGEST_XCM;
-	req->state_sz = sizeof(u32);
-	req->digest_sz = sizeof(u32);
-	req->block_sz = sizeof(u32);
-
-	return 0;
-}
-
-static int safexcel_crc32_setkey(struct crypto_ahash *tfm, const u8 *key,
-				 unsigned int keylen)
-{
-	struct safexcel_ahash_ctx *ctx = crypto_tfm_ctx(crypto_ahash_tfm(tfm));
-
-	if (keylen != sizeof(u32))
-		return -EINVAL;
-
-	memcpy(&ctx->base.ipad, key, sizeof(u32));
-	return 0;
-}
-
-static int safexcel_crc32_digest(struct ahash_request *areq)
-{
-	return safexcel_crc32_init(areq) ?: safexcel_ahash_finup(areq);
-}
-
-struct safexcel_alg_template safexcel_alg_crc32 = {
-	.type = SAFEXCEL_ALG_TYPE_AHASH,
-	.algo_mask = 0,
-	.alg.ahash = {
-		.init = safexcel_crc32_init,
-		.update = safexcel_ahash_update,
-		.final = safexcel_ahash_final,
-		.finup = safexcel_ahash_finup,
-		.digest = safexcel_crc32_digest,
-		.setkey = safexcel_crc32_setkey,
-		.export = safexcel_ahash_export,
-		.import = safexcel_ahash_import,
-		.halg = {
-			.digestsize = sizeof(u32),
-			.statesize = sizeof(struct safexcel_ahash_export_state),
-			.base = {
-				.cra_name = "crc32",
-				.cra_driver_name = "safexcel-crc32",
-				.cra_priority = SAFEXCEL_CRA_PRIORITY,
-				.cra_flags = CRYPTO_ALG_OPTIONAL_KEY |
-					     CRYPTO_ALG_ASYNC |
-					     CRYPTO_ALG_ALLOCATES_MEMORY |
-					     CRYPTO_ALG_KERN_DRIVER_ONLY,
-				.cra_blocksize = 1,
-				.cra_ctxsize = sizeof(struct safexcel_ahash_ctx),
-				.cra_init = safexcel_crc32_cra_init,
-				.cra_exit = safexcel_ahash_cra_exit,
-				.cra_module = THIS_MODULE,
-			},
-		},
-	},
-};
-
 static int safexcel_cbcmac_init(struct ahash_request *areq)
 {
 	struct safexcel_ahash_ctx *ctx = crypto_ahash_ctx(crypto_ahash_reqtfm(areq));
@@ -2069,7 +1959,7 @@ struct safexcel_alg_template safexcel_alg_cbcmac = {
 				.cra_flags = CRYPTO_ALG_ASYNC |
 					     CRYPTO_ALG_ALLOCATES_MEMORY |
 					     CRYPTO_ALG_KERN_DRIVER_ONLY,
-				.cra_blocksize = 1,
+				.cra_blocksize = AES_BLOCK_SIZE,
 				.cra_ctxsize = sizeof(struct safexcel_ahash_ctx),
 				.cra_init = safexcel_ahash_cra_init,
 				.cra_exit = safexcel_ahash_cra_exit,
@@ -2086,7 +1976,7 @@ static int safexcel_xcbcmac_setkey(struct crypto_ahash *tfm, const u8 *key,
 	u32 key_tmp[3 * AES_BLOCK_SIZE / sizeof(u32)];
 	int ret, i;
 
-	ret = aes_expandkey(ctx->aes, key, len);
+	ret = aes_prepareenckey(ctx->aes, key, len);
 	if (ret)
 		return ret;
 
@@ -2100,9 +1990,9 @@ static int safexcel_xcbcmac_setkey(struct crypto_ahash *tfm, const u8 *key,
 	for (i = 0; i < 3 * AES_BLOCK_SIZE / sizeof(u32); i++)
 		ctx->base.ipad.word[i] = swab32(key_tmp[i]);
 
-	ret = aes_expandkey(ctx->aes,
-			    (u8 *)key_tmp + 2 * AES_BLOCK_SIZE,
-			    AES_MIN_KEY_SIZE);
+	ret = aes_prepareenckey(ctx->aes,
+				(u8 *)key_tmp + 2 * AES_BLOCK_SIZE,
+				AES_MIN_KEY_SIZE);
 	if (ret)
 		return ret;
 
@@ -2118,8 +2008,8 @@ static int safexcel_xcbcmac_cra_init(struct crypto_tfm *tfm)
 	struct safexcel_ahash_ctx *ctx = crypto_tfm_ctx(tfm);
 
 	safexcel_ahash_cra_init(tfm);
-	ctx->aes = kmalloc(sizeof(*ctx->aes), GFP_KERNEL);
-	return PTR_ERR_OR_ZERO(ctx->aes);
+	ctx->aes = kmalloc_obj(*ctx->aes);
+	return ctx->aes == NULL ? -ENOMEM : 0;
 }
 
 static void safexcel_xcbcmac_cra_exit(struct crypto_tfm *tfm)
@@ -2172,12 +2062,12 @@ static int safexcel_cmac_setkey(struct crypto_ahash *tfm, const u8 *key,
 	int ret, i;
 
 	/* precompute the CMAC key material */
-	ret = aes_expandkey(ctx->aes, key, len);
+	ret = aes_prepareenckey(ctx->aes, key, len);
 	if (ret)
 		return ret;
 
 	for (i = 0; i < len / sizeof(u32); i++)
-		ctx->base.ipad.word[i + 8] = swab32(ctx->aes->key_enc[i]);
+		ctx->base.ipad.word[i + 8] = get_unaligned_be32(&key[4 * i]);
 
 	/* code below borrowed from crypto/cmac.c */
 	/* encrypt the zero block */

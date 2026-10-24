@@ -34,6 +34,8 @@
 #define TDM_PPPOHT_SLIC_MAXIN
 #define RX_BD_ERRORS (R_CD_S | R_OV_S | R_CR_S | R_AB_S | R_NO_S | R_LG_S)
 
+static int uhdlc_close(struct net_device *dev);
+
 static struct ucc_tdm_info utdm_primary_info = {
 	.uf_info = {
 		.tsa = 0,
@@ -201,17 +203,13 @@ static int uhdlc_init(struct ucc_hdlc_private *priv)
 		goto free_tx_bd;
 	}
 
-	priv->rx_skbuff = kcalloc(priv->rx_ring_size,
-				  sizeof(*priv->rx_skbuff),
-				  GFP_KERNEL);
+	priv->rx_skbuff = kzalloc_objs(*priv->rx_skbuff, priv->rx_ring_size);
 	if (!priv->rx_skbuff) {
 		ret = -ENOMEM;
 		goto free_ucc_pram;
 	}
 
-	priv->tx_skbuff = kcalloc(priv->tx_ring_size,
-				  sizeof(*priv->tx_skbuff),
-				  GFP_KERNEL);
+	priv->tx_skbuff = kzalloc_objs(*priv->tx_skbuff, priv->tx_ring_size);
 	if (!priv->tx_skbuff) {
 		ret = -ENOMEM;
 		goto free_rx_skbuff;
@@ -630,8 +628,7 @@ static int ucc_hdlc_poll(struct napi_struct *napi, int budget)
 	hdlc_tx_done(priv);
 	spin_unlock(&priv->lock);
 
-	howmany = 0;
-	howmany += hdlc_rx_done(priv, budget - howmany);
+	howmany = hdlc_rx_done(priv, budget);
 
 	if (howmany < budget) {
 		napi_complete_done(napi, howmany);
@@ -708,6 +705,7 @@ static int uhdlc_open(struct net_device *dev)
 	hdlc_device *hdlc = dev_to_hdlc(dev);
 	struct ucc_hdlc_private *priv = hdlc->priv;
 	struct ucc_tdm *utdm = priv->utdm;
+	int rc = 0;
 
 	if (priv->hdlc_busy != 1) {
 		if (request_irq(priv->ut_info->uf_info.irq,
@@ -731,14 +729,19 @@ static int uhdlc_open(struct net_device *dev)
 		napi_enable(&priv->napi);
 		netdev_reset_queue(dev);
 		netif_start_queue(dev);
-		hdlc_open(dev);
+
+		rc = hdlc_open(dev);
+		if (rc)
+			uhdlc_close(dev);
 	}
 
-	return 0;
+	return rc;
 }
 
 static void uhdlc_memclean(struct ucc_hdlc_private *priv)
 {
+	int i;
+
 	qe_muram_free(ioread16be(&priv->ucc_pram->riptr));
 	qe_muram_free(ioread16be(&priv->ucc_pram->tiptr));
 
@@ -769,13 +772,13 @@ static void uhdlc_memclean(struct ucc_hdlc_private *priv)
 	kfree(priv->rx_skbuff);
 	priv->rx_skbuff = NULL;
 
+	for (i = 0; i < TX_BD_RING_LEN; i++) {
+		dev_kfree_skb(priv->tx_skbuff[i]);
+		priv->tx_skbuff[i] = NULL;
+	}
+
 	kfree(priv->tx_skbuff);
 	priv->tx_skbuff = NULL;
-
-	if (priv->uf_regs) {
-		iounmap(priv->uf_regs);
-		priv->uf_regs = NULL;
-	}
 
 	if (priv->uccf) {
 		ucc_fast_free(priv->uccf);
@@ -784,18 +787,14 @@ static void uhdlc_memclean(struct ucc_hdlc_private *priv)
 
 	if (priv->rx_buffer) {
 		dma_free_coherent(priv->dev,
-				  RX_BD_RING_LEN * MAX_RX_BUF_LENGTH,
+				  (RX_BD_RING_LEN + TX_BD_RING_LEN) * MAX_RX_BUF_LENGTH,
 				  priv->rx_buffer, priv->dma_rx_addr);
 		priv->rx_buffer = NULL;
 		priv->dma_rx_addr = 0;
-	}
 
-	if (priv->tx_buffer) {
-		dma_free_coherent(priv->dev,
-				  TX_BD_RING_LEN * MAX_RX_BUF_LENGTH,
-				  priv->tx_buffer, priv->dma_tx_addr);
 		priv->tx_buffer = NULL;
 		priv->dma_tx_addr = 0;
+
 	}
 }
 
@@ -823,6 +822,8 @@ static int uhdlc_close(struct net_device *dev)
 	netif_stop_queue(dev);
 	netdev_reset_queue(dev);
 	priv->hdlc_busy = 0;
+
+	hdlc_close(dev);
 
 	return 0;
 }
@@ -896,8 +897,7 @@ static int uhdlc_suspend(struct device *dev)
 	priv->gumr = ioread32be(&uf_regs->gumr);
 	priv->guemr = ioread8(&uf_regs->guemr);
 
-	priv->ucc_pram_bak = kmalloc(sizeof(*priv->ucc_pram_bak),
-					GFP_KERNEL);
+	priv->ucc_pram_bak = kmalloc_obj(*priv->ucc_pram_bak);
 	if (!priv->ucc_pram_bak)
 		return -ENOMEM;
 
@@ -1169,7 +1169,7 @@ static int ucc_hdlc_probe(struct platform_device *pdev)
 	ut_info->uf_info.regs = res.start;
 	ut_info->uf_info.irq = irq_of_parse_and_map(np, 0);
 
-	uhdlc_priv = kzalloc(sizeof(*uhdlc_priv), GFP_KERNEL);
+	uhdlc_priv = kzalloc_obj(*uhdlc_priv);
 	if (!uhdlc_priv)
 		return -ENOMEM;
 
@@ -1177,17 +1177,12 @@ static int ucc_hdlc_probe(struct platform_device *pdev)
 	uhdlc_priv->dev = &pdev->dev;
 	uhdlc_priv->ut_info = ut_info;
 
-	if (of_get_property(np, "fsl,tdm-interface", NULL))
-		uhdlc_priv->tsa = 1;
-
-	if (of_get_property(np, "fsl,ucc-internal-loopback", NULL))
-		uhdlc_priv->loopback = 1;
-
-	if (of_get_property(np, "fsl,hdlc-bus", NULL))
-		uhdlc_priv->hdlc_bus = 1;
+	uhdlc_priv->tsa = of_property_read_bool(np, "fsl,tdm-interface");
+	uhdlc_priv->loopback = of_property_read_bool(np, "fsl,ucc-internal-loopback");
+	uhdlc_priv->hdlc_bus = of_property_read_bool(np, "fsl,hdlc-bus");
 
 	if (uhdlc_priv->tsa == 1) {
-		utdm = kzalloc(sizeof(*utdm), GFP_KERNEL);
+		utdm = kzalloc_obj(*utdm);
 		if (!utdm) {
 			ret = -ENOMEM;
 			dev_err(&pdev->dev, "No mem to alloc ucc tdm data\n");
@@ -1256,26 +1251,24 @@ free_uhdlc_priv:
 	return ret;
 }
 
-static int ucc_hdlc_remove(struct platform_device *pdev)
+static void ucc_hdlc_remove(struct platform_device *pdev)
 {
 	struct ucc_hdlc_private *priv = dev_get_drvdata(&pdev->dev);
 
 	uhdlc_memclean(priv);
 
-	if (priv->utdm->si_regs) {
+	if (priv->utdm && priv->utdm->si_regs) {
 		iounmap(priv->utdm->si_regs);
 		priv->utdm->si_regs = NULL;
 	}
 
-	if (priv->utdm->siram) {
+	if (priv->utdm && priv->utdm->siram) {
 		iounmap(priv->utdm->siram);
 		priv->utdm->siram = NULL;
 	}
 	kfree(priv);
 
 	dev_info(&pdev->dev, "UCC based hdlc module removed\n");
-
-	return 0;
 }
 
 static const struct of_device_id fsl_ucc_hdlc_of_match[] = {
@@ -1289,7 +1282,7 @@ MODULE_DEVICE_TABLE(of, fsl_ucc_hdlc_of_match);
 
 static struct platform_driver ucc_hdlc_driver = {
 	.probe	= ucc_hdlc_probe,
-	.remove	= ucc_hdlc_remove,
+	.remove = ucc_hdlc_remove,
 	.driver	= {
 		.name		= DRV_NAME,
 		.pm		= HDLC_PM_OPS,

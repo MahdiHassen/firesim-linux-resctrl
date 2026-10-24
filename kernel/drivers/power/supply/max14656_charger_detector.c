@@ -15,7 +15,6 @@
 #include <linux/i2c.h>
 #include <linux/interrupt.h>
 #include <linux/slab.h>
-#include <linux/of_device.h>
 #include <linux/workqueue.h>
 #include <linux/power_supply.h>
 #include <linux/devm-helpers.h>
@@ -300,8 +299,8 @@ static int max14656_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id max14656_id[] = {
-	{ "max14656", 0 },
-	{}
+	{ .name = "max14656" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, max14656_id);
 
@@ -316,7 +315,7 @@ static struct i2c_driver max14656_i2c_driver = {
 		.name	= "max14656",
 		.of_match_table = max14656_match_table,
 	},
-	.probe_new	= max14656_probe,
+	.probe		= max14656_probe,
 	.id_table	= max14656_id,
 };
 module_i2c_driver(max14656_i2c_driver);

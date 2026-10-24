@@ -291,7 +291,7 @@ static void w83793_update_nonvolatile(struct device *dev);
 static struct w83793_data *w83793_update_device(struct device *dev);
 
 static const struct i2c_device_id w83793_id[] = {
-	{ "w83793", 0 },
+	{ .name = "w83793" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, w83793_id);
@@ -301,7 +301,7 @@ static struct i2c_driver w83793_driver = {
 	.driver = {
 		   .name = "w83793",
 	},
-	.probe_new	= w83793_probe,
+	.probe		= w83793_probe,
 	.remove		= w83793_remove,
 	.id_table	= w83793_id,
 	.detect		= w83793_detect,
@@ -1451,7 +1451,6 @@ static long watchdog_ioctl(struct file *filp, unsigned int cmd,
 
 static const struct file_operations watchdog_fops = {
 	.owner = THIS_MODULE,
-	.llseek = no_llseek,
 	.open = watchdog_open,
 	.release = watchdog_close,
 	.write = watchdog_write,
@@ -1651,7 +1650,7 @@ static int w83793_probe(struct i2c_client *client)
 	int files_pwm = ARRAY_SIZE(w83793_left_pwm) / 5;
 	int files_temp = ARRAY_SIZE(w83793_temp) / 6;
 
-	data = kzalloc(sizeof(struct w83793_data), GFP_KERNEL);
+	data = kzalloc_obj(struct w83793_data);
 	if (!data) {
 		err = -ENOMEM;
 		goto exit;
@@ -1918,6 +1917,7 @@ exit_remove:
 
 	for (i = 0; i < ARRAY_SIZE(w83793_vid); i++)
 		device_remove_file(dev, &w83793_vid[i].dev_attr);
+	device_remove_file(dev, &dev_attr_vrm);
 
 	for (i = 0; i < ARRAY_SIZE(w83793_left_fan); i++)
 		device_remove_file(dev, &w83793_left_fan[i].dev_attr);

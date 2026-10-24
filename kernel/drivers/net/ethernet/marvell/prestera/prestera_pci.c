@@ -542,7 +542,7 @@ static int prestera_ldr_wait_reg32(struct prestera_fw *fw,
 				  10 * USEC_PER_MSEC, waitms * USEC_PER_MSEC);
 }
 
-static u32 prestera_ldr_wait_buf(struct prestera_fw *fw, size_t len)
+static int prestera_ldr_wait_buf(struct prestera_fw *fw, size_t len)
 {
 	u8 __iomem *addr = PRESTERA_LDR_REG_ADDR(fw, PRESTERA_LDR_BUF_RD_REG);
 	u32 buf_len = fw->ldr_buf_len;
@@ -684,6 +684,9 @@ static int prestera_fw_hdr_parse(struct prestera_fw *fw)
 	struct prestera_fw_header *hdr;
 	u32 magic;
 
+	if (fw->bin->size < sizeof(*hdr))
+		return -EINVAL;
+
 	hdr = (struct prestera_fw_header *)fw->bin->data;
 
 	magic = be32_to_cpu(hdr->magic_number);
@@ -727,7 +730,8 @@ pick_fw_ver:
 
 	err = request_firmware_direct(&fw->bin, fw_path, fw->dev.dev);
 	if (err) {
-		if (ver_maj == PRESTERA_SUPP_FW_MAJ_VER) {
+		if (ver_maj != PRESTERA_PREV_FW_MAJ_VER ||
+		    ver_min != PRESTERA_PREV_FW_MIN_VER) {
 			ver_maj = PRESTERA_PREV_FW_MAJ_VER;
 			ver_min = PRESTERA_PREV_FW_MIN_VER;
 
@@ -844,9 +848,9 @@ static int prestera_pci_probe(struct pci_dev *pdev,
 		goto err_pci_enable_device;
 	}
 
-	err = pci_request_regions(pdev, driver_name);
+	err = pcim_request_all_regions(pdev, driver_name);
 	if (err) {
-		dev_err(&pdev->dev, "pci_request_regions failed\n");
+		dev_err(&pdev->dev, "pcim_request_all_regions failed\n");
 		goto err_pci_request_regions;
 	}
 
@@ -897,7 +901,7 @@ static int prestera_pci_probe(struct pci_dev *pdev,
 
 	dev_info(fw->dev.dev, "Prestera FW is ready\n");
 
-	fw->wq = alloc_workqueue("prestera_fw_wq", WQ_HIGHPRI, 1);
+	fw->wq = alloc_workqueue("prestera_fw_wq", WQ_HIGHPRI | WQ_PERCPU, 1);
 	if (!fw->wq) {
 		err = -ENOMEM;
 		goto err_wq_alloc;
@@ -937,7 +941,6 @@ err_pci_dev_alloc:
 err_pp_ioremap:
 err_mem_ioremap:
 err_dma_mask:
-	pci_release_regions(pdev);
 err_pci_request_regions:
 err_pci_enable_device:
 	return err;
@@ -952,7 +955,6 @@ static void prestera_pci_remove(struct pci_dev *pdev)
 	pci_free_irq_vectors(pdev);
 	destroy_workqueue(fw->wq);
 	prestera_fw_uninit(fw);
-	pci_release_regions(pdev);
 }
 
 static const struct pci_device_id prestera_pci_devices[] = {

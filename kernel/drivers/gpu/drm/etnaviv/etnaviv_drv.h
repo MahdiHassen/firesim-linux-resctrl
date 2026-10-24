@@ -12,6 +12,7 @@
 #include <linux/sizes.h>
 #include <linux/time64.h>
 #include <linux/types.h>
+#include <linux/xarray.h>
 
 #include <drm/drm_drv.h>
 #include <drm/drm_gem.h>
@@ -28,6 +29,7 @@ struct etnaviv_iommu_global;
 #define ETNAVIV_SOFTPIN_START_ADDRESS	SZ_4M /* must be >= SUBALLOC_SIZE */
 
 struct etnaviv_file_private {
+	int id;
 	struct etnaviv_iommu_context	*mmu;
 	struct drm_sched_entity		sched_entity[ETNA_MAX_PIPES];
 };
@@ -40,9 +42,15 @@ struct etnaviv_drm_private {
 	struct etnaviv_cmdbuf_suballoc *cmdbuf_suballoc;
 	struct etnaviv_iommu_global *mmu_global;
 
+	struct xarray active_contexts;
+	u32 next_context_id;
+
 	/* list of GEM objects: */
 	struct mutex gem_lock;
 	struct list_head gem_list;
+
+	/* ppu flop reset data */
+	struct etnaviv_cmdbuf *flop_reset_data_ppu;
 };
 
 int etnaviv_ioctl_gem_submit(struct drm_device *dev, void *data,
@@ -84,18 +92,6 @@ void etnaviv_gem_describe_objects(struct etnaviv_drm_private *priv,
 
 #define DBG(fmt, ...) DRM_DEBUG(fmt"\n", ##__VA_ARGS__)
 #define VERB(fmt, ...) if (0) DRM_DEBUG(fmt"\n", ##__VA_ARGS__)
-
-/*
- * Return the storage size of a structure with a variable length array.
- * The array is nelem elements of elem_size, where the base structure
- * is defined by base.  If the size overflows size_t, return zero.
- */
-static inline size_t size_vstruct(size_t nelem, size_t elem_size, size_t base)
-{
-	if (elem_size && nelem > (SIZE_MAX - base) / elem_size)
-		return 0;
-	return base + nelem * elem_size;
-}
 
 /*
  * Etnaviv timeouts are specified wrt CLOCK_MONOTONIC, not jiffies.

@@ -11,10 +11,11 @@
  */
 
 #include <linux/bcd.h>
+#include <linux/bitfield.h>
 #include <linux/i2c.h>
 #include <linux/kstrtox.h>
 #include <linux/module.h>
-#include <linux/of_device.h>
+#include <linux/of.h>
 #include <linux/rtc.h>
 #include <linux/watchdog.h>
 
@@ -38,7 +39,7 @@
 #define ABX8XX_REG_STATUS	0x0f
 #define ABX8XX_STATUS_AF	BIT(2)
 #define ABX8XX_STATUS_BLF	BIT(4)
-#define ABX8XX_STATUS_WDT	BIT(6)
+#define ABX8XX_STATUS_WDT	BIT(5)
 
 #define ABX8XX_REG_CTRL1	0x10
 #define ABX8XX_CTRL_WRITE	BIT(0)
@@ -87,6 +88,16 @@
 #define ABX8XX_TRICKLE_CHARGE_ENABLE	0xa0
 #define ABX8XX_TRICKLE_STANDARD_DIODE	0x8
 #define ABX8XX_TRICKLE_SCHOTTKY_DIODE	0x4
+
+#define ABX8XX_REG_EXTRAM	0x3f
+#define ABX8XX_EXTRAM_XADS	GENMASK(1, 0)
+
+#define ABX8XX_SRAM_BASE	0x40
+#define ABX8XX_SRAM_WIN_SIZE	0x40
+#define ABX8XX_RAM_SIZE		256
+
+#define NVMEM_ADDR_LOWER	GENMASK(5, 0)
+#define NVMEM_ADDR_UPPER	GENMASK(7, 6)
 
 static u8 trickle_resistors[] = {0, 3, 6, 11};
 
@@ -534,7 +545,8 @@ static int abx80x_ioctl(struct device *dev, unsigned int cmd, unsigned long arg)
 
 		status &= ~ABX8XX_STATUS_BLF;
 
-		tmp = i2c_smbus_write_byte_data(client, ABX8XX_REG_STATUS, 0);
+		tmp = i2c_smbus_write_byte_data(client, ABX8XX_REG_STATUS,
+						status);
 		if (tmp < 0)
 			return tmp;
 
@@ -674,17 +686,83 @@ static int abx80x_setup_watchdog(struct abx80x_priv *priv)
 }
 #endif
 
+static int abx80x_nvmem_xfer(struct abx80x_priv *priv, unsigned int offset,
+			     void *val, size_t bytes, bool write)
+{
+	int ret;
+
+	while (bytes) {
+		u8 extram, reg, len, lower, upper;
+
+		lower = FIELD_GET(NVMEM_ADDR_LOWER, offset);
+		upper = FIELD_GET(NVMEM_ADDR_UPPER, offset);
+		extram = FIELD_PREP(ABX8XX_EXTRAM_XADS, upper);
+		reg = ABX8XX_SRAM_BASE + lower;
+		len = min(lower + bytes, (size_t)ABX8XX_SRAM_WIN_SIZE) - lower;
+		len = min_t(u8, len, I2C_SMBUS_BLOCK_MAX);
+
+		ret = i2c_smbus_write_byte_data(priv->client, ABX8XX_REG_EXTRAM,
+						extram);
+		if (ret)
+			return ret;
+
+		if (write) {
+			ret = i2c_smbus_write_i2c_block_data(priv->client, reg,
+							     len, val);
+			if (ret)
+				return ret;
+		} else {
+			ret = i2c_smbus_read_i2c_block_data(priv->client, reg,
+							    len, val);
+			if (ret <= 0)
+				return ret ? ret : -EIO;
+			len = ret;
+		}
+
+		offset += len;
+		val += len;
+		bytes -= len;
+	}
+
+	return 0;
+}
+
+static int abx80x_nvmem_read(void *priv, unsigned int offset, void *val,
+			     size_t bytes)
+{
+	return abx80x_nvmem_xfer(priv, offset, val, bytes, false);
+}
+
+static int abx80x_nvmem_write(void *priv, unsigned int offset, void *val,
+			      size_t bytes)
+{
+	return abx80x_nvmem_xfer(priv, offset, val, bytes, true);
+}
+
+static int abx80x_setup_nvmem(struct abx80x_priv *priv)
+{
+	struct nvmem_config config = {
+		.type = NVMEM_TYPE_BATTERY_BACKED,
+		.reg_read = abx80x_nvmem_read,
+		.reg_write = abx80x_nvmem_write,
+		.size = ABX8XX_RAM_SIZE,
+		.priv = priv,
+	};
+
+	return devm_rtc_nvmem_register(priv->rtc, &config);
+}
+
 static const struct i2c_device_id abx80x_id[] = {
-	{ "abx80x", ABX80X },
-	{ "ab0801", AB0801 },
-	{ "ab0803", AB0803 },
-	{ "ab0804", AB0804 },
-	{ "ab0805", AB0805 },
-	{ "ab1801", AB1801 },
-	{ "ab1803", AB1803 },
-	{ "ab1804", AB1804 },
-	{ "ab1805", AB1805 },
-	{ "rv1805", RV1805 },
+	{ .name = "abx80x", .driver_data = ABX80X },
+	{ .name = "ab0801", .driver_data = AB0801 },
+	{ .name = "ab0803", .driver_data = AB0803 },
+	{ .name = "ab0804", .driver_data = AB0804 },
+	{ .name = "ab0805", .driver_data = AB0805 },
+	{ .name = "ab1801", .driver_data = AB1801 },
+	{ .name = "ab1803", .driver_data = AB1803 },
+	{ .name = "ab1804", .driver_data = AB1804 },
+	{ .name = "ab1805", .driver_data = AB1805 },
+	{ .name = "rv1805", .driver_data = RV1805 },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, abx80x_id);
@@ -695,8 +773,7 @@ static int abx80x_probe(struct i2c_client *client)
 	struct abx80x_priv *priv;
 	int i, data, err, trickle_cfg = -EINVAL;
 	char buf[7];
-	const struct i2c_device_id *id = i2c_match_id(abx80x_id, client);
-	unsigned int part = id->driver_data;
+	unsigned int part = (uintptr_t)i2c_get_match_data(client);
 	unsigned int partnumber;
 	unsigned int majrev, minrev;
 	unsigned int lot;
@@ -840,6 +917,10 @@ static int abx80x_probe(struct i2c_client *client)
 			return err;
 	}
 
+	err = abx80x_setup_nvmem(priv);
+	if (err)
+		return err;
+
 	if (client->irq > 0) {
 		dev_info(&client->dev, "IRQ %d supplied\n", client->irq);
 		err = devm_request_threaded_irq(&client->dev, client->irq, NULL,
@@ -852,6 +933,8 @@ static int abx80x_probe(struct i2c_client *client)
 			client->irq = 0;
 		}
 	}
+	if (client->irq <= 0)
+		clear_bit(RTC_FEATURE_ALARM, priv->rtc->features);
 
 	err = rtc_add_group(priv->rtc, &rtc_calib_attr_group);
 	if (err) {
@@ -915,7 +998,7 @@ static struct i2c_driver abx80x_driver = {
 		.name	= "rtc-abx80x",
 		.of_match_table = of_match_ptr(abx80x_of_match),
 	},
-	.probe_new	= abx80x_probe,
+	.probe		= abx80x_probe,
 	.id_table	= abx80x_id,
 };
 

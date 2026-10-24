@@ -859,6 +859,21 @@ static void i5100_init_csrows(struct mem_ctl_info *mci)
 	}
 }
 
+static void i5100_set_error_reporting(struct pci_dev *pdev, bool enable)
+{
+	u32 dw;
+
+	pci_read_config_dword(pdev, I5100_EMASK_MEM, &dw);
+
+	/* Enable with 0, disable with 1 */
+	if (enable)
+		dw &= ~I5100_FERR_NF_MEM_ANY_MASK;
+	else
+		dw |= I5100_FERR_NF_MEM_ANY_MASK;
+
+	pci_write_config_dword(pdev, I5100_EMASK_MEM, dw);
+}
+
 /****************************************************************************
  *                       Error injection routines
  ****************************************************************************/
@@ -909,7 +924,7 @@ static void i5100_do_inject(struct mem_ctl_info *mci)
 	 *
 	 * The injection code don't work without setting this register.
 	 * The register needs to be flipped off then on else the hardware
-	 * will only preform the first injection.
+	 * will only perform the first injection.
 	 *
 	 * Stop condition bits 7:4
 	 * 1010 - Stop after one injection
@@ -1003,11 +1018,6 @@ static int i5100_init_one(struct pci_dev *pdev, const struct pci_device_id *id)
 	/* figure out how many ranks, from strapped state of 48GB_Mode input */
 	pci_read_config_dword(pdev, I5100_MS, &dw);
 	ranksperch = !!(dw & (1 << 8)) * 2 + 4;
-
-	/* enable error reporting... */
-	pci_read_config_dword(pdev, I5100_EMASK_MEM, &dw);
-	dw &= ~I5100_FERR_NF_MEM_ANY_MASK;
-	pci_write_config_dword(pdev, I5100_EMASK_MEM, dw);
 
 	/* device 21, func 0, Channel 0 Memory Map, Error Flag/Mask, etc... */
 	ch0mm = pci_get_device_func(PCI_VENDOR_ID_INTEL,
@@ -1125,6 +1135,9 @@ static int i5100_init_one(struct pci_dev *pdev, const struct pci_device_id *id)
 
 	i5100_setup_debugfs(mci);
 
+	/* Enable error reporting on success */
+	i5100_set_error_reporting(pdev, true);
+
 	return ret;
 
 bail_scrub:
@@ -1168,6 +1181,9 @@ static void i5100_remove_one(struct pci_dev *pdev)
 		return;
 
 	priv = mci->pvt_info;
+
+	/* Disable error reporting at teardown */
+	i5100_set_error_reporting(pdev, false);
 
 	edac_debugfs_remove_recursive(priv->debugfs);
 
@@ -1220,6 +1236,5 @@ module_init(i5100_init);
 module_exit(i5100_exit);
 
 MODULE_LICENSE("GPL");
-MODULE_AUTHOR
-    ("Arthur Jones <ajones@riverbed.com>");
+MODULE_AUTHOR("Arthur Jones <ajones@riverbed.com>");
 MODULE_DESCRIPTION("MC Driver for Intel I5100 memory controllers");

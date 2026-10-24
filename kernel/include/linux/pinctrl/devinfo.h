@@ -18,6 +18,8 @@ struct device;
 
 #ifdef CONFIG_PINCTRL
 
+#include <linux/device.h>
+
 /* The device core acts as a consumer toward pinctrl */
 #include <linux/pinctrl/consumer.h>
 
@@ -41,21 +43,28 @@ struct dev_pin_info {
 #endif
 };
 
-extern int pinctrl_bind_pins(struct device *dev);
 extern int pinctrl_init_done(struct device *dev);
+
+static inline struct pinctrl *dev_pinctrl(struct device *dev)
+{
+	if (!dev->pins)
+		return NULL;
+
+	return dev->pins->p;
+}
 
 #else
 
 /* Stubs if we're not using pinctrl */
 
-static inline int pinctrl_bind_pins(struct device *dev)
+static inline int pinctrl_init_done(struct device *dev)
 {
 	return 0;
 }
 
-static inline int pinctrl_init_done(struct device *dev)
+static inline struct pinctrl *dev_pinctrl(struct device *dev)
 {
-	return 0;
+	return NULL;
 }
 
 #endif /* CONFIG_PINCTRL */

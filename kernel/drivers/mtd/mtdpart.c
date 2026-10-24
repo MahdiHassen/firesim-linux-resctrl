@@ -18,6 +18,7 @@
 #include <linux/err.h>
 #include <linux/of.h>
 #include <linux/of_platform.h>
+#include <linux/mtd/concat.h>
 
 #include "mtdcore.h"
 
@@ -30,6 +31,12 @@ static inline void free_partition(struct mtd_info *mtd)
 {
 	kfree(mtd->name);
 	kfree(mtd);
+}
+
+void release_mtd_partition(struct mtd_info *mtd)
+{
+	WARN_ON(!list_empty(&mtd->part.node));
+	free_partition(mtd);
 }
 
 static struct mtd_info *allocate_partition(struct mtd_info *parent,
@@ -47,7 +54,7 @@ static struct mtd_info *allocate_partition(struct mtd_info *parent,
 	u64 tmp;
 
 	/* allocate the partition structure */
-	child = kzalloc(sizeof(*child), GFP_KERNEL);
+	child = kzalloc_obj(*child);
 	name = kstrdup(part->name, GFP_KERNEL);
 	if (!name || !child) {
 		printk(KERN_ERR"memory allocation error while creating partitions for \"%s\"\n",
@@ -111,6 +118,9 @@ static struct mtd_info *allocate_partition(struct mtd_info *parent,
 				part->name, parent_size - child->part.offset,
 				child->part.size);
 			/* register to preserve ordering */
+			child->part.offset = 0;
+			child->part.size = 0;
+			child->erasesize = parent->erasesize;
 			goto out_register;
 		}
 	}
@@ -257,6 +267,11 @@ int mtd_add_partition(struct mtd_info *parent, const char *name,
 	if (length <= 0)
 		return -EINVAL;
 
+	if (offset < 0 || offset >= (long long)parent_size)
+		return -EINVAL;
+
+	if ((u64)offset + (u64)length > parent_size)
+		return -EINVAL;
 	memset(&part, 0, sizeof(part));
 	part.name = name;
 	part.size = length;
@@ -309,12 +324,10 @@ static int __mtd_del_partition(struct mtd_info *mtd)
 
 	sysfs_remove_files(&mtd->dev.kobj, mtd_partition_attrs);
 
+	list_del_init(&mtd->part.node);
 	err = del_mtd_device(mtd);
 	if (err)
 		return err;
-
-	list_del(&mtd->part.node);
-	free_partition(mtd);
 
 	return 0;
 }
@@ -326,7 +339,6 @@ static int __mtd_del_partition(struct mtd_info *mtd)
 static int __del_mtd_partitions(struct mtd_info *mtd)
 {
 	struct mtd_info *child, *next;
-	LIST_HEAD(tmp_list);
 	int ret, err = 0;
 
 	list_for_each_entry_safe(child, next, &mtd->partitions, part.node) {
@@ -334,6 +346,7 @@ static int __del_mtd_partitions(struct mtd_info *mtd)
 			__del_mtd_partitions(child);
 
 		pr_info("Deleting %s MTD partition\n", child->name);
+		list_del_init(&child->part.node);
 		ret = del_mtd_device(child);
 		if (ret < 0) {
 			pr_err("Error when deleting partition \"%s\" (%d)\n",
@@ -341,9 +354,6 @@ static int __del_mtd_partitions(struct mtd_info *mtd)
 			err = ret;
 			continue;
 		}
-
-		list_del(&child->part.node);
-		free_partition(child);
 	}
 
 	return err;
@@ -408,6 +418,11 @@ int add_mtd_partitions(struct mtd_info *parent,
 			goto err_del_partitions;
 		}
 
+		if (IS_REACHABLE(CONFIG_MTD_VIRT_CONCAT)) {
+			if (mtd_virt_concat_add(child))
+				continue;
+		}
+
 		mutex_lock(&master->master.partitions_lock);
 		list_add_tail(&child->part.node, &parent->partitions);
 		mutex_unlock(&master->master.partitions_lock);
@@ -424,8 +439,15 @@ int add_mtd_partitions(struct mtd_info *parent,
 
 		mtd_add_partition_attrs(child);
 
-		/* Look for subpartitions */
-		parse_mtd_partitions(child, parts[i].types, NULL);
+		/* Look for subpartitions (skip if no maching parser found) */
+		ret = parse_mtd_partitions(child, parts[i].types, NULL);
+		if (ret < 0 && ret == -ENOENT) {
+			pr_debug("Skip parsing subpartitions: %d\n", ret);
+			continue;
+		} else if (ret < 0) {
+			pr_err("Failed to parse subpartitions: %d\n", ret);
+			goto err_del_partitions;
+		}
 
 		cur_offset = child->part.offset + child->part.size;
 	}
@@ -577,6 +599,7 @@ static int mtd_part_of_parse(struct mtd_info *master,
 {
 	struct mtd_part_parser *parser;
 	struct device_node *np;
+	struct device_node *child;
 	struct property *prop;
 	struct device *dev;
 	const char *compat;
@@ -593,6 +616,15 @@ static int mtd_part_of_parse(struct mtd_info *master,
 		of_node_get(np);
 	else
 		np = of_get_child_by_name(np, "partitions");
+
+	/*
+	 * Don't create devices that are added to a bus but will never get
+	 * probed. That'll cause fw_devlink to block probing of consumers of
+	 * this partition until the partition device is probed.
+	 */
+	for_each_child_of_node(np, child)
+		if (of_device_is_compatible(child, "nvmem-cells"))
+			of_node_set_flag(child, OF_POPULATED);
 
 	of_property_for_each_string(np, "compatible", prop, compat) {
 		parser = mtd_part_get_compatible_parser(compat);
@@ -675,10 +707,9 @@ int parse_mtd_partitions(struct mtd_info *master, const char *const *types,
 			parser = mtd_part_parser_get(*types);
 			if (!parser && !request_module("%s", *types))
 				parser = mtd_part_parser_get(*types);
-			pr_debug("%s: got parser %s\n", master->name,
-				parser ? parser->name : NULL);
 			if (!parser)
 				continue;
+			pr_debug("%s: got parser %s\n", master->name, parser->name);
 			ret = mtd_part_do_parse(parser, master, &pparts, data);
 			if (ret <= 0)
 				mtd_part_parser_put(parser);

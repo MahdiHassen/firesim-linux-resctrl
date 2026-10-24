@@ -71,13 +71,15 @@ static void hpte_flush_range(struct mm_struct *mm, unsigned long addr,
 	if (pmd_none(*pmd))
 		return;
 	pte = pte_offset_map_lock(mm, pmd, addr, &ptl);
-	arch_enter_lazy_mmu_mode();
+	if (!pte)
+		return;
+	lazy_mmu_mode_enable();
 	for (; npages > 0; --npages) {
 		pte_update(mm, addr, pte, 0, 0, 0);
 		addr += PAGE_SIZE;
 		++pte;
 	}
-	arch_leave_lazy_mmu_mode();
+	lazy_mmu_mode_disable();
 	pte_unmap_unlock(pte - 1, ptl);
 }
 
@@ -143,6 +145,7 @@ static int subpage_walk_pmd_entry(pmd_t *pmd, unsigned long addr,
 
 static const struct mm_walk_ops subpage_walk_ops = {
 	.pmd_entry	= subpage_walk_pmd_entry,
+	.walk_lock	= PGWALK_WRLOCK_VERIFY,
 };
 
 static void subpage_mark_vma_nohuge(struct mm_struct *mm, unsigned long addr,
@@ -156,7 +159,7 @@ static void subpage_mark_vma_nohuge(struct mm_struct *mm, unsigned long addr,
 	 * VM_NOHUGEPAGE and split them.
 	 */
 	for_each_vma_range(vmi, vma, addr + len) {
-		vma->vm_flags |= VM_NOHUGEPAGE;
+		vm_flags_set(vma, VM_NOHUGEPAGE);
 		walk_page_vma(vma, &subpage_walk_ops, NULL);
 	}
 }
@@ -218,7 +221,7 @@ SYSCALL_DEFINE3(subpage_prot, unsigned long, addr,
 		 * Allocate subpage prot table if not already done.
 		 * Do this with mmap_lock held
 		 */
-		spt = kzalloc(sizeof(struct subpage_prot_table), GFP_KERNEL);
+		spt = kzalloc_obj(struct subpage_prot_table);
 		if (!spt) {
 			err = -ENOMEM;
 			goto out;

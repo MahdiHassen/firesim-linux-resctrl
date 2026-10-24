@@ -68,25 +68,25 @@ static const struct linear_range voutL1_xvd_ranges[] = {
 	REGULATOR_LINEAR_RANGE(220000, 0x6e, 0x7f, 0),
 };
 
-static struct linear_range voutS1_ocw_ranges_internal[] = {
+static const struct linear_range voutS1_ocw_ranges_internal[] = {
 	REGULATOR_LINEAR_RANGE(200000, 0x01, 0x04, 0),
 	REGULATOR_LINEAR_RANGE(250000, 0x05, 0x18, 50000),
 	REGULATOR_LINEAR_RANGE(1200000, 0x19, 0x3f, 0),
 };
 
-static struct linear_range voutS1_ocw_ranges[] = {
+static const struct linear_range voutS1_ocw_ranges[] = {
 	REGULATOR_LINEAR_RANGE(50000, 0x01, 0x04, 0),
 	REGULATOR_LINEAR_RANGE(60000, 0x05, 0x18, 10000),
 	REGULATOR_LINEAR_RANGE(250000, 0x19, 0x3f, 0),
 };
 
-static struct linear_range voutS1_ocp_ranges_internal[] = {
+static const struct linear_range voutS1_ocp_ranges_internal[] = {
 	REGULATOR_LINEAR_RANGE(300000, 0x01, 0x06, 0),
 	REGULATOR_LINEAR_RANGE(350000, 0x7, 0x1b, 50000),
 	REGULATOR_LINEAR_RANGE(1350000, 0x1c, 0x3f, 0),
 };
 
-static struct linear_range voutS1_ocp_ranges[] = {
+static const struct linear_range voutS1_ocp_ranges[] = {
 	REGULATOR_LINEAR_RANGE(70000, 0x01, 0x06, 0),
 	REGULATOR_LINEAR_RANGE(80000, 0x7, 0x1b, 10000),
 	REGULATOR_LINEAR_RANGE(280000, 0x1c, 0x3f, 0),
@@ -1117,15 +1117,16 @@ static int bd957x_probe(struct platform_device *pdev)
 }
 
 static const struct platform_device_id bd957x_pmic_id[] = {
-	{ "bd9573-regulator", ROHM_CHIP_TYPE_BD9573 },
-	{ "bd9576-regulator", ROHM_CHIP_TYPE_BD9576 },
-	{ },
+	{ .name = "bd9573-regulator", .driver_data = ROHM_CHIP_TYPE_BD9573 },
+	{ .name = "bd9576-regulator", .driver_data = ROHM_CHIP_TYPE_BD9576 },
+	{ }
 };
 MODULE_DEVICE_TABLE(platform, bd957x_pmic_id);
 
 static struct platform_driver bd957x_regulator = {
 	.driver = {
 		.name = "bd957x-pmic",
+		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
 	},
 	.probe = bd957x_probe,
 	.id_table = bd957x_pmic_id,

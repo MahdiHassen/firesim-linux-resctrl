@@ -39,7 +39,7 @@ struct qmem {
 	void            *base;
 	dma_addr_t	iova;
 	int		alloc_sz;
-	u16		entry_sz;
+	u32		entry_sz;
 	u8		align;
 	u32		qsize;
 };
@@ -142,15 +142,24 @@ enum nix_scheduler {
 
 #define TXSCH_RR_QTM_MAX		((1 << 24) - 1)
 #define TXSCH_TL1_DFLT_RR_QTM		TXSCH_RR_QTM_MAX
-#define TXSCH_TL1_DFLT_RR_PRIO		(0x1ull)
+#define TXSCH_TL1_DFLT_RR_PRIO		(0x7ull)
 #define CN10K_MAX_DWRR_WEIGHT          16384 /* Weight is 14bit on CN10K */
+
+/* Don't change the order as on CN10K (except CN10KB)
+ * SMQX_CFG[SDP] value should be 1 for SDP flows.
+ */
+#define SMQ_LINK_TYPE_RPM		0
+#define SMQ_LINK_TYPE_SDP		1
+#define SMQ_LINK_TYPE_LBK		2
 
 /* Min/Max packet sizes, excluding FCS */
 #define	NIC_HW_MIN_FRS			40
 #define	NIC_HW_MAX_FRS			9212
 #define	SDP_HW_MAX_FRS			65535
+#define	SDP_HW_MIN_FRS			16
 #define CN10K_LMAC_LINK_MAX_FRS		16380 /* 16k - FCS */
 #define CN10K_LBK_LINK_MAX_FRS		65535 /* 64k */
+#define SDP_LINK_CREDIT			0x320202
 
 /* NIX RX action operation*/
 #define NIX_RX_ACTIONOP_DROP		(0x0ull)
@@ -167,10 +176,6 @@ enum nix_scheduler {
 #define NIX_TX_ACTIONOP_UCAST_CHAN	(0x2ull)
 #define NIX_TX_ACTIONOP_MCAST		(0x3ull)
 #define NIX_TX_ACTIONOP_DROP_VIOL	(0x5ull)
-
-#define NPC_MCAM_KEY_X1			0
-#define NPC_MCAM_KEY_X2			1
-#define NPC_MCAM_KEY_X4			2
 
 #define NIX_INTFX_RX(a)			(0x0ull | (a) << 1)
 #define NIX_INTFX_TX(a)			(0x1ull | (a) << 1)

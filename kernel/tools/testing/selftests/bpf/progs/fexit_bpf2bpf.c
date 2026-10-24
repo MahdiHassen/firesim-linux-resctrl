@@ -53,14 +53,23 @@ int BPF_PROG(test_subprog1, struct sk_buff *skb, int ret)
  *   r0 = *(u32 *)(r1 + 0)
  *   w0 <<= 1
  *   exit
- * In such case the verifier falls back to conservative and
+ * Before llvm23, in such case the verifier falls back to conservative and
  * tracing program can access arguments and return value as u64
- * instead of accurate types.
+ * instead of accurate types. With llvm23, the true signature
+ *   int test_pkt_access_subprog2(volatile struct __sk_buff *skb)
+ * is available in btf.
  */
+#if __clang_major__ >= 23
+struct args_subprog2 {
+	__u64 args[1];
+	__u64 ret;
+};
+#else
 struct args_subprog2 {
 	__u64 args[5];
 	__u64 ret;
 };
+#endif
 __u64 test_result_subprog2 = 0;
 SEC("fexit/test_pkt_access_subprog2")
 int test_subprog2(struct args_subprog2 *ctx)
@@ -120,8 +129,6 @@ int new_get_skb_ifindex(int val, struct __sk_buff *skb, int var)
 	void *data = (void *)(long)skb->data;
 	struct ipv6hdr ip6, *ip6p;
 	int ifindex = skb->ifindex;
-	__u32 eth_proto;
-	__u32 nh_off;
 
 	/* check that BPF extension can read packet via direct packet access */
 	if (data + 14 + sizeof(ip6) > data_end)

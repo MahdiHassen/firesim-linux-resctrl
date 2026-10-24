@@ -1,7 +1,7 @@
 /*******************************************************************
  * This file is part of the Emulex Linux Device Driver for         *
  * Fibre Channel Host Bus Adapters.                                *
- * Copyright (C) 2017-2022 Broadcom. All Rights Reserved. The term *
+ * Copyright (C) 2017-2026 Broadcom. All Rights Reserved. The term *
  * “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.     *
  * Copyright (C) 2009-2016 Emulex.  All rights reserved.           *
  * EMULEX and SLI are trademarks of Emulex.                        *
@@ -140,7 +140,7 @@ struct lpfc_rqb {
 
 enum lpfc_poll_mode {
 	LPFC_QUEUE_WORK,
-	LPFC_IRQ_POLL
+	LPFC_THREADED_IRQ,
 };
 
 struct lpfc_idle_stat {
@@ -246,6 +246,8 @@ struct lpfc_queue {
 	uint32_t q_cnt_2;
 	uint32_t q_cnt_3;
 	uint64_t q_cnt_4;
+	uint32_t q_cnt_5;
+
 /* defines for EQ stats */
 #define	EQ_max_eqe		q_cnt_1
 #define	EQ_no_entry		q_cnt_2
@@ -268,6 +270,7 @@ struct lpfc_queue {
 #define	RQ_no_buf_found		q_cnt_2
 #define	RQ_buf_posted		q_cnt_3
 #define	RQ_rcv_buf		q_cnt_4
+#define RQ_discard_frm		q_cnt_5
 
 	struct work_struct	irqwork;
 	struct work_struct	spwork;
@@ -277,11 +280,10 @@ struct lpfc_queue {
 	uint64_t isr_timestamp;
 	struct lpfc_queue *assoc_qp;
 	struct list_head _poll_list;
-	void **q_pgs;	/* array to index entries per page */
 
-#define LPFC_IRQ_POLL_WEIGHT 256
-	struct irq_poll iop;
 	enum lpfc_poll_mode poll_mode;
+
+	void *q_pgs[];	/* array to index entries per page */
 };
 
 struct lpfc_sli4_link {
@@ -291,8 +293,9 @@ struct lpfc_sli4_link {
 	uint8_t type;
 	uint8_t number;
 	uint8_t fault;
-	uint32_t logical_speed;
+	uint8_t link_status;
 	uint16_t topology;
+	uint32_t logical_speed;
 };
 
 struct lpfc_fcf_rec {
@@ -333,7 +336,7 @@ struct lpfc_fcf {
 #define FCF_AVAILABLE	0x01 /* FCF available for discovery */
 #define FCF_REGISTERED	0x02 /* FCF registered with FW */
 #define FCF_SCAN_DONE	0x04 /* FCF table scan done */
-#define FCF_IN_USE	0x08 /* Atleast one discovery completed */
+#define FCF_IN_USE	0x08 /* At Least one discovery completed */
 #define FCF_INIT_DISC	0x10 /* Initial FCF discovery */
 #define FCF_DEAD_DISC	0x20 /* FCF DEAD fast FCF failover discovery */
 #define FCF_ACVL_DISC	0x40 /* All CVL fast FCF failover discovery */
@@ -576,8 +579,10 @@ struct lpfc_pc_sli4_params {
 
 #define LPFC_CQ_4K_PAGE_SZ	0x1
 #define LPFC_CQ_16K_PAGE_SZ	0x4
+#define LPFC_CQ_32K_PAGE_SZ	0x8
 #define LPFC_WQ_4K_PAGE_SZ	0x1
 #define LPFC_WQ_16K_PAGE_SZ	0x4
+#define LPFC_WQ_32K_PAGE_SZ	0x8
 
 struct lpfc_iov {
 	uint32_t pf_number;
@@ -784,6 +789,9 @@ struct lpfc_sli4_hba {
 	void __iomem *dpp_regs_memmap_p;  /* Kernel memory mapped address for
 					   * dpp registers
 					   */
+	void __iomem *dpp_regs_memmap_wc_p;/* Kernel memory mapped address for
+					    * dpp registers with write combining
+					    */
 	union {
 		struct {
 			/* IF Type 0, BAR 0 PCI cfg space reg mem map */
@@ -834,6 +842,7 @@ struct lpfc_sli4_hba {
 	uint32_t ue_to_sr;
 	uint32_t ue_to_rp;
 	struct lpfc_register sli_intf;
+	struct lpfc_register asic_id;
 	struct lpfc_pc_sli4_params pc_sli4_params;
 	struct lpfc_bbscn_params bbscn_params;
 	struct lpfc_hba_eq_hdl *hba_eq_hdl; /* HBA per-WQ handle */
@@ -866,8 +875,6 @@ struct lpfc_sli4_hba {
 	struct lpfc_name wwpn;
 
 	uint32_t fw_func_mode;	/* FW function protocol mode */
-	uint32_t ulp0_mode;	/* ULP0 protocol mode */
-	uint32_t ulp1_mode;	/* ULP1 protocol mode */
 
 	/* Optimized Access Storage specific queues/structures */
 	uint64_t oas_next_lun;
@@ -889,6 +896,10 @@ struct lpfc_sli4_hba {
 #define LPFC_FP_EQ_MAX_INTR_SEC         10000
 
 	uint32_t intr_enable;
+
+	 /* Indicates whether SLI Port supports FEDIF */
+	bool encryption_support;
+
 	struct lpfc_bmbx bmbx;
 	struct lpfc_max_cfg_param max_cfg_param;
 	uint16_t extents_in_use; /* must allocate resource extents. */
@@ -1119,8 +1130,9 @@ void lpfc_sli4_free_rpi(struct lpfc_hba *, int);
 void lpfc_sli4_remove_rpis(struct lpfc_hba *);
 void lpfc_sli4_async_event_proc(struct lpfc_hba *);
 void lpfc_sli4_fcf_redisc_event_proc(struct lpfc_hba *);
-int lpfc_sli4_resume_rpi(struct lpfc_nodelist *,
-			void (*)(struct lpfc_hba *, LPFC_MBOXQ_t *), void *);
+int lpfc_sli4_resume_rpi(struct lpfc_nodelist *ndlp,
+			 void (*cmpl)(struct lpfc_hba *, LPFC_MBOXQ_t *),
+			 struct lpfc_iocbq *iocbq);
 void lpfc_sli4_els_xri_abort_event_proc(struct lpfc_hba *phba);
 void lpfc_sli4_nvme_pci_offline_aborted(struct lpfc_hba *phba,
 					struct lpfc_io_buf *lpfc_ncmd);
@@ -1178,4 +1190,23 @@ static inline void *lpfc_sli4_qe(struct lpfc_queue *q, uint16_t idx)
 {
 	return q->q_pgs[idx / q->entry_cnt_per_pg] +
 		(q->entry_size * (idx % q->entry_cnt_per_pg));
+}
+
+/**
+ * lpfc_sli4_unrecoverable_port - Check ERR and RN bits in portstat_reg
+ * @portstat_reg: portstat_reg pointer containing portstat_reg contents
+ *
+ * Description:
+ * Use only for SLI4 interface type-2 or later.  If ERR is set && RN is 0, then
+ * port is deemed unrecoverable.
+ *
+ * Returns:
+ * true		- ERR && !RN
+ * false	- otherwise
+ */
+static inline bool
+lpfc_sli4_unrecoverable_port(struct lpfc_register *portstat_reg)
+{
+	return bf_get(lpfc_sliport_status_err, portstat_reg) &&
+	       !bf_get(lpfc_sliport_status_rn, portstat_reg);
 }

@@ -4,9 +4,6 @@
  * kvm_arch_hardware_disable is called and it attempts to unregister the user
  * return notifiers.
  */
-
-#define _GNU_SOURCE
-
 #include <fcntl.h>
 #include <pthread.h>
 #include <semaphore.h>
@@ -23,7 +20,6 @@
 #define SLEEPING_THREAD_NUM (1 << 4)
 #define FORK_NUM (1ULL << 9)
 #define DELAY_US_MAX 2000
-#define GUEST_CODE_PIO_PORT 4
 
 sem_t *sem;
 
@@ -41,7 +37,7 @@ static void *run_vcpu(void *arg)
 
 	vcpu_run(vcpu);
 
-	TEST_ASSERT(false, "%s: exited with reason %d: %s\n",
+	TEST_ASSERT(false, "%s: exited with reason %d: %s",
 		    __func__, run->exit_reason,
 		    exit_reason_str(run->exit_reason));
 	pthread_exit(NULL);
@@ -55,7 +51,7 @@ static void *sleeping_thread(void *arg)
 		fd = open("/dev/null", O_RDWR);
 		close(fd);
 	}
-	TEST_ASSERT(false, "%s: exited\n", __func__);
+	TEST_ASSERT(false, "%s: exited", __func__);
 	pthread_exit(NULL);
 }
 
@@ -84,7 +80,7 @@ static inline void check_join(pthread_t thread, void **retval)
 	TEST_ASSERT(r == 0, "%s: failed to join thread", __func__);
 }
 
-static void run_test(uint32_t run)
+static void run_test(u32 run)
 {
 	struct kvm_vcpu *vcpu;
 	struct kvm_vm *vm;
@@ -92,7 +88,7 @@ static void run_test(uint32_t run)
 	pthread_t threads[VCPU_NUM];
 	pthread_t throw_away;
 	void *b;
-	uint32_t i, j;
+	u32 i, j;
 
 	CPU_ZERO(&cpu_set);
 	for (i = 0; i < VCPU_NUM; i++)
@@ -118,7 +114,7 @@ static void run_test(uint32_t run)
 	for (i = 0; i < VCPU_NUM; ++i)
 		check_join(threads[i], &b);
 	/* Should not be reached */
-	TEST_ASSERT(false, "%s: [%d] child escaped the ninja\n", __func__, run);
+	TEST_ASSERT(false, "%s: [%d] child escaped the ninja", __func__, run);
 }
 
 void wait_for_child_setup(pid_t pid)
@@ -153,7 +149,7 @@ void wait_for_child_setup(pid_t pid)
 
 int main(int argc, char **argv)
 {
-	uint32_t i;
+	u32 i;
 	int s, r;
 	pid_t pid;
 

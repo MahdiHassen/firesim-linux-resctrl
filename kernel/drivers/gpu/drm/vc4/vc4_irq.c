@@ -47,7 +47,7 @@
 
 #include <linux/platform_device.h>
 
-#include <drm/drm_drv.h>
+#include <drm/drm_print.h>
 
 #include "vc4_drv.h"
 #include "vc4_regs.h"
@@ -56,8 +56,6 @@
 #define V3D_DRIVER_IRQS (V3D_INT_OUTOMEM | \
 			 V3D_INT_FLDONE | \
 			 V3D_INT_FRDONE)
-
-DECLARE_WAIT_QUEUE_HEAD(render_wait);
 
 static void
 vc4_overflow_mem_work(struct work_struct *work)
@@ -78,7 +76,7 @@ vc4_overflow_mem_work(struct work_struct *work)
 
 	bin_bo_slot = vc4_v3d_get_bin_slot(vc4);
 	if (bin_bo_slot < 0) {
-		DRM_ERROR("Couldn't allocate binner overflow mem\n");
+		drm_err(&vc4->base, "Couldn't allocate binner overflow mem\n");
 		goto complete;
 	}
 
@@ -106,7 +104,7 @@ vc4_overflow_mem_work(struct work_struct *work)
 	vc4->bin_alloc_overflow = BIT(bin_bo_slot);
 
 	V3D_WRITE(V3D_BPOA, bo->base.dma_addr + bin_bo_slot * vc4->bin_alloc_size);
-	V3D_WRITE(V3D_BPOS, bo->base.base.size);
+	V3D_WRITE(V3D_BPOS, vc4->bin_alloc_size);
 	V3D_WRITE(V3D_INTCTL, V3D_INT_OUTOMEM);
 	V3D_WRITE(V3D_INTENA, V3D_INT_OUTOMEM);
 	spin_unlock_irqrestore(&vc4->job_lock, irqflags);
@@ -243,29 +241,12 @@ vc4_irq(int irq, void *arg)
 	return status;
 }
 
-static void
-vc4_irq_prepare(struct drm_device *dev)
-{
-	struct vc4_dev *vc4 = to_vc4_dev(dev);
-
-	if (!vc4->v3d)
-		return;
-
-	init_waitqueue_head(&vc4->job_wait_queue);
-	INIT_WORK(&vc4->overflow_mem_work, vc4_overflow_mem_work);
-
-	/* Clear any pending interrupts someone might have left around
-	 * for us.
-	 */
-	V3D_WRITE(V3D_INTCTL, V3D_DRIVER_IRQS);
-}
-
 void
 vc4_irq_enable(struct drm_device *dev)
 {
 	struct vc4_dev *vc4 = to_vc4_dev(dev);
 
-	if (WARN_ON_ONCE(vc4->is_vc5))
+	if (WARN_ON_ONCE(vc4->gen > VC4_GEN_4))
 		return;
 
 	if (!vc4->v3d)
@@ -282,7 +263,7 @@ vc4_irq_disable(struct drm_device *dev)
 {
 	struct vc4_dev *vc4 = to_vc4_dev(dev);
 
-	if (WARN_ON_ONCE(vc4->is_vc5))
+	if (WARN_ON_ONCE(vc4->gen > VC4_GEN_4))
 		return;
 
 	if (!vc4->v3d)
@@ -305,15 +286,25 @@ int vc4_irq_install(struct drm_device *dev, int irq)
 	struct vc4_dev *vc4 = to_vc4_dev(dev);
 	int ret;
 
-	if (WARN_ON_ONCE(vc4->is_vc5))
+	if (WARN_ON_ONCE(vc4->gen > VC4_GEN_4))
+		return -ENODEV;
+
+	if (!vc4->v3d)
 		return -ENODEV;
 
 	if (irq == IRQ_NOTCONNECTED)
 		return -ENOTCONN;
 
-	vc4_irq_prepare(dev);
+	init_waitqueue_head(&vc4->job_wait_queue);
+	INIT_WORK(&vc4->overflow_mem_work, vc4_overflow_mem_work);
 
-	ret = request_irq(irq, vc4_irq, 0, dev->driver->name, dev);
+	/* Clear any pending interrupts someone might have left around
+	 * for us.
+	 */
+	V3D_WRITE(V3D_INTCTL, V3D_DRIVER_IRQS);
+
+	ret = devm_request_irq(dev->dev, irq, vc4_irq, 0,
+			       dev_name(dev->dev), dev);
 	if (ret)
 		return ret;
 
@@ -326,11 +317,10 @@ void vc4_irq_uninstall(struct drm_device *dev)
 {
 	struct vc4_dev *vc4 = to_vc4_dev(dev);
 
-	if (WARN_ON_ONCE(vc4->is_vc5))
+	if (WARN_ON_ONCE(vc4->gen > VC4_GEN_4))
 		return;
 
 	vc4_irq_disable(dev);
-	free_irq(vc4->irq, dev);
 }
 
 /** Reinitializes interrupt registers when a GPU reset is performed. */
@@ -339,7 +329,7 @@ void vc4_irq_reset(struct drm_device *dev)
 	struct vc4_dev *vc4 = to_vc4_dev(dev);
 	unsigned long irqflags;
 
-	if (WARN_ON_ONCE(vc4->is_vc5))
+	if (WARN_ON_ONCE(vc4->gen > VC4_GEN_4))
 		return;
 
 	/* Acknowledge any stale IRQs. */

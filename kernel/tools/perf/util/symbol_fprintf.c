@@ -11,8 +11,8 @@ size_t symbol__fprintf(struct symbol *sym, FILE *fp)
 {
 	return fprintf(fp, " %" PRIx64 "-%" PRIx64 " %c %s\n",
 		       sym->start, sym->end,
-		       sym->binding == STB_GLOBAL ? 'g' :
-		       sym->binding == STB_LOCAL  ? 'l' : 'w',
+		       symbol__binding(sym) == STB_GLOBAL ? 'g' :
+		       symbol__binding(sym) == STB_LOCAL  ? 'l' : 'w',
 		       sym->name);
 }
 
@@ -30,7 +30,7 @@ size_t __symbol__fprintf_symname_offs(const struct symbol *sym,
 			if (al->addr < sym->end)
 				offset = al->addr - sym->start;
 			else
-				offset = al->addr - al->map->start - sym->start;
+				offset = al->addr - map__start(al->map) - sym->start;
 			length += fprintf(fp, "+0x%lx", offset);
 		}
 		return length;
@@ -63,13 +63,11 @@ size_t dso__fprintf_symbols_by_name(struct dso *dso,
 				    FILE *fp)
 {
 	size_t ret = 0;
-	struct rb_node *nd;
-	struct symbol_name_rb_node *pos;
 
-	for (nd = rb_first_cached(&dso->symbol_names); nd; nd = rb_next(nd)) {
-		pos = rb_entry(nd, struct symbol_name_rb_node, rb_node);
-		ret += fprintf(fp, "%s\n", pos->sym.name);
+	for (size_t i = 0; i < dso__symbol_names_len(dso); i++) {
+		struct symbol *pos = dso__symbol_names(dso)[i];
+
+		ret += fprintf(fp, "%s\n", pos->name);
 	}
-
 	return ret;
 }

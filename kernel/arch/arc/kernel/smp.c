@@ -22,10 +22,12 @@
 #include <linux/irqdomain.h>
 #include <linux/export.h>
 #include <linux/of_fdt.h>
+#include <linux/string.h>
 
-#include <asm/processor.h>
-#include <asm/setup.h>
 #include <asm/mach_desc.h>
+#include <asm/setup.h>
+#include <asm/smp.h>
+#include <asm/processor.h>
 
 #ifndef CONFIG_ARC_HAS_LLSC
 arch_spinlock_t smp_atomic_ops_lock = __ARCH_SPIN_LOCK_UNLOCKED;
@@ -38,18 +40,14 @@ struct plat_smp_ops  __weak plat_smp_ops;
 /* XXX: per cpu ? Only needed once in early secondary boot */
 struct task_struct *secondary_idle_tsk;
 
-/* Called from start_kernel */
-void __init smp_prepare_boot_cpu(void)
-{
-}
-
 static int __init arc_get_cpu_map(const char *name, struct cpumask *cpumask)
 {
 	unsigned long dt_root = of_get_flat_dt_root();
 	const char *buf;
+	int len;
 
-	buf = of_get_flat_dt_prop(dt_root, name, NULL);
-	if (!buf)
+	buf = of_get_flat_dt_prop(dt_root, name, &len);
+	if (!buf || !memchr(buf, '\0', len))
 		return -EINVAL;
 
 	if (cpulist_parse(buf, cpumask))
@@ -292,7 +290,7 @@ static void ipi_send_msg(const struct cpumask *callmap, enum ipi_msg_type msg)
 		ipi_send_msg_one(cpu, msg);
 }
 
-void smp_send_reschedule(int cpu)
+void arch_smp_send_reschedule(int cpu)
 {
 	ipi_send_msg_one(cpu, IPI_RESCHEDULE);
 }
@@ -351,7 +349,7 @@ static inline int __do_IPI(unsigned long msg)
  * arch-common ISR to handle for inter-processor interrupts
  * Has hooks for platform specific IPI
  */
-irqreturn_t do_IPI(int irq, void *dev_id)
+static irqreturn_t do_IPI(int irq, void *dev_id)
 {
 	unsigned long pending;
 	unsigned long __maybe_unused copy;

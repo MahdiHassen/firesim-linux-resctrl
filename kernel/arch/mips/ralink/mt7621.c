@@ -63,7 +63,7 @@ phys_addr_t mips_cpc_default_phys_base(void)
 
 static bool __init mt7621_addr_wraparound_test(phys_addr_t size)
 {
-	void *dm = (void *)KSEG1ADDR(&detect_magic);
+	void __iomem *dm = (void __iomem *)KSEG1ADDR(&detect_magic);
 
 	if (CPHYSADDR(dm + size) >= MT7621_LOWMEM_MAX_SIZE)
 		return true;
@@ -87,15 +87,6 @@ static void __init mt7621_memory_detect(void)
 
 	memblock_add(MT7621_LOWMEM_BASE, MT7621_LOWMEM_MAX_SIZE);
 	memblock_add(MT7621_HIGHMEM_BASE, MT7621_HIGHMEM_SIZE);
-}
-
-void __init ralink_of_remap(void)
-{
-	rt_sysc_membase = plat_of_remap_node("mediatek,mt7621-sysc");
-	rt_memc_membase = plat_of_remap_node("mediatek,mt7621-memc");
-
-	if (!rt_sysc_membase || !rt_memc_membase)
-		panic("Failed to remap core resources");
 }
 
 static unsigned int __init mt7621_get_soc_name0(void)
@@ -153,7 +144,7 @@ static int __init mt7621_soc_dev_init(void)
 	struct soc_device *soc_dev;
 	struct soc_device_attribute *soc_dev_attr;
 
-	soc_dev_attr = kzalloc(sizeof(*soc_dev_attr), GFP_KERNEL);
+	soc_dev_attr = kzalloc_obj(*soc_dev_attr);
 	if (!soc_dev_attr)
 		return -ENOMEM;
 
@@ -184,7 +175,7 @@ void __init prom_soc_init(struct ralink_soc_info *soc_info)
 		 * mips_cm_probe() wipes out bootloader
 		 * config for CM regions and we have to configure them
 		 * again. This SoC cannot talk to pamlbus devices
-		 * witout proper iocu region set up.
+		 * without proper iocu region set up.
 		 *
 		 * FIXME: it would be better to do this with values
 		 * from DT, but we need this very early because
@@ -216,8 +207,6 @@ void __init prom_soc_init(struct ralink_soc_info *soc_info)
 	soc_info_ptr = soc_info;
 
 	if (!register_cps_smp_ops())
-		return;
-	if (!register_cmp_smp_ops())
 		return;
 	if (!register_vsmp_smp_ops())
 		return;

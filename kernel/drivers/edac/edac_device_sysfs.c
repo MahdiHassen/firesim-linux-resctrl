@@ -21,8 +21,6 @@
 #define EDAC_DEVICE_SYMLINK	"device"
 
 #define to_edacdev(k) container_of(k, struct edac_device_ctl_info, kobj)
-#define to_edacdev_attr(a) container_of(a, struct edacdev_attribute, attr)
-
 
 /*
  * Set of edac_device_ctl_info attribute store/show functions
@@ -111,14 +109,14 @@ struct ctl_info_attribute {
 };
 
 #define to_ctl_info(k) container_of(k, struct edac_device_ctl_info, kobj)
-#define to_ctl_info_attr(a) container_of(a,struct ctl_info_attribute,attr)
+#define to_ctl_info_attr(a) container_of_const(a, struct ctl_info_attribute, attr)
 
 /* Function to 'show' fields from the edac_dev 'ctl_info' structure */
 static ssize_t edac_dev_ctl_info_show(struct kobject *kobj,
 				struct attribute *attr, char *buffer)
 {
 	struct edac_device_ctl_info *edac_dev = to_ctl_info(kobj);
-	struct ctl_info_attribute *ctl_info_attr = to_ctl_info_attr(attr);
+	const struct ctl_info_attribute *ctl_info_attr = to_ctl_info_attr(attr);
 
 	if (ctl_info_attr->show)
 		return ctl_info_attr->show(edac_dev, buffer);
@@ -131,7 +129,7 @@ static ssize_t edac_dev_ctl_info_store(struct kobject *kobj,
 				const char *buffer, size_t count)
 {
 	struct edac_device_ctl_info *edac_dev = to_ctl_info(kobj);
-	struct ctl_info_attribute *ctl_info_attr = to_ctl_info_attr(attr);
+	const struct ctl_info_attribute *ctl_info_attr = to_ctl_info_attr(attr);
 
 	if (ctl_info_attr->store)
 		return ctl_info_attr->store(edac_dev, buffer, count);
@@ -145,7 +143,7 @@ static const struct sysfs_ops device_ctl_info_ops = {
 };
 
 #define CTL_INFO_ATTR(_name,_mode,_show,_store)        \
-static struct ctl_info_attribute attr_ctl_info_##_name = {      \
+static const struct ctl_info_attribute attr_ctl_info_##_name = {      \
 	.attr = {.name = __stringify(_name), .mode = _mode },   \
 	.show   = _show,                                        \
 	.store  = _store,                                       \
@@ -163,7 +161,7 @@ CTL_INFO_ATTR(poll_msec, S_IRUGO | S_IWUSR,
 	edac_device_ctl_poll_msec_show, edac_device_ctl_poll_msec_store);
 
 /* Base Attributes of the EDAC_DEVICE ECC object */
-static struct attribute *device_ctrl_attrs[] = {
+static const struct attribute *const device_ctrl_attrs[] = {
 	&attr_ctl_info_panic_on_ue.attr,
 	&attr_ctl_info_log_ue.attr,
 	&attr_ctl_info_log_ce.attr,
@@ -228,8 +226,9 @@ static struct kobj_type ktype_device_ctrl = {
  */
 int edac_device_register_sysfs_main_kobj(struct edac_device_ctl_info *edac_dev)
 {
-	struct bus_type *edac_subsys;
-	int err;
+	struct device *dev_root;
+	const struct bus_type *edac_subsys;
+	int err = -ENODEV;
 
 	edac_dbg(1, "\n");
 
@@ -247,15 +246,16 @@ int edac_device_register_sysfs_main_kobj(struct edac_device_ctl_info *edac_dev)
 	 */
 	edac_dev->owner = THIS_MODULE;
 
-	if (!try_module_get(edac_dev->owner)) {
-		err = -ENODEV;
+	if (!try_module_get(edac_dev->owner))
 		goto err_out;
-	}
 
 	/* register */
-	err = kobject_init_and_add(&edac_dev->kobj, &ktype_device_ctrl,
-				   &edac_subsys->dev_root->kobj,
-				   "%s", edac_dev->name);
+	dev_root = bus_get_dev_root(edac_subsys);
+	if (dev_root) {
+		err = kobject_init_and_add(&edac_dev->kobj, &ktype_device_ctrl,
+					   &dev_root->kobj, "%s", edac_dev->name);
+		put_device(dev_root);
+	}
 	if (err) {
 		edac_dbg(1, "Failed to register '.../edac/%s'\n",
 			 edac_dev->name);
@@ -455,35 +455,19 @@ static ssize_t edac_dev_block_show(struct kobject *kobj,
 	return -EIO;
 }
 
-/* Function to 'store' fields into the edac_dev 'block' structure */
-static ssize_t edac_dev_block_store(struct kobject *kobj,
-				struct attribute *attr,
-				const char *buffer, size_t count)
-{
-	struct edac_dev_sysfs_block_attribute *block_attr;
-
-	block_attr = to_block_attr(attr);
-
-	if (block_attr->store)
-		return block_attr->store(kobj, attr, buffer, count);
-	return -EIO;
-}
-
 /* edac_dev file operations for a 'block' */
 static const struct sysfs_ops device_block_ops = {
 	.show = edac_dev_block_show,
-	.store = edac_dev_block_store
 };
 
-#define BLOCK_ATTR(_name,_mode,_show,_store)        \
+#define BLOCK_ATTR(_name,_mode,_show)        \
 static struct edac_dev_sysfs_block_attribute attr_block_##_name = {	\
 	.attr = {.name = __stringify(_name), .mode = _mode },   \
 	.show   = _show,                                        \
-	.store  = _store,                                       \
 };
 
-BLOCK_ATTR(ce_count, S_IRUGO, block_ce_count_show, NULL);
-BLOCK_ATTR(ue_count, S_IRUGO, block_ue_count_show, NULL);
+BLOCK_ATTR(ce_count, S_IRUGO, block_ce_count_show);
+BLOCK_ATTR(ue_count, S_IRUGO, block_ue_count_show);
 
 /* list of edac_dev 'block' attributes */
 static struct attribute *device_block_attrs[] = {
@@ -589,8 +573,7 @@ static void edac_device_delete_block(struct edac_device_ctl_info *edac_dev,
 		for (i = 0; i < block->nr_attribs; i++, sysfs_attrib++) {
 
 			/* remove each block_attrib file */
-			sysfs_remove_file(&block->kobj,
-				(struct attribute *) sysfs_attrib);
+			sysfs_remove_file(&block->kobj, &sysfs_attrib->attr);
 		}
 	}
 
@@ -740,7 +723,7 @@ static void edac_device_delete_instances(struct edac_device_ctl_info *edac_dev)
 static int edac_device_add_main_sysfs_attributes(
 			struct edac_device_ctl_info *edac_dev)
 {
-	struct edac_dev_sysfs_attribute *sysfs_attrib;
+	const struct edac_dev_sysfs_attribute *sysfs_attrib;
 	int err = 0;
 
 	sysfs_attrib = edac_dev->sysfs_attributes;
@@ -750,7 +733,7 @@ static int edac_device_add_main_sysfs_attributes(
 		 */
 		while (sysfs_attrib->attr.name != NULL) {
 			err = sysfs_create_file(&edac_dev->kobj,
-				(struct attribute*) sysfs_attrib);
+				&sysfs_attrib->attr);
 			if (err)
 				goto err_out;
 
@@ -769,7 +752,7 @@ err_out:
 static void edac_device_remove_main_sysfs_attributes(
 			struct edac_device_ctl_info *edac_dev)
 {
-	struct edac_dev_sysfs_attribute *sysfs_attrib;
+	const struct edac_dev_sysfs_attribute *sysfs_attrib;
 
 	/* if there are main attributes, defined, remove them. First,
 	 * point to the start of the array and iterate over it
@@ -778,8 +761,7 @@ static void edac_device_remove_main_sysfs_attributes(
 	sysfs_attrib = edac_dev->sysfs_attributes;
 	if (sysfs_attrib) {
 		while (sysfs_attrib->attr.name != NULL) {
-			sysfs_remove_file(&edac_dev->kobj,
-					(struct attribute *) sysfs_attrib);
+			sysfs_remove_file(&edac_dev->kobj, &sysfs_attrib->attr);
 			sysfs_attrib++;
 		}
 	}

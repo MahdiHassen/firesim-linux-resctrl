@@ -2,7 +2,7 @@
 #ifndef _ASM_POWERPC_RTAS_TYPES_H
 #define _ASM_POWERPC_RTAS_TYPES_H
 
-#include <linux/spinlock_types.h>
+#include <linux/compiler_attributes.h>
 
 typedef __be32 rtas_arg_t;
 
@@ -12,14 +12,12 @@ struct rtas_args {
 	__be32 nret;
 	rtas_arg_t args[16];
 	rtas_arg_t *rets;     /* Pointer to return values in args[]. */
-};
+} __aligned(8);
 
 struct rtas_t {
 	unsigned long entry;		/* physical address pointer */
 	unsigned long base;		/* physical address pointer */
 	unsigned long size;
-	arch_spinlock_t lock;
-	struct rtas_args args;
 	struct device_node *dev;	/* virtual address pointer */
 };
 
@@ -44,8 +42,9 @@ struct rtas_error_log {
 	 */
 	u8		byte3;			/* General event or error*/
 	__be32		extended_log_length;	/* length in bytes */
-	unsigned char	buffer[1];		/* Start of extended log */
-						/* Variable length.      */
+
+	/* Start of extended log, variable length */
+	unsigned char	buffer[] __counted_by_be(extended_log_length);
 };
 
 /* RTAS general extended event log, Version 6. The extended log starts

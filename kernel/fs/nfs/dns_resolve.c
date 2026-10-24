@@ -7,13 +7,15 @@
  * Resolves DNS hostnames into valid ip addresses
  */
 
-#ifdef CONFIG_NFS_USE_KERNEL_DNS
-
 #include <linux/module.h>
 #include <linux/sunrpc/clnt.h>
 #include <linux/sunrpc/addr.h>
-#include <linux/dns_resolver.h>
+
 #include "dns_resolve.h"
+
+#ifdef CONFIG_NFS_USE_KERNEL_DNS
+
+#include <linux/dns_resolver.h>
 
 ssize_t nfs_dns_resolve_name(struct net *net, char *name, size_t namelen,
 		struct sockaddr_storage *ss, size_t salen)
@@ -35,7 +37,6 @@ ssize_t nfs_dns_resolve_name(struct net *net, char *name, size_t namelen,
 
 #else
 
-#include <linux/module.h>
 #include <linux/hash.h>
 #include <linux/string.h>
 #include <linux/kmod.h>
@@ -43,15 +44,12 @@ ssize_t nfs_dns_resolve_name(struct net *net, char *name, size_t namelen,
 #include <linux/socket.h>
 #include <linux/seq_file.h>
 #include <linux/inet.h>
-#include <linux/sunrpc/clnt.h>
-#include <linux/sunrpc/addr.h>
 #include <linux/sunrpc/cache.h>
 #include <linux/sunrpc/svcauth.h>
 #include <linux/sunrpc/rpc_pipe_fs.h>
 #include <linux/nfs_fs.h>
 
 #include "nfs4_fs.h"
-#include "dns_resolve.h"
 #include "cache_lib.h"
 #include "netns.h"
 
@@ -122,7 +120,7 @@ static void nfs_dns_ent_put(struct kref *ref)
 
 static struct cache_head *nfs_dns_ent_alloc(void)
 {
-	struct nfs_dns_ent *item = kmalloc(sizeof(*item), GFP_KERNEL);
+	struct nfs_dns_ent *item = kmalloc_obj(*item);
 
 	if (item != NULL) {
 		item->hostname = NULL;
@@ -158,7 +156,7 @@ static int nfs_dns_upcall(struct cache_detail *cd,
 	if (!nfs_cache_upcall(cd, key->hostname))
 		return 0;
 	clear_bit(CACHE_PENDING, &ch->flags);
-	return sunrpc_cache_pipe_upcall_timeout(cd, ch);
+	return sunrpc_cache_upcall_warn(cd, ch);
 }
 
 static int nfs_dns_match(struct cache_head *ca,

@@ -18,7 +18,6 @@
 #include <linux/io.h>
 #include <linux/slab.h>
 #include <linux/pm_runtime.h>
-#include <linux/of_device.h>
 
 #include <sound/core.h>
 #include <sound/pcm.h>
@@ -91,18 +90,14 @@ static int omap_dmic_dai_startup(struct snd_pcm_substream *substream,
 				  struct snd_soc_dai *dai)
 {
 	struct omap_dmic *dmic = snd_soc_dai_get_drvdata(dai);
-	int ret = 0;
 
-	mutex_lock(&dmic->mutex);
+	guard(mutex)(&dmic->mutex);
 
-	if (!snd_soc_dai_active(dai))
-		dmic->active = 1;
-	else
-		ret = -EBUSY;
+	if (snd_soc_dai_active(dai))
+		return -EBUSY;
 
-	mutex_unlock(&dmic->mutex);
-
-	return ret;
+	dmic->active = 1;
+	return 0;
 }
 
 static void omap_dmic_dai_shutdown(struct snd_pcm_substream *substream,
@@ -110,14 +105,12 @@ static void omap_dmic_dai_shutdown(struct snd_pcm_substream *substream,
 {
 	struct omap_dmic *dmic = snd_soc_dai_get_drvdata(dai);
 
-	mutex_lock(&dmic->mutex);
+	guard(mutex)(&dmic->mutex);
 
 	cpu_latency_qos_remove_request(&dmic->pm_qos_req);
 
 	if (!snd_soc_dai_active(dai))
 		dmic->active = 0;
-
-	mutex_unlock(&dmic->mutex);
 }
 
 static int omap_dmic_select_divider(struct omap_dmic *dmic, int sample_rate)
@@ -328,32 +321,30 @@ static int omap_dmic_select_fclk(struct omap_dmic *dmic, int clk_id,
 	}
 
 	mux = clk_get_parent(dmic->fclk);
-	if (IS_ERR(mux)) {
+	if (!mux) {
 		dev_err(dmic->dev, "can't get fck mux parent\n");
 		clk_put(parent_clk);
 		return -ENODEV;
 	}
 
-	mutex_lock(&dmic->mutex);
-	if (dmic->active) {
-		/* disable clock while reparenting */
-		pm_runtime_put_sync(dmic->dev);
-		ret = clk_set_parent(mux, parent_clk);
-		pm_runtime_get_sync(dmic->dev);
-	} else {
-		ret = clk_set_parent(mux, parent_clk);
+	scoped_guard(mutex, &dmic->mutex) {
+		if (dmic->active) {
+			/* disable clock while reparenting */
+			pm_runtime_put_sync(dmic->dev);
+			ret = clk_set_parent(mux, parent_clk);
+			pm_runtime_get_sync(dmic->dev);
+		} else {
+			ret = clk_set_parent(mux, parent_clk);
+		}
 	}
-	mutex_unlock(&dmic->mutex);
 
 	if (ret < 0) {
 		dev_err(dmic->dev, "re-parent failed\n");
-		goto err_busy;
+	} else {
+		dmic->sysclk = clk_id;
+		dmic->fclk_freq = freq;
 	}
 
-	dmic->sysclk = clk_id;
-	dmic->fclk_freq = freq;
-
-err_busy:
 	clk_put(mux);
 	clk_put(parent_clk);
 
@@ -401,15 +392,6 @@ static int omap_dmic_set_dai_sysclk(struct snd_soc_dai *dai, int clk_id,
 	return -EINVAL;
 }
 
-static const struct snd_soc_dai_ops omap_dmic_dai_ops = {
-	.startup	= omap_dmic_dai_startup,
-	.shutdown	= omap_dmic_dai_shutdown,
-	.hw_params	= omap_dmic_dai_hw_params,
-	.prepare	= omap_dmic_dai_prepare,
-	.trigger	= omap_dmic_dai_trigger,
-	.set_sysclk	= omap_dmic_set_dai_sysclk,
-};
-
 static int omap_dmic_probe(struct snd_soc_dai *dai)
 {
 	struct omap_dmic *dmic = snd_soc_dai_get_drvdata(dai);
@@ -438,10 +420,19 @@ static int omap_dmic_remove(struct snd_soc_dai *dai)
 	return 0;
 }
 
+static const struct snd_soc_dai_ops omap_dmic_dai_ops = {
+	.probe		= omap_dmic_probe,
+	.remove		= omap_dmic_remove,
+	.startup	= omap_dmic_dai_startup,
+	.shutdown	= omap_dmic_dai_shutdown,
+	.hw_params	= omap_dmic_dai_hw_params,
+	.prepare	= omap_dmic_dai_prepare,
+	.trigger	= omap_dmic_dai_trigger,
+	.set_sysclk	= omap_dmic_set_dai_sysclk,
+};
+
 static struct snd_soc_dai_driver omap_dmic_dai = {
 	.name = "omap-dmic",
-	.probe = omap_dmic_probe,
-	.remove = omap_dmic_remove,
 	.capture = {
 		.channels_min = 2,
 		.channels_max = 6,
@@ -488,11 +479,9 @@ static int asoc_dmic_probe(struct platform_device *pdev)
 
 	dmic->dma_data.filter_data = "up_link";
 
-	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "mpu");
-	dmic->io_base = devm_ioremap_resource(&pdev->dev, res);
+	dmic->io_base = devm_platform_ioremap_resource_byname(pdev, "mpu");
 	if (IS_ERR(dmic->io_base))
 		return PTR_ERR(dmic->io_base);
-
 
 	ret = devm_snd_soc_register_component(&pdev->dev,
 					      &omap_dmic_component,

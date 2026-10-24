@@ -8,10 +8,6 @@ Compute Accelerators
    :maxdepth: 1
 
    introduction
-
-.. only::  subproject and html
-
-   Indices
-   =======
-
-   * :ref:`genindex`
+   amdxdna/index
+   qaic/index
+   rocket/index

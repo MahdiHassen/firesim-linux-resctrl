@@ -46,7 +46,6 @@ struct dma_fence_chain {
 		 */
 		struct irq_work work;
 	};
-	spinlock_t lock;
 };
 
 
@@ -85,11 +84,13 @@ dma_fence_chain_contained(struct dma_fence *fence)
  * dma_fence_chain_alloc
  *
  * Returns a new struct dma_fence_chain object or NULL on failure.
+ *
+ * This specialized allocator has to be a macro for its allocations to be
+ * accounted separately (to have a separate alloc_tag). The typecast is
+ * intentional to enforce typesafety.
  */
-static inline struct dma_fence_chain *dma_fence_chain_alloc(void)
-{
-	return kmalloc(sizeof(struct dma_fence_chain), GFP_KERNEL);
-};
+#define dma_fence_chain_alloc()	\
+		kmalloc_obj(struct dma_fence_chain)
 
 /**
  * dma_fence_chain_free

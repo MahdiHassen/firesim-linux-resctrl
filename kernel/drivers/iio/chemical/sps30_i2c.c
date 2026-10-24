@@ -6,13 +6,12 @@
  *
  * I2C slave address: 0x69
  */
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 #include <linux/crc8.h>
 #include <linux/delay.h>
 #include <linux/device.h>
 #include <linux/errno.h>
 #include <linux/i2c.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/types.h>
 
@@ -68,10 +67,10 @@ static int sps30_i2c_command(struct sps30_state *state, u16 cmd, void *arg, size
 	/*
 	 * Internally sensor stores measurements in a following manner:
 	 *
-	 * PM1: upper two bytes, crc8, lower two bytes, crc8
+	 * PM1:   upper two bytes, crc8, lower two bytes, crc8
 	 * PM2P5: upper two bytes, crc8, lower two bytes, crc8
-	 * PM4: upper two bytes, crc8, lower two bytes, crc8
-	 * PM10: upper two bytes, crc8, lower two bytes, crc8
+	 * PM4:   upper two bytes, crc8, lower two bytes, crc8
+	 * PM10:  upper two bytes, crc8, lower two bytes, crc8
 	 *
 	 * What follows next are number concentration measurements and
 	 * typical particle size measurement which we omit.
@@ -171,7 +170,7 @@ static int sps30_i2c_read_meas(struct sps30_state *state, __be32 *meas, size_t n
 	if (!sps30_i2c_meas_ready(state))
 		return -ETIMEDOUT;
 
-	return sps30_i2c_command(state, SPS30_I2C_READ_MEAS, NULL, 0, meas, sizeof(num) * num);
+	return sps30_i2c_command(state, SPS30_I2C_READ_MEAS, NULL, 0, meas, sizeof(*meas) * num);
 }
 
 static int sps30_i2c_clean_fan(struct sps30_state *state)
@@ -232,7 +231,7 @@ static int sps30_i2c_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id sps30_i2c_id[] = {
-	{ "sps30" },
+	{ .name = "sps30" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, sps30_i2c_id);
@@ -249,11 +248,11 @@ static struct i2c_driver sps30_i2c_driver = {
 		.of_match_table = sps30_i2c_of_match,
 	},
 	.id_table = sps30_i2c_id,
-	.probe_new = sps30_i2c_probe,
+	.probe = sps30_i2c_probe,
 };
 module_i2c_driver(sps30_i2c_driver);
 
 MODULE_AUTHOR("Tomasz Duszynski <tomasz.duszynski@octakon.com>");
 MODULE_DESCRIPTION("Sensirion SPS30 particulate matter sensor i2c driver");
 MODULE_LICENSE("GPL v2");
-MODULE_IMPORT_NS(IIO_SPS30);
+MODULE_IMPORT_NS("IIO_SPS30");

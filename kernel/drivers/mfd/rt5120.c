@@ -8,7 +8,6 @@
 #include <linux/kernel.h>
 #include <linux/mfd/core.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/regmap.h>
 
 #define RT5120_REG_INTENABLE	0x1D
@@ -114,7 +113,7 @@ static struct i2c_driver rt5120_driver = {
 		.name = "rt5120",
 		.of_match_table = rt5120_device_match_table,
 	},
-	.probe_new = rt5120_probe,
+	.probe = rt5120_probe,
 };
 module_i2c_driver(rt5120_driver);
 

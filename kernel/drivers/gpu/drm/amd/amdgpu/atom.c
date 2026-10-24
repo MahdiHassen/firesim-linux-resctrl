@@ -27,7 +27,7 @@
 #include <linux/slab.h>
 #include <linux/string_helpers.h>
 
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 #include <drm/drm_util.h>
 
@@ -59,9 +59,13 @@
 
 #define ATOM_CMD_TIMEOUT_SEC	20
 
+/* Limit ATOM command table recursion (calltable) to avoid kernel stack overflow. */
+#define ATOM_EXECUTE_MAX_DEPTH	32
+
 typedef struct {
 	struct atom_context *ctx;
 	uint32_t *ps, *ws;
+	int ps_size, ws_size;
 	int ps_shift;
 	uint16_t start;
 	unsigned last_jump;
@@ -70,8 +74,8 @@ typedef struct {
 } atom_exec_context;
 
 int amdgpu_atom_debug;
-static int amdgpu_atom_execute_table_locked(struct atom_context *ctx, int index, uint32_t *params);
-int amdgpu_atom_execute_table(struct atom_context *ctx, int index, uint32_t *params);
+static int amdgpu_atom_execute_table_locked(struct atom_context *ctx, int index, uint32_t *params, int params_size);
+int amdgpu_atom_execute_table(struct atom_context *ctx, int index, uint32_t *params, int params_size);
 
 static uint32_t atom_arg_mask[8] =
 	{ 0xFFFFFFFF, 0xFFFF, 0xFFFF00, 0xFFFF0000, 0xFF, 0xFF00, 0xFF0000,
@@ -223,7 +227,10 @@ static uint32_t atom_get_src_int(atom_exec_context *ctx, uint8_t attr,
 		(*ptr)++;
 		/* get_unaligned_le32 avoids unaligned accesses from atombios
 		 * tables, noticed on a DEC Alpha. */
-		val = get_unaligned_le32((u32 *)&ctx->ps[idx]);
+		if (idx < ctx->ps_size)
+			val = get_unaligned_le32((u32 *)&ctx->ps[idx]);
+		else
+			pr_info("PS index out of range: %i > %i\n", idx, ctx->ps_size);
 		if (print)
 			DEBUG("PS[0x%02X,0x%04X]", idx, val);
 		break;
@@ -261,7 +268,10 @@ static uint32_t atom_get_src_int(atom_exec_context *ctx, uint8_t attr,
 			val = gctx->reg_block;
 			break;
 		default:
-			val = ctx->ws[idx];
+			if (idx < ctx->ws_size)
+				val = ctx->ws[idx];
+			else
+				pr_info("WS index out of range: %i > %i\n", idx, ctx->ws_size);
 		}
 		break;
 	case ATOM_ARG_ID:
@@ -294,7 +304,7 @@ static uint32_t atom_get_src_int(atom_exec_context *ctx, uint8_t attr,
 			(*ptr) += 4;
 			if (print)
 				DEBUG("IMM 0x%08X\n", val);
-			return val;
+			break;
 		case ATOM_SRC_WORD0:
 		case ATOM_SRC_WORD8:
 		case ATOM_SRC_WORD16:
@@ -302,7 +312,7 @@ static uint32_t atom_get_src_int(atom_exec_context *ctx, uint8_t attr,
 			(*ptr) += 2;
 			if (print)
 				DEBUG("IMM 0x%04X\n", val);
-			return val;
+			break;
 		case ATOM_SRC_BYTE0:
 		case ATOM_SRC_BYTE8:
 		case ATOM_SRC_BYTE16:
@@ -311,9 +321,9 @@ static uint32_t atom_get_src_int(atom_exec_context *ctx, uint8_t attr,
 			(*ptr)++;
 			if (print)
 				DEBUG("IMM 0x%02X\n", val);
-			return val;
+			break;
 		}
-		return 0;
+		return val;
 	case ATOM_ARG_PLL:
 		idx = U8(*ptr);
 		(*ptr)++;
@@ -395,7 +405,6 @@ static void atom_skip_src_int(atom_exec_context *ctx, uint8_t attr, int *ptr)
 			(*ptr)++;
 			return;
 		}
-		return;
 	}
 }
 
@@ -496,6 +505,10 @@ static void atom_put_dst(atom_exec_context *ctx, int arg, uint8_t attr,
 		idx = U8(*ptr);
 		(*ptr)++;
 		DEBUG("PS[0x%02X]", idx);
+		if (idx >= ctx->ps_size) {
+			pr_info("PS index out of range: %i > %i\n", idx, ctx->ps_size);
+			return;
+		}
 		ctx->ps[idx] = cpu_to_le32(val);
 		break;
 	case ATOM_ARG_WS:
@@ -528,6 +541,10 @@ static void atom_put_dst(atom_exec_context *ctx, int arg, uint8_t attr,
 			gctx->reg_block = val;
 			break;
 		default:
+			if (idx >= ctx->ws_size) {
+				pr_info("WS index out of range: %i > %i\n", idx, ctx->ws_size);
+				return;
+			}
 			ctx->ws[idx] = val;
 		}
 		break;
@@ -625,7 +642,7 @@ static void atom_op_calltable(atom_exec_context *ctx, int *ptr, int arg)
 	else
 		SDEBUG("   table: %d\n", idx);
 	if (U16(ctx->ctx->cmd_table + 4 + 2 * idx))
-		r = amdgpu_atom_execute_table_locked(ctx->ctx, idx, ctx->ps + ctx->ps_shift);
+		r = amdgpu_atom_execute_table_locked(ctx->ctx, idx, ctx->ps + ctx->ps_shift, ctx->ps_size - ctx->ps_shift);
 	if (r) {
 		ctx->abort = true;
 	}
@@ -1204,7 +1221,7 @@ static struct {
 	atom_op_div32, ATOM_ARG_WS},
 };
 
-static int amdgpu_atom_execute_table_locked(struct atom_context *ctx, int index, uint32_t *params)
+static int amdgpu_atom_execute_table_locked(struct atom_context *ctx, int index, uint32_t *params, int params_size)
 {
 	int base = CU16(ctx->cmd_table + 4 + 2 * index);
 	int len, ws, ps, ptr;
@@ -1214,6 +1231,13 @@ static int amdgpu_atom_execute_table_locked(struct atom_context *ctx, int index,
 
 	if (!base)
 		return -EINVAL;
+
+	if (ctx->execute_depth >= ATOM_EXECUTE_MAX_DEPTH) {
+		DRM_ERROR("atombios command table nesting exceeded limit (%u)\n",
+			  ATOM_EXECUTE_MAX_DEPTH);
+		return -ELOOP;
+	}
+	ctx->execute_depth++;
 
 	len = CU16(base + ATOM_CT_SIZE_PTR);
 	ws = CU8(base + ATOM_CT_WS_PTR);
@@ -1226,12 +1250,21 @@ static int amdgpu_atom_execute_table_locked(struct atom_context *ctx, int index,
 	ectx.ps_shift = ps / 4;
 	ectx.start = base;
 	ectx.ps = params;
+	ectx.ps_size = params_size;
 	ectx.abort = false;
 	ectx.last_jump = 0;
-	if (ws)
+	ectx.last_jump_jiffies = 0;
+	if (ws) {
 		ectx.ws = kcalloc(4, ws, GFP_KERNEL);
-	else
+		if (!ectx.ws) {
+			ret = -ENOMEM;
+			goto free;
+		}
+		ectx.ws_size = ws;
+	} else {
 		ectx.ws = NULL;
+		ectx.ws_size = 0;
+	}
 
 	debug_depth++;
 	while (1) {
@@ -1262,10 +1295,11 @@ static int amdgpu_atom_execute_table_locked(struct atom_context *ctx, int index,
 free:
 	if (ws)
 		kfree(ectx.ws);
+	ctx->execute_depth--;
 	return ret;
 }
 
-int amdgpu_atom_execute_table(struct atom_context *ctx, int index, uint32_t *params)
+int amdgpu_atom_execute_table(struct atom_context *ctx, int index, uint32_t *params, int params_size)
 {
 	int r;
 
@@ -1281,7 +1315,7 @@ int amdgpu_atom_execute_table(struct atom_context *ctx, int index, uint32_t *par
 	/* reset divmul */
 	ctx->divmul[0] = 0;
 	ctx->divmul[1] = 0;
-	r = amdgpu_atom_execute_table_locked(ctx, index, params);
+	r = amdgpu_atom_execute_table_locked(ctx, index, params, params_size);
 	mutex_unlock(&ctx->mutex);
 	return r;
 }
@@ -1425,6 +1459,7 @@ static void atom_get_vbios_pn(struct atom_context *ctx)
 		if (vbios_str == NULL)
 			vbios_str += sizeof(BIOS_ATOM_PREFIX) - 1;
 	}
+	OPTIMIZER_HIDE_VAR(vbios_str);
 	if (vbios_str != NULL && *vbios_str == 0)
 		vbios_str++;
 
@@ -1442,10 +1477,27 @@ static void atom_get_vbios_pn(struct atom_context *ctx)
 
 static void atom_get_vbios_version(struct atom_context *ctx)
 {
+	unsigned short start = 3, end;
 	unsigned char *vbios_ver;
+	unsigned char *p_rom;
+
+	p_rom = ctx->bios;
+	/* Search from strings offset if it's present */
+	start = *(unsigned short *)(p_rom +
+				    OFFSET_TO_GET_ATOMBIOS_STRING_START);
+
+	/* Search till atom rom header start point */
+	end = *(unsigned short *)(p_rom + OFFSET_TO_ATOM_ROM_HEADER_POINTER);
+
+	/* Use hardcoded offsets, if the offsets are not populated */
+	if (end <= start) {
+		start = 3;
+		end = 1024;
+	}
 
 	/* find anchor ATOMBIOSBK-AMD */
-	vbios_ver = atom_find_str_in_rom(ctx, BIOS_VERSION_PREFIX, 3, 1024, 64);
+	vbios_ver =
+		atom_find_str_in_rom(ctx, BIOS_VERSION_PREFIX, start, end, 64);
 	if (vbios_ver != NULL) {
 		/* skip ATOMBIOSBK-AMD VER */
 		vbios_ver += 18;
@@ -1455,16 +1507,60 @@ static void atom_get_vbios_version(struct atom_context *ctx)
 	}
 }
 
+static void atom_get_vbios_build(struct atom_context *ctx)
+{
+	unsigned char *atom_rom_hdr;
+	unsigned char *str;
+	uint16_t base, len;
+
+	base = CU16(ATOM_ROM_TABLE_PTR);
+	atom_rom_hdr = CSTR(base);
+
+	str = CSTR(CU16(base + ATOM_ROM_CFG_PTR));
+	/* Skip config string */
+	while (str < atom_rom_hdr && *str++)
+		;
+	/* Skip change list string */
+	while (str < atom_rom_hdr && *str++)
+		;
+
+	len = min(atom_rom_hdr - str, STRLEN_NORMAL);
+	if (len)
+		strscpy(ctx->build_num, str, len);
+}
+
+static inline void atom_print_vbios_info(struct atom_context *ctx)
+{
+	char vbios_info[256];
+	int off = 0;
+
+	if (ctx->vbios_pn[0])
+		off += scnprintf(vbios_info + off, sizeof(vbios_info) - off,
+				 "%s", ctx->vbios_pn);
+	if (ctx->build_num[0])
+		off += scnprintf(vbios_info + off, sizeof(vbios_info) - off,
+				 "%sbuild: %s", off ? ", " : "",
+				 ctx->build_num);
+	if (ctx->vbios_ver_str[0])
+		off += scnprintf(vbios_info + off, sizeof(vbios_info) - off,
+				 "%sver: %s", off ? ", " : "",
+				 ctx->vbios_ver_str);
+	if (ctx->date[0])
+		off += scnprintf(vbios_info + off, sizeof(vbios_info) - off,
+				 "%s%.10s", off ? ", " : "",
+				 ctx->date);
+	if (off)
+		drm_info(ctx->card->dev, "ATOM BIOS: %s\n", vbios_info);
+}
+
 struct atom_context *amdgpu_atom_parse(struct card_info *card, void *bios)
 {
 	int base;
 	struct atom_context *ctx =
-	    kzalloc(sizeof(struct atom_context), GFP_KERNEL);
-	char *str;
+	    kzalloc_obj(struct atom_context);
 	struct _ATOM_ROM_HEADER *atom_rom_header;
 	struct _ATOM_MASTER_DATA_TABLE *master_table;
 	struct _ATOM_FIRMWARE_INFO *atom_fw_info;
-	u16 idx;
 
 	if (!ctx)
 		return NULL;
@@ -1502,16 +1598,6 @@ struct atom_context *amdgpu_atom_parse(struct card_info *card, void *bios)
 		return NULL;
 	}
 
-	idx = CU16(ATOM_ROM_PART_NUMBER_PTR);
-	if (idx == 0)
-		idx = 0x80;
-
-	str = CSTR(idx);
-	if (*str != '\0') {
-		pr_info("ATOM BIOS: %s\n", str);
-		strlcpy(ctx->vbios_version, str, sizeof(ctx->vbios_version));
-	}
-
 	atom_rom_header = (struct _ATOM_ROM_HEADER *)CSTR(base);
 	if (atom_rom_header->usMasterDataTableOffset != 0) {
 		master_table = (struct _ATOM_MASTER_DATA_TABLE *)
@@ -1527,6 +1613,9 @@ struct atom_context *amdgpu_atom_parse(struct card_info *card, void *bios)
 	atom_get_vbios_pn(ctx);
 	atom_get_vbios_date(ctx);
 	atom_get_vbios_version(ctx);
+	atom_get_vbios_build(ctx);
+
+	atom_print_vbios_info(ctx);
 
 	return ctx;
 }
@@ -1546,7 +1635,7 @@ int amdgpu_atom_asic_init(struct atom_context *ctx)
 
 	if (!CU16(ctx->cmd_table + 4 + 2 * ATOM_CMD_INIT))
 		return 1;
-	ret = amdgpu_atom_execute_table(ctx, ATOM_CMD_INIT, ps);
+	ret = amdgpu_atom_execute_table(ctx, ATOM_CMD_INIT, ps, 16);
 	if (ret)
 		return ret;
 

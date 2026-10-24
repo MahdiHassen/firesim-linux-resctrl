@@ -10,6 +10,7 @@
 #include <linux/acpi.h>
 #include <linux/bitops.h>
 #include <linux/module.h>
+#include <linux/devm-helpers.h>
 #include <linux/device.h>
 #include <linux/regmap.h>
 #include <linux/workqueue.h>
@@ -178,18 +179,18 @@ static inline int axp288_charger_set_cv(struct axp288_chrg_info *info, int cv)
 	u8 reg_val;
 	int ret;
 
-	if (cv <= CV_4100MV) {
-		reg_val = CHRG_CCCV_CV_4100MV;
-		cv = CV_4100MV;
-	} else if (cv <= CV_4150MV) {
-		reg_val = CHRG_CCCV_CV_4150MV;
-		cv = CV_4150MV;
-	} else if (cv <= CV_4200MV) {
-		reg_val = CHRG_CCCV_CV_4200MV;
-		cv = CV_4200MV;
-	} else {
+	if (cv >= CV_4350MV) {
 		reg_val = CHRG_CCCV_CV_4350MV;
 		cv = CV_4350MV;
+	} else if (cv >= CV_4200MV) {
+		reg_val = CHRG_CCCV_CV_4200MV;
+		cv = CV_4200MV;
+	} else if (cv >= CV_4150MV) {
+		reg_val = CHRG_CCCV_CV_4150MV;
+		cv = CV_4150MV;
+	} else {
+		reg_val = CHRG_CCCV_CV_4100MV;
+		cv = CV_4100MV;
 	}
 
 	reg_val = reg_val << CHRG_CCCV_CV_BIT_POS;
@@ -337,8 +338,8 @@ static int axp288_charger_usb_set_property(struct power_supply *psy,
 		}
 		break;
 	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE:
-		scaled_val = min(val->intval, info->max_cv);
-		scaled_val = DIV_ROUND_CLOSEST(scaled_val, 1000);
+		scaled_val = DIV_ROUND_CLOSEST(val->intval, 1000);
+		scaled_val = min(scaled_val, info->max_cv);
 		ret = axp288_charger_set_cv(info, scaled_val);
 		if (ret < 0) {
 			dev_warn(&info->pdev->dev, "set charge voltage failed\n");
@@ -821,14 +822,6 @@ static int charger_init_hw_regs(struct axp288_chrg_info *info)
 	return 0;
 }
 
-static void axp288_charger_cancel_work(void *data)
-{
-	struct axp288_chrg_info *info = data;
-
-	cancel_work_sync(&info->otg.work);
-	cancel_work_sync(&info->cable.work);
-}
-
 static int axp288_charger_probe(struct platform_device *pdev)
 {
 	int ret, i, pirq;
@@ -836,6 +829,7 @@ static int axp288_charger_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct axp20x_dev *axp20x = dev_get_drvdata(pdev->dev.parent);
 	struct power_supply_config charger_cfg = {};
+	const char *extcon_name = NULL;
 	unsigned int val;
 
 	/*
@@ -865,21 +859,28 @@ static int axp288_charger_probe(struct platform_device *pdev)
 	info->regmap_irqc = axp20x->regmap_irqc;
 
 	info->cable.edev = extcon_get_extcon_dev(AXP288_EXTCON_DEV_NAME);
-	if (IS_ERR(info->cable.edev)) {
-		dev_err_probe(dev, PTR_ERR(info->cable.edev),
-			      "extcon_get_extcon_dev(%s) failed\n",
-			      AXP288_EXTCON_DEV_NAME);
-		return PTR_ERR(info->cable.edev);
-	}
+	if (IS_ERR(info->cable.edev))
+		return dev_err_probe(dev, PTR_ERR(info->cable.edev),
+				     "extcon_get_extcon_dev(%s) failed\n",
+				     AXP288_EXTCON_DEV_NAME);
 
-	if (acpi_dev_present(USB_HOST_EXTCON_HID, NULL, -1)) {
-		info->otg.cable = extcon_get_extcon_dev(USB_HOST_EXTCON_NAME);
-		if (IS_ERR(info->otg.cable)) {
-			dev_err_probe(dev, PTR_ERR(info->otg.cable),
-				      "extcon_get_extcon_dev(%s) failed\n",
-				      USB_HOST_EXTCON_NAME);
-			return PTR_ERR(info->otg.cable);
-		}
+	/*
+	 * On devices with broken ACPI GPIO event handlers there also is no ACPI
+	 * "INT3496" (USB_HOST_EXTCON_HID) device. x86-android-tablets.ko
+	 * instantiates an "intel-int3496" extcon on these devs as a workaround.
+	 */
+	if (acpi_quirk_skip_gpio_event_handlers())
+		extcon_name = "intel-int3496";
+	else if (acpi_dev_present(USB_HOST_EXTCON_HID, NULL, -1))
+		extcon_name = USB_HOST_EXTCON_NAME;
+
+	if (extcon_name) {
+		info->otg.cable = extcon_get_extcon_dev(extcon_name);
+		if (IS_ERR(info->otg.cable))
+			return dev_err_probe(dev, PTR_ERR(info->otg.cable),
+					     "extcon_get_extcon_dev(%s) failed\n",
+					     USB_HOST_EXTCON_NAME);
+
 		dev_info(dev, "Using " USB_HOST_EXTCON_HID " extcon for usb-id\n");
 	}
 
@@ -893,38 +894,39 @@ static int axp288_charger_probe(struct platform_device *pdev)
 	charger_cfg.drv_data = info;
 	info->psy_usb = devm_power_supply_register(dev, &axp288_charger_desc,
 						   &charger_cfg);
-	if (IS_ERR(info->psy_usb)) {
-		ret = PTR_ERR(info->psy_usb);
-		dev_err(dev, "failed to register power supply: %d\n", ret);
-		return ret;
-	}
+	if (IS_ERR(info->psy_usb))
+		return dev_err_probe(dev, PTR_ERR(info->psy_usb),
+				     "failed to register power supply: %d\n", ret);
 
 	/* Cancel our work on cleanup, register this before the notifiers */
-	ret = devm_add_action(dev, axp288_charger_cancel_work, info);
+	ret = devm_work_autocancel(dev, &info->cable.work,
+				   axp288_charger_extcon_evt_worker);
 	if (ret)
 		return ret;
 
 	/* Register for extcon notification */
-	INIT_WORK(&info->cable.work, axp288_charger_extcon_evt_worker);
 	info->cable.nb.notifier_call = axp288_charger_handle_cable_evt;
 	ret = devm_extcon_register_notifier_all(dev, info->cable.edev,
 						&info->cable.nb);
-	if (ret) {
-		dev_err(dev, "failed to register cable extcon notifier\n");
-		return ret;
-	}
+	if (ret)
+		return dev_err_probe(dev, ret, "failed to register cable extcon notifier\n");
+
 	schedule_work(&info->cable.work);
 
+	ret = devm_work_autocancel(dev, &info->otg.work,
+				   axp288_charger_otg_evt_worker);
+	if (ret)
+		return ret;
+
 	/* Register for OTG notification */
-	INIT_WORK(&info->otg.work, axp288_charger_otg_evt_worker);
 	info->otg.id_nb.notifier_call = axp288_charger_handle_otg_evt;
 	if (info->otg.cable) {
 		ret = devm_extcon_register_notifier(dev, info->otg.cable,
 					EXTCON_USB_HOST, &info->otg.id_nb);
-		if (ret) {
-			dev_err(dev, "failed to register EXTCON_USB_HOST notifier\n");
-			return ret;
-		}
+		if (ret)
+			return dev_err_probe(dev, ret,
+					     "failed to register EXTCON_USB_HOST notifier\n");
+
 		schedule_work(&info->otg.work);
 	}
 
@@ -943,11 +945,9 @@ static int axp288_charger_probe(struct platform_device *pdev)
 		ret = devm_request_threaded_irq(&info->pdev->dev, info->irq[i],
 					NULL, axp288_charger_irq_thread_handler,
 					IRQF_ONESHOT, info->pdev->name, info);
-		if (ret) {
-			dev_err(dev, "failed to request interrupt=%d\n",
-								info->irq[i]);
-			return ret;
-		}
+		if (ret)
+			return dev_err_probe(dev, ret, "failed to request interrupt=%d\n",
+					     info->irq[i]);
 	}
 
 	return 0;
@@ -955,7 +955,7 @@ static int axp288_charger_probe(struct platform_device *pdev)
 
 static const struct platform_device_id axp288_charger_id_table[] = {
 	{ .name = "axp288_charger" },
-	{},
+	{ }
 };
 MODULE_DEVICE_TABLE(platform, axp288_charger_id_table);
 

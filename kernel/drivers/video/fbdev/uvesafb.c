@@ -258,9 +258,9 @@ static struct uvesafb_ktask *uvesafb_prep(void)
 {
 	struct uvesafb_ktask *task;
 
-	task = kzalloc(sizeof(*task), GFP_KERNEL);
+	task = kzalloc_obj(*task);
 	if (task) {
-		task->done = kzalloc(sizeof(*task->done), GFP_KERNEL);
+		task->done = kzalloc_obj(*task->done);
 		if (!task->done) {
 			kfree(task);
 			task = NULL;
@@ -487,9 +487,7 @@ static int uvesafb_vbe_getmodes(struct uvesafb_ktask *task,
 		mode++;
 	}
 
-	par->vbe_modes = kcalloc(par->vbe_modes_cnt,
-				 sizeof(struct vbe_mode_ib),
-				 GFP_KERNEL);
+	par->vbe_modes = kzalloc_objs(struct vbe_mode_ib, par->vbe_modes_cnt);
 	if (!par->vbe_modes)
 		return -ENOMEM;
 
@@ -862,7 +860,7 @@ static int uvesafb_vbe_init_mode(struct fb_info *info)
 	 * Convert the modelist into a modedb so that we can use it with
 	 * fb_find_mode().
 	 */
-	mode = kcalloc(i, sizeof(*mode), GFP_KERNEL);
+	mode = kzalloc_objs(*mode, i);
 	if (mode) {
 		i = 0;
 		list_for_each(pos, &info->modelist) {
@@ -1048,8 +1046,7 @@ static int uvesafb_setcmap(struct fb_cmap *cmap, struct fb_info *info)
 		    info->cmap.len || cmap->start < info->cmap.start)
 			return -EINVAL;
 
-		entries = kmalloc_array(cmap->len, sizeof(*entries),
-					GFP_KERNEL);
+		entries = kmalloc_objs(*entries, cmap->len);
 		if (!entries)
 			return -ENOMEM;
 
@@ -1243,7 +1240,7 @@ setmode:
 	    info->var.pixclock != 0) {
 		task->t.regs.ebx |= 0x0800;		/* use CRTC data */
 		task->t.flags = TF_BUF_ESDI;
-		crtc = kzalloc(sizeof(struct vbe_crtc_ib), GFP_KERNEL);
+		crtc = kzalloc_obj(struct vbe_crtc_ib);
 		if (!crtc) {
 			err = -ENOMEM;
 			goto out;
@@ -1416,13 +1413,11 @@ static struct fb_ops uvesafb_ops = {
 	.owner		= THIS_MODULE,
 	.fb_open	= uvesafb_open,
 	.fb_release	= uvesafb_release,
+	FB_DEFAULT_IOMEM_OPS,
 	.fb_setcolreg	= uvesafb_setcolreg,
 	.fb_setcmap	= uvesafb_setcmap,
 	.fb_pan_display	= uvesafb_pan_display,
 	.fb_blank	= uvesafb_blank,
-	.fb_fillrect	= cfb_fillrect,
-	.fb_copyarea	= cfb_copyarea,
-	.fb_imageblit	= cfb_imageblit,
 	.fb_check_var	= uvesafb_check_var,
 	.fb_set_par	= uvesafb_set_par,
 };
@@ -1508,8 +1503,7 @@ static void uvesafb_init_info(struct fb_info *info, struct vbe_mode_ib *mode)
 		par->ypan = 0;
 	}
 
-	info->flags = FBINFO_FLAG_DEFAULT |
-			(par->ypan ? FBINFO_HWACCEL_YPAN : 0);
+	info->flags = (par->ypan ? FBINFO_HWACCEL_YPAN : 0);
 
 	if (!par->ypan)
 		uvesafb_ops.fb_pan_display = NULL;
@@ -1549,7 +1543,7 @@ static ssize_t uvesafb_show_vbe_ver(struct device *dev,
 	struct fb_info *info = dev_get_drvdata(dev);
 	struct uvesafb_par *par = info->par;
 
-	return snprintf(buf, PAGE_SIZE, "%.4x\n", par->vbe_ib.vbe_version);
+	return sysfs_emit(buf, "%.4x\n", par->vbe_ib.vbe_version);
 }
 
 static DEVICE_ATTR(vbe_version, S_IRUGO, uvesafb_show_vbe_ver, NULL);
@@ -1700,14 +1694,14 @@ static int uvesafb_probe(struct platform_device *dev)
 	i = uvesafb_vbe_init_mode(info);
 	if (i < 0) {
 		err = -EINVAL;
-		goto out;
+		goto out_mode;
 	} else {
 		mode = &par->vbe_modes[i];
 	}
 
 	if (fb_alloc_cmap(&info->cmap, 256, 0) < 0) {
 		err = -ENXIO;
-		goto out;
+		goto out_mode;
 	}
 
 	uvesafb_init_info(info, mode);
@@ -1774,7 +1768,7 @@ out:
 	return err;
 }
 
-static int uvesafb_remove(struct platform_device *dev)
+static void uvesafb_remove(struct platform_device *dev)
 {
 	struct fb_info *info = platform_get_drvdata(dev);
 	struct uvesafb_par *par = info->par;
@@ -1793,8 +1787,6 @@ static int uvesafb_remove(struct platform_device *dev)
 	kfree(par->vbe_state_saved);
 
 	framebuffer_release(info);
-
-	return 0;
 }
 
 static struct platform_driver uvesafb_driver = {
@@ -1872,7 +1864,7 @@ static ssize_t v86d_show(struct device_driver *dev, char *buf)
 static ssize_t v86d_store(struct device_driver *dev, const char *buf,
 		size_t count)
 {
-	strncpy(v86d_path, buf, PATH_MAX - 1);
+	strscpy_pad(v86d_path, buf);
 	return count;
 }
 static DRIVER_ATTR_RW(v86d);
@@ -1933,10 +1925,10 @@ static void uvesafb_exit(void)
 		}
 	}
 
-	cn_del_callback(&uvesafb_cn_id);
 	driver_remove_file(&uvesafb_driver.driver, &driver_attr_v86d);
 	platform_device_unregister(uvesafb_device);
 	platform_driver_unregister(&uvesafb_driver);
+	cn_del_callback(&uvesafb_cn_id);
 }
 
 module_exit(uvesafb_exit);

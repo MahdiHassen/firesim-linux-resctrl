@@ -271,9 +271,9 @@ static int max77693_pmic_probe(struct platform_device *pdev)
 }
 
 static const struct platform_device_id max77693_pmic_id[] = {
-	{ "max77693-pmic", TYPE_MAX77693 },
-	{ "max77843-regulator", TYPE_MAX77843 },
-	{},
+	{ .name = "max77693-pmic", .driver_data = TYPE_MAX77693 },
+	{ .name = "max77843-regulator", .driver_data = TYPE_MAX77843 },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(platform, max77693_pmic_id);
@@ -281,6 +281,7 @@ MODULE_DEVICE_TABLE(platform, max77693_pmic_id);
 static struct platform_driver max77693_pmic_driver = {
 	.driver = {
 		   .name = "max77693-pmic",
+		   .probe_type = PROBE_PREFER_ASYNCHRONOUS,
 		   },
 	.probe = max77693_pmic_probe,
 	.id_table = max77693_pmic_id,

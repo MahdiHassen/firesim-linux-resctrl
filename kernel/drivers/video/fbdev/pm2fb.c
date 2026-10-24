@@ -1492,6 +1492,7 @@ static int pm2fb_cursor(struct fb_info *info, struct fb_cursor *cursor)
 
 static const struct fb_ops pm2fb_ops = {
 	.owner		= THIS_MODULE,
+	__FB_DEFAULT_IOMEM_OPS_RDWR,
 	.fb_check_var	= pm2fb_check_var,
 	.fb_set_par	= pm2fb_set_par,
 	.fb_setcolreg	= pm2fb_setcolreg,
@@ -1502,6 +1503,7 @@ static const struct fb_ops pm2fb_ops = {
 	.fb_imageblit	= pm2fb_imageblit,
 	.fb_sync	= pm2fb_sync,
 	.fb_cursor	= pm2fb_cursor,
+	__FB_DEFAULT_IOMEM_OPS_MMAP,
 };
 
 /*
@@ -1657,8 +1659,7 @@ static int pm2fb_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	info->fbops		= &pm2fb_ops;
 	info->fix		= pm2fb_fix;
 	info->pseudo_palette	= default_par->palette;
-	info->flags		= FBINFO_DEFAULT |
-				  FBINFO_HWACCEL_YPAN |
+	info->flags		= FBINFO_HWACCEL_YPAN |
 				  FBINFO_HWACCEL_COPYAREA |
 				  FBINFO_HWACCEL_IMAGEBLIT |
 				  FBINFO_HWACCEL_FILLRECT;
@@ -1710,6 +1711,7 @@ static int pm2fb_probe(struct pci_dev *pdev, const struct pci_device_id *id)
  err_exit_both:
 	kfree(info->pixmap.addr);
  err_exit_pixmap:
+	arch_phys_wc_del(default_par->wc_cookie);
 	iounmap(info->screen_base);
 	release_mem_region(pm2fb_fix.smem_start, pm2fb_fix.smem_len);
  err_exit_mmio:
@@ -1747,13 +1749,10 @@ static void pm2fb_remove(struct pci_dev *pdev)
 }
 
 static const struct pci_device_id pm2fb_id_table[] = {
-	{ PCI_VENDOR_ID_TI, PCI_DEVICE_ID_TI_TVP4020,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
-	{ PCI_VENDOR_ID_3DLABS, PCI_DEVICE_ID_3DLABS_PERMEDIA2,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
-	{ PCI_VENDOR_ID_3DLABS, PCI_DEVICE_ID_3DLABS_PERMEDIA2V,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
-	{ 0, }
+	{ PCI_VDEVICE(TI, PCI_DEVICE_ID_TI_TVP4020) },
+	{ PCI_VDEVICE(3DLABS, PCI_DEVICE_ID_3DLABS_PERMEDIA2) },
+	{ PCI_VDEVICE(3DLABS, PCI_DEVICE_ID_3DLABS_PERMEDIA2V) },
+	{ }
 };
 
 static struct pci_driver pm2fb_driver = {

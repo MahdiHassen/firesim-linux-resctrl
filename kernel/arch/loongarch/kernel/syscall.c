@@ -9,19 +9,25 @@
 #include <linux/entry-common.h>
 #include <linux/errno.h>
 #include <linux/linkage.h>
+#include <linux/nospec.h>
+#include <linux/objtool.h>
+#include <linux/randomize_kstack.h>
 #include <linux/syscalls.h>
 #include <linux/unistd.h>
 
 #include <asm/asm.h>
+#include <asm/exception.h>
+#include <asm/loongarch.h>
 #include <asm/signal.h>
 #include <asm/switch_to.h>
 #include <asm-generic/syscalls.h>
 
 #undef __SYSCALL
 #define __SYSCALL(nr, call)	[nr] = (call),
+#define __SYSCALL_WITH_COMPAT(nr, native, compat) __SYSCALL(nr, native)
 
 SYSCALL_DEFINE6(mmap, unsigned long, addr, unsigned long, len, unsigned long,
-		prot, unsigned long, flags, unsigned long, fd, off_t, offset)
+		prot, unsigned long, flags, unsigned long, fd, unsigned long, offset)
 {
 	if (offset & ~PAGE_MASK)
 		return -EINVAL;
@@ -29,15 +35,28 @@ SYSCALL_DEFINE6(mmap, unsigned long, addr, unsigned long, len, unsigned long,
 	return ksys_mmap_pgoff(addr, len, prot, flags, fd, offset >> PAGE_SHIFT);
 }
 
+SYSCALL_DEFINE6(mmap2, unsigned long, addr, unsigned long, len, unsigned long,
+		 prot, unsigned long, flags, unsigned long, fd, unsigned long, offset)
+{
+	if (offset & (~PAGE_MASK >> 12))
+		return -EINVAL;
+
+	return ksys_mmap_pgoff(addr, len, prot, flags, fd, offset >> (PAGE_SHIFT - 12));
+}
+
 void *sys_call_table[__NR_syscalls] = {
 	[0 ... __NR_syscalls - 1] = sys_ni_syscall,
-#include <asm/unistd.h>
+#ifdef CONFIG_32BIT
+#include <asm/syscall_table_32.h>
+#else
+#include <asm/syscall_table_64.h>
+#endif
 };
 
 typedef long (*sys_call_fn)(unsigned long, unsigned long,
 	unsigned long, unsigned long, unsigned long, unsigned long);
 
-void noinstr do_syscall(struct pt_regs *regs)
+void noinstr __no_stack_protector do_syscall(struct pt_regs *regs)
 {
 	unsigned long nr;
 	sys_call_fn syscall_fn;
@@ -53,8 +72,10 @@ void noinstr do_syscall(struct pt_regs *regs)
 
 	nr = syscall_enter_from_user_mode(regs, nr);
 
+	add_random_kstack_offset();
+
 	if (nr < NR_syscalls) {
-		syscall_fn = sys_call_table[nr];
+		syscall_fn = sys_call_table[array_index_nospec(nr, NR_syscalls)];
 		regs->regs[4] = syscall_fn(regs->orig_a0, regs->regs[5], regs->regs[6],
 					   regs->regs[7], regs->regs[8], regs->regs[9]);
 	}

@@ -8,7 +8,6 @@
 
 #include <linux/gpio/regmap.h>
 #include <linux/mfd/syscon.h>
-#include <linux/mod_devicetable.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
 
@@ -67,7 +66,6 @@ int bcm63xx_pinctrl_probe(struct platform_device *pdev,
 {
 	struct device *dev = &pdev->dev;
 	struct bcm63xx_pinctrl *pc;
-	struct device_node *node;
 	int err;
 
 	pc = devm_kzalloc(dev, sizeof(*pc), GFP_KERNEL);
@@ -94,12 +92,11 @@ int bcm63xx_pinctrl_probe(struct platform_device *pdev,
 	if (IS_ERR(pc->pctl_dev))
 		return PTR_ERR(pc->pctl_dev);
 
-	for_each_child_of_node(dev->parent->of_node, node) {
+	for_each_child_of_node_scoped(dev->parent->of_node, node) {
 		if (of_match_node(bcm63xx_gpio_of_match, node)) {
 			err = bcm63xx_gpio_probe(dev, node, soc, pc);
 			if (err) {
 				dev_err(dev, "could not add GPIO chip\n");
-				of_node_put(node);
 				return err;
 			}
 		}

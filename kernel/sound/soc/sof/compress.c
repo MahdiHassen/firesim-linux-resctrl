@@ -10,6 +10,7 @@
 #include "sof-audio.h"
 #include "sof-priv.h"
 #include "sof-utils.h"
+#include "ops.h"
 
 static void sof_set_transferred_bytes(struct sof_compr_stream *sstream,
 				      u64 host_pos, u64 buffer_size)
@@ -100,7 +101,7 @@ static int sof_compr_open(struct snd_soc_component *component,
 	struct snd_sof_pcm *spcm;
 	int dir;
 
-	sstream = kzalloc(sizeof(*sstream), GFP_KERNEL);
+	sstream = kzalloc_obj(*sstream);
 	if (!sstream)
 		return -ENOMEM;
 
@@ -134,7 +135,6 @@ static int sof_compr_free(struct snd_soc_component *component,
 	struct sof_compr_stream *sstream = cstream->runtime->private_data;
 	struct snd_soc_pcm_runtime *rtd = cstream->private_data;
 	struct sof_ipc_stream stream;
-	struct sof_ipc_reply reply;
 	struct snd_sof_pcm *spcm;
 	int ret = 0;
 
@@ -147,8 +147,7 @@ static int sof_compr_free(struct snd_soc_component *component,
 	stream.comp_id = spcm->stream[cstream->direction].comp_id;
 
 	if (spcm->prepared[cstream->direction]) {
-		ret = sof_ipc_tx_message(sdev->ipc, &stream, sizeof(stream),
-					 &reply, sizeof(reply));
+		ret = sof_ipc_tx_message_no_reply(sdev->ipc, &stream, sizeof(stream));
 		if (!ret)
 			spcm->prepared[cstream->direction] = false;
 	}
@@ -196,6 +195,14 @@ static int sof_compr_set_params(struct snd_soc_component *component,
 	if (sizeof(*pcm) + ext_data_size > sdev->ipc->max_payload_size)
 		return -EINVAL;
 
+	/*
+	 * Make sure that the DSP is booted up, which might not be the
+	 * case if the on-demand DSP boot is used
+	 */
+	ret = snd_sof_boot_dsp_firmware(sdev);
+	if (ret)
+		return ret;
+
 	pcm = kzalloc(sizeof(*pcm) + ext_data_size, GFP_KERNEL);
 	if (!pcm)
 		return -ENOMEM;
@@ -237,9 +244,18 @@ static int sof_compr_set_params(struct snd_soc_component *component,
 		goto out;
 	}
 
+	ret = snd_sof_set_stream_data_offset(sdev, &spcm->stream[cstream->direction],
+					     ipc_params_reply.posn_offset);
+	if (ret < 0) {
+		dev_err(component->dev, "Invalid stream data offset for Compr %u\n",
+			le32_to_cpu(spcm->pcm.pcm_id));
+		goto out;
+	}
+
 	sstream->sampling_rate = params->codec.sample_rate;
 	sstream->channels = params->codec.ch_out;
 	sstream->sample_container_bytes = pcm->params.sample_container_bytes;
+	sstream->codec_params = params->codec;
 
 	spcm->prepared[cstream->direction] = true;
 
@@ -252,9 +268,10 @@ out:
 static int sof_compr_get_params(struct snd_soc_component *component,
 				struct snd_compr_stream *cstream, struct snd_codec *params)
 {
-	/* TODO: we don't query the supported codecs for now, if the
-	 * application asks for an unsupported codec the set_params() will fail.
-	 */
+	struct sof_compr_stream *sstream = cstream->runtime->private_data;
+
+	*params = sstream->codec_params;
+
 	return 0;
 }
 
@@ -264,7 +281,6 @@ static int sof_compr_trigger(struct snd_soc_component *component,
 	struct snd_sof_dev *sdev = snd_soc_component_get_drvdata(component);
 	struct snd_soc_pcm_runtime *rtd = cstream->private_data;
 	struct sof_ipc_stream stream;
-	struct sof_ipc_reply reply;
 	struct snd_sof_pcm *spcm;
 
 	spcm = snd_sof_find_spcm_dai(component, rtd);
@@ -293,8 +309,7 @@ static int sof_compr_trigger(struct snd_soc_component *component,
 		break;
 	}
 
-	return sof_ipc_tx_message(sdev->ipc, &stream, sizeof(stream),
-				  &reply, sizeof(reply));
+	return sof_ipc_tx_message_no_reply(sdev->ipc, &stream, sizeof(stream));
 }
 
 static int sof_compr_copy_playback(struct snd_compr_runtime *rtd,
@@ -356,7 +371,7 @@ static int sof_compr_copy(struct snd_soc_component *component,
 
 static int sof_compr_pointer(struct snd_soc_component *component,
 			     struct snd_compr_stream *cstream,
-			     struct snd_compr_tstamp *tstamp)
+			     struct snd_compr_tstamp64 *tstamp)
 {
 	struct snd_sof_pcm *spcm;
 	struct snd_soc_pcm_runtime *rtd = cstream->private_data;
@@ -365,6 +380,9 @@ static int sof_compr_pointer(struct snd_soc_component *component,
 	spcm = snd_sof_find_spcm_dai(component, rtd);
 	if (!spcm)
 		return -EINVAL;
+
+	if (!sstream->channels || !sstream->sample_container_bytes)
+		return -EBUSY;
 
 	tstamp->sampling_rate = sstream->sampling_rate;
 	tstamp->copied_total = sstream->copied_total;

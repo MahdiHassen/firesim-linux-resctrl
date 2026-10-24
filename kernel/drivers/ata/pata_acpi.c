@@ -205,7 +205,7 @@ static int pacpi_port_start(struct ata_port *ap)
 	return ata_bmdma_port_start(ap);
 }
 
-static struct scsi_host_template pacpi_sht = {
+static const struct scsi_host_template pacpi_sht = {
 	ATA_BMDMA_SHT(DRV_NAME),
 };
 
@@ -216,7 +216,7 @@ static struct ata_port_operations pacpi_ops = {
 	.mode_filter		= pacpi_mode_filter,
 	.set_piomode		= pacpi_set_piomode,
 	.set_dmamode		= pacpi_set_dmamode,
-	.prereset		= pacpi_pre_reset,
+	.reset.prereset		= pacpi_pre_reset,
 	.port_start		= pacpi_port_start,
 };
 
@@ -257,7 +257,10 @@ static int pacpi_init_one (struct pci_dev *pdev, const struct pci_device_id *id)
 }
 
 static const struct pci_device_id pacpi_pci_tbl[] = {
-	{ PCI_ANY_ID,		PCI_ANY_ID,			   PCI_ANY_ID, PCI_ANY_ID, PCI_CLASS_STORAGE_IDE << 8, 0xFFFFFF00UL, 1},
+	{
+		PCI_DEVICE_CLASS(PCI_CLASS_STORAGE_IDE << 8, 0xFFFFFF00UL),
+		.driver_data = 1, /* is this used at all? */
+	},
 	{ }	/* terminate list */
 };
 

@@ -11,7 +11,8 @@
 #include <linux/clk.h>
 #include <linux/clk-provider.h>
 #include <linux/module.h>
-#include <linux/of_platform.h>
+#include <linux/of.h>
+#include <linux/platform_device.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 
@@ -758,12 +759,11 @@ static int zynqmp_clk_setup(struct device_node *np)
 	if (ret)
 		return ret;
 
-	zynqmp_data = kzalloc(struct_size(zynqmp_data, hws, clock_max_idx),
-			      GFP_KERNEL);
+	zynqmp_data = kzalloc_flex(*zynqmp_data, hws, clock_max_idx);
 	if (!zynqmp_data)
 		return -ENOMEM;
 
-	clock = kcalloc(clock_max_idx, sizeof(*clock), GFP_KERNEL);
+	clock = kzalloc_objs(*clock, clock_max_idx);
 	if (!clock) {
 		kfree(zynqmp_data);
 		return -ENOMEM;

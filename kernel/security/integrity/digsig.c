@@ -34,9 +34,9 @@ static const char * const keyring_name[INTEGRITY_KEYRING_MAX] = {
 };
 
 #ifdef CONFIG_IMA_KEYRINGS_PERMIT_SIGNED_BY_BUILTIN_OR_SECONDARY
-#define restrict_link_to_ima restrict_link_by_builtin_and_secondary_trusted
+#define restrict_link_to_ima restrict_link_by_digsig_builtin_and_secondary
 #else
-#define restrict_link_to_ima restrict_link_by_builtin_trusted
+#define restrict_link_to_ima restrict_link_by_digsig_builtin
 #endif
 
 static struct key *integrity_keyring_from_id(const unsigned int id)
@@ -59,7 +59,7 @@ static struct key *integrity_keyring_from_id(const unsigned int id)
 }
 
 int integrity_digsig_verify(const unsigned int id, const char *sig, int siglen,
-			    const char *digest, int digestlen)
+			    const char *digest, int digestlen, u8 algo)
 {
 	struct key *keyring;
 
@@ -76,9 +76,11 @@ int integrity_digsig_verify(const unsigned int id, const char *sig, int siglen,
 		return digsig_verify(keyring, sig + 1, siglen - 1, digest,
 				     digestlen);
 	case 2: /* regular file data hash based signature */
-	case 3: /* struct ima_file_id data based signature */
 		return asymmetric_verify(keyring, sig, siglen, digest,
-					 digestlen);
+					    digestlen);
+	case 3: /* struct ima_file_id data based signature */
+		return asymmetric_verify_v3(keyring, sig, siglen, digest,
+					    digestlen, algo);
 	}
 
 	return -EOPNOTSUPP;
@@ -113,7 +115,7 @@ static int __init __integrity_init_keyring(const unsigned int id,
 	} else {
 		if (id == INTEGRITY_KEYRING_PLATFORM)
 			set_platform_trusted_keys(keyring[id]);
-		if (id == INTEGRITY_KEYRING_MACHINE && trust_moklist())
+		if (id == INTEGRITY_KEYRING_MACHINE && imputed_trust_enabled())
 			set_machine_trusted_keys(keyring[id]);
 		if (id == INTEGRITY_KEYRING_IMA)
 			load_module_cert(keyring[id]);
@@ -132,7 +134,8 @@ int __init integrity_init_keyring(const unsigned int id)
 		| KEY_USR_READ | KEY_USR_SEARCH;
 
 	if (id == INTEGRITY_KEYRING_PLATFORM ||
-	    id == INTEGRITY_KEYRING_MACHINE) {
+	    (id == INTEGRITY_KEYRING_MACHINE &&
+	    !IS_ENABLED(CONFIG_INTEGRITY_CA_MACHINE_KEYRING))) {
 		restriction = NULL;
 		goto out;
 	}
@@ -140,11 +143,14 @@ int __init integrity_init_keyring(const unsigned int id)
 	if (!IS_ENABLED(CONFIG_INTEGRITY_TRUSTED_KEYRING))
 		return 0;
 
-	restriction = kzalloc(sizeof(struct key_restriction), GFP_KERNEL);
+	restriction = kzalloc_obj(struct key_restriction);
 	if (!restriction)
 		return -ENOMEM;
 
-	restriction->check = restrict_link_to_ima;
+	if (id == INTEGRITY_KEYRING_MACHINE)
+		restriction->check = restrict_link_by_ca;
+	else
+		restriction->check = restrict_link_to_ima;
 
 	/*
 	 * MOK keys can only be added through a read-only runtime services
@@ -175,7 +181,8 @@ static int __init integrity_add_key(const unsigned int id, const void *data,
 				   KEY_ALLOC_NOT_IN_QUOTA);
 	if (IS_ERR(key)) {
 		rc = PTR_ERR(key);
-		pr_err("Problem loading X.509 certificate %d\n", rc);
+		if (id != INTEGRITY_KEYRING_MACHINE)
+			pr_err("Problem loading X.509 certificate %d\n", rc);
 	} else {
 		pr_notice("Loaded X.509 cert '%s'\n",
 			  key_ref_to_ptr(key)->description);

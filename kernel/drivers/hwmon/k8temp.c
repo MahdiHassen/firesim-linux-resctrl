@@ -15,6 +15,7 @@
 #include <linux/err.h>
 #include <linux/mutex.h>
 #include <asm/processor.h>
+#include <asm/cpuid/api.h>
 
 #define TEMP_FROM_REG(val)	(((((val) >> 16) & 0xff) - 49) * 1000)
 #define REG_TEMP	0xe4
@@ -118,7 +119,7 @@ static const struct hwmon_ops k8temp_ops = {
 	.read = k8temp_read,
 };
 
-static const struct hwmon_channel_info *k8temp_info[] = {
+static const struct hwmon_channel_info * const k8temp_info[] = {
 	HWMON_CHANNEL_INFO(temp,
 		HWMON_T_INPUT, HWMON_T_INPUT, HWMON_T_INPUT, HWMON_T_INPUT),
 	NULL

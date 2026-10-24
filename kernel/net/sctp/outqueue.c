@@ -650,6 +650,7 @@ static int __sctp_outq_flush_rtx(struct sctp_outq *q, struct sctp_packet *pkt,
 		if (chunk->tsn_gap_acked) {
 			list_move_tail(&chunk->transmitted_list,
 				       &transport->transmitted);
+			chunk->transport = transport;
 			continue;
 		}
 
@@ -1231,7 +1232,7 @@ static void sctp_sack_update_unack_data(struct sctp_association *assoc,
 
 	unack_data = assoc->next_tsn - assoc->ctsn_ack_point - 1;
 
-	frags = sack->variable;
+	frags = (union sctp_sack_variable *)(sack + 1);
 	for (i = 0; i < ntohs(sack->num_gap_ack_blocks); i++) {
 		unack_data -= ((ntohs(frags[i].gab.end) -
 				ntohs(frags[i].gab.start) + 1));
@@ -1252,7 +1253,6 @@ int sctp_outq_sack(struct sctp_outq *q, struct sctp_chunk *chunk)
 	struct sctp_transport *transport;
 	struct sctp_chunk *tchunk = NULL;
 	struct list_head *lchunk, *transport_list, *temp;
-	union sctp_sack_variable *frags = sack->variable;
 	__u32 sack_ctsn, ctsn, tsn;
 	__u32 highest_tsn, highest_new_tsn;
 	__u32 sack_a_rwnd;
@@ -1313,8 +1313,12 @@ int sctp_outq_sack(struct sctp_outq *q, struct sctp_chunk *chunk)
 
 	/* Get the highest TSN in the sack. */
 	highest_tsn = sack_ctsn;
-	if (gap_ack_blocks)
+	if (gap_ack_blocks) {
+		union sctp_sack_variable *frags =
+			(union sctp_sack_variable *)(sack + 1);
+
 		highest_tsn += ntohs(frags[gap_ack_blocks - 1].gab.end);
+	}
 
 	if (TSN_lt(asoc->highest_sacked, highest_tsn))
 		asoc->highest_sacked = highest_tsn;
@@ -1627,8 +1631,7 @@ static void sctp_check_transmitted(struct sctp_outq *q,
 			 * as the receiver acknowledged any data.
 			 */
 			if (asoc->state == SCTP_STATE_SHUTDOWN_PENDING &&
-			    del_timer(&asoc->timers
-				[SCTP_EVENT_TIMEOUT_T5_SHUTDOWN_GUARD]))
+			    timer_delete(&asoc->timers[SCTP_EVENT_TIMEOUT_T5_SHUTDOWN_GUARD]))
 					sctp_association_put(asoc);
 
 			/* Mark the destination transport address as
@@ -1685,7 +1688,7 @@ static void sctp_check_transmitted(struct sctp_outq *q,
 		 * address.
 		 */
 		if (!transport->flight_size) {
-			if (del_timer(&transport->T3_rtx_timer))
+			if (timer_delete(&transport->T3_rtx_timer))
 				sctp_transport_put(transport);
 		} else if (restart_timer) {
 			if (!mod_timer(&transport->T3_rtx_timer,
@@ -1789,7 +1792,7 @@ static int sctp_acked(struct sctp_sackhdr *sack, __u32 tsn)
 	 *  Block are assumed to have been received correctly.
 	 */
 
-	frags = sack->variable;
+	frags = (union sctp_sack_variable *)(sack + 1);
 	blocks = ntohs(sack->num_gap_ack_blocks);
 	tsn_offset = tsn - ctsn;
 	for (i = 0; i < blocks; ++i) {

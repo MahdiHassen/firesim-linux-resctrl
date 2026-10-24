@@ -6,7 +6,6 @@
 
 #include <linux/if_arp.h>
 #include <linux/mhi.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/netdevice.h>
 #include <linux/skbuff.h>
@@ -403,7 +402,6 @@ static struct mhi_driver mhi_net_driver = {
 	.id_table = mhi_net_id_table,
 	.driver = {
 		.name = "mhi_net",
-		.owner = THIS_MODULE,
 	},
 };
 

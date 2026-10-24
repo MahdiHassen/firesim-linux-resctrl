@@ -13,7 +13,6 @@
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/mfd/max77620.h>
 #include <linux/mfd/max77714.h>
 #include <linux/platform_device.h>
@@ -25,7 +24,6 @@ static bool nowayout = WATCHDOG_NOWAYOUT;
 
 /**
  * struct max77620_variant - Data specific to a chip variant
- * @wdt_info:            watchdog descriptor
  * @reg_onoff_cnfg2:     ONOFF_CNFG2 register offset
  * @reg_cnfg_glbl2:      CNFG_GLBL2 register offset
  * @reg_cnfg_glbl3:      CNFG_GLBL3 register offset

@@ -334,6 +334,7 @@ void dml32_CalculateSurfaceSizeInMall(
 		unsigned int NumberOfActiveSurfaces,
 		unsigned int MALLAllocatedForDCN,
 		enum dm_use_mall_for_static_screen_mode UseMALLForStaticScreen[],
+		enum dm_use_mall_for_pstate_change_mode UsesMALLForPStateChange[],
 		bool DCCEnable[],
 		bool ViewportStationary[],
 		unsigned int ViewportXStartY[],
@@ -358,6 +359,8 @@ void dml32_CalculateSurfaceSizeInMall(
 		unsigned int ReadBlockWidthC[],
 		unsigned int ReadBlockHeightY[],
 		unsigned int ReadBlockHeightC[],
+		unsigned int DCCMetaPitchY[],
+		unsigned int DCCMetaPitchC[],
 
 		/* Output */
 		unsigned int    SurfaceSizeInMALL[],
@@ -611,7 +614,7 @@ void dml32_UseMinimumDCFCLK(
 		unsigned int VTotal[],
 		unsigned int VActive[],
 		unsigned int DynamicMetadataTransmittedBytes[],
-		unsigned int DynamicMetadataLinesBeforeActiveRequired[],
+		int DynamicMetadataLinesBeforeActiveRequired[],
 		bool Interlace[],
 		double RequiredDPPCLKPerSurface[][2][DC__NUM_DPP__MAX],
 		double RequiredDISPCLK[][2],
@@ -744,6 +747,7 @@ bool dml32_CalculatePrefetchSchedule(
 		unsigned int SwathHeightC,
 		double TWait,
 		double TPreReq,
+		bool ExtendPrefetchIfPossible,
 		/* Output */
 		double   *DSTXAfterScaler,
 		double   *DSTYAfterScaler,
@@ -1009,7 +1013,7 @@ void dml32_CalculateStutterEfficiency(
 		bool   ProgressiveToInterlaceUnitInOPP,
 		bool   Interlace[],
 		double    MinTTUVBlank[],
-		unsigned int   DPPPerSurface[],
+		unsigned int    DPPPerSurface[],
 		unsigned int      DETBufferSizeY[],
 		unsigned int   BytePerPixelY[],
 		double    BytePerPixelDETY[],
@@ -1042,10 +1046,10 @@ void dml32_CalculateStutterEfficiency(
 		/* Output */
 		double   *StutterEfficiencyNotIncludingVBlank,
 		double   *StutterEfficiency,
-		unsigned int     *NumberOfStutterBurstsPerFrame,
+		int      *NumberOfStutterBurstsPerFrame,
 		double   *Z8StutterEfficiencyNotIncludingVBlank,
 		double   *Z8StutterEfficiency,
-		unsigned int     *Z8NumberOfStutterBurstsPerFrame,
+		int      *Z8NumberOfStutterBurstsPerFrame,
 		double   *StutterPeriod,
 		bool  *DCHUBBUB_ARB_CSTATE_MAX_CAP_MODE);
 
@@ -1093,9 +1097,12 @@ void dml32_CalculatePrefetchBandwithSupport(unsigned int NumberOfActiveSurfaces,
 		double UrgentBurstFactorLumaPre[],
 		double UrgentBurstFactorChromaPre[],
 		double UrgentBurstFactorCursorPre[],
+		double PrefetchBW[],
+		double VRatio[],
+		double MaxVRatioPre,
 
 		/* output */
-		double  *PrefetchBandwidth,
+		double  *MaxPrefetchBandwidth,
 		double  *FractionOfUrgentBandwidth,
 		bool *PrefetchBandwidthSupport);
 
@@ -1157,6 +1164,7 @@ bool dml32_CalculateDETSwathFillLatencyHiding(unsigned int NumberOfActiveSurface
 		double	PixelClock[],
 		double	VRatioY[],
 		double	VRatioC[],
-		enum dm_use_mall_for_pstate_change_mode UsesMALLForPStateChange[DC__NUM_DPP__MAX]);
+		enum dm_use_mall_for_pstate_change_mode UsesMALLForPStateChange[],
+		enum unbounded_requesting_policy UseUnboundedRequesting);
 
 #endif

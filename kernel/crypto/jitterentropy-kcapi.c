@@ -2,7 +2,7 @@
  * Non-physical true random number generator based on timing jitter --
  * Linux Kernel Crypto API specific code
  *
- * Copyright Stephan Mueller <smueller@chronox.de>, 2015
+ * Copyright Stephan Mueller <smueller@chronox.de>, 2015 - 2023
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -37,8 +37,11 @@
  * DAMAGE.
  */
 
+#include <crypto/sha3.h>
+#include <linux/fips.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/mutex.h>
 #include <linux/slab.h>
 #include <linux/time.h>
 #include <crypto/internal/rng.h>
@@ -49,6 +52,16 @@
  * Helper function
  ***************************************************************************/
 
+void *jent_kvzalloc(unsigned int len)
+{
+	return kvzalloc(len, GFP_KERNEL);
+}
+
+void jent_kvzfree(void *ptr, unsigned int len)
+{
+	kvfree_sensitive(ptr, len);
+}
+
 void *jent_zalloc(unsigned int len)
 {
 	return kzalloc(len, GFP_KERNEL);
@@ -57,16 +70,6 @@ void *jent_zalloc(unsigned int len)
 void jent_zfree(void *ptr)
 {
 	kfree_sensitive(ptr);
-}
-
-void jent_panic(char *s)
-{
-	panic("%s", s);
-}
-
-void jent_memcpy(void *dest, const void *src, unsigned int n)
-{
-	memcpy(dest, src, n);
 }
 
 /*
@@ -93,6 +96,76 @@ void jent_get_nstime(__u64 *out)
 		tmp = ktime_get_ns();
 
 	*out = tmp;
+	jent_raw_hires_entropy_store(tmp);
+}
+
+void jent_hash_time(struct sha3_ctx *hash_state, __u64 time, u8 *addtl,
+		    unsigned int addtl_len, __u64 hash_loop_cnt,
+		    unsigned int stuck)
+{
+	struct sha3_ctx tmp_state; /* zeroized by sha3_final() */
+	u8 intermediary[SHA3_256_DIGEST_SIZE];
+	__u64 j = 0;
+
+	kmsan_unpoison_memory(intermediary, sizeof(intermediary));
+
+	/*
+	 * This loop fills a buffer which is injected into the entropy pool.
+	 * The main reason for this loop is to execute something over which we
+	 * can perform a timing measurement. The injection of the resulting
+	 * data into the pool is performed to ensure the result is used and
+	 * the compiler cannot optimize the loop away in case the result is not
+	 * used at all. Yet that data is considered "additional information"
+	 * considering the terminology from SP800-90A without any entropy.
+	 *
+	 * Note, it does not matter which or how much data you inject, we are
+	 * interested in one Keccack1600 compression operation performed with
+	 * the sha3_final.
+	 */
+	for (j = 0; j < hash_loop_cnt; j++) {
+		sha3_256_init(&tmp_state);
+		sha3_update(&tmp_state, intermediary, sizeof(intermediary));
+		sha3_update(&tmp_state, addtl, addtl_len);
+		sha3_final(&tmp_state, intermediary);
+	}
+
+	/*
+	 * Inject the data from the previous loop into the pool. This data is
+	 * not considered to contain any entropy, but it stirs the pool a bit.
+	 */
+	sha3_update(hash_state, intermediary, sizeof(intermediary));
+
+	/*
+	 * Insert the time stamp into the hash context representing the pool.
+	 *
+	 * If the time stamp is stuck, do not finally insert the value into the
+	 * entropy pool. Although this operation should not do any harm even
+	 * when the time stamp has no entropy, SP800-90B requires that any
+	 * conditioning operation to have an identical amount of input data
+	 * according to section 3.1.5.
+	 */
+	if (stuck) {
+		time = 0;
+	}
+
+	sha3_update(hash_state, (u8 *)&time, sizeof(__u64));
+	memzero_explicit(intermediary, sizeof(intermediary));
+}
+
+void jent_read_random_block(struct sha3_ctx *hash_state, char *dst,
+			    unsigned int dst_len)
+{
+	u8 jent_block[SHA3_256_DIGEST_SIZE];
+
+	/* Obtain data from entropy pool and re-initialize it */
+	sha3_final(hash_state, jent_block);
+	sha3_256_init(hash_state);
+	sha3_update(hash_state, jent_block, sizeof(jent_block));
+
+	if (dst_len)
+		memcpy(dst, jent_block, dst_len);
+
+	memzero_explicit(jent_block, sizeof(jent_block));
 }
 
 /***************************************************************************
@@ -100,33 +173,47 @@ void jent_get_nstime(__u64 *out)
  ***************************************************************************/
 
 struct jitterentropy {
-	spinlock_t jent_lock;
+	struct mutex jent_lock;
 	struct rand_data *entropy_collector;
-	unsigned int reset_cnt;
+	struct sha3_ctx hash_state;
 };
+
+static void jent_kcapi_cleanup(struct crypto_tfm *tfm)
+{
+	struct jitterentropy *rng = crypto_tfm_ctx(tfm);
+
+	mutex_lock(&rng->jent_lock);
+
+	memzero_explicit(&rng->hash_state, sizeof(rng->hash_state));
+
+	if (rng->entropy_collector)
+		jent_entropy_collector_free(rng->entropy_collector);
+	rng->entropy_collector = NULL;
+	mutex_unlock(&rng->jent_lock);
+}
 
 static int jent_kcapi_init(struct crypto_tfm *tfm)
 {
 	struct jitterentropy *rng = crypto_tfm_ctx(tfm);
 	int ret = 0;
 
-	rng->entropy_collector = jent_entropy_collector_alloc(1, 0);
-	if (!rng->entropy_collector)
+	mutex_init(&rng->jent_lock);
+
+	/* Use SHA3-256 as conditioner */
+	sha3_256_init(&rng->hash_state);
+
+	rng->entropy_collector = jent_entropy_collector_alloc(
+		CONFIG_CRYPTO_JITTERENTROPY_OSR, 0, &rng->hash_state);
+	if (!rng->entropy_collector) {
 		ret = -ENOMEM;
+		goto err;
+	}
 
-	spin_lock_init(&rng->jent_lock);
+	return 0;
+
+err:
+	jent_kcapi_cleanup(tfm);
 	return ret;
-}
-
-static void jent_kcapi_cleanup(struct crypto_tfm *tfm)
-{
-	struct jitterentropy *rng = crypto_tfm_ctx(tfm);
-
-	spin_lock(&rng->jent_lock);
-	if (rng->entropy_collector)
-		jent_entropy_collector_free(rng->entropy_collector);
-	rng->entropy_collector = NULL;
-	spin_unlock(&rng->jent_lock);
 }
 
 static int jent_kcapi_random(struct crypto_rng *tfm,
@@ -136,35 +223,33 @@ static int jent_kcapi_random(struct crypto_rng *tfm,
 	struct jitterentropy *rng = crypto_rng_ctx(tfm);
 	int ret = 0;
 
-	spin_lock(&rng->jent_lock);
-
-	/* Return a permanent error in case we had too many resets in a row. */
-	if (rng->reset_cnt > (1<<10)) {
-		ret = -EFAULT;
-		goto out;
-	}
+	mutex_lock(&rng->jent_lock);
 
 	ret = jent_read_entropy(rng->entropy_collector, rdata, dlen);
 
-	/* Reset RNG in case of health failures */
-	if (ret < -1) {
-		pr_warn_ratelimited("Reset Jitter RNG due to health test failure: %s failure\n",
-				    (ret == -2) ? "Repetition Count Test" :
-						  "Adaptive Proportion Test");
+	if (ret == -3) {
+		/* Handle permanent health test error */
+		/*
+		 * If the kernel was booted with fips=1, it implies that
+		 * the entire kernel acts as a FIPS 140 module. In this case
+		 * an SP800-90B permanent health test error is treated as
+		 * a FIPS module error.
+		 */
+		if (fips_enabled)
+			panic("Jitter RNG permanent health test failure\n");
 
-		rng->reset_cnt++;
-
+		pr_err("Jitter RNG permanent health test failure\n");
+		ret = -EFAULT;
+	} else if (ret == -2) {
+		/* Handle intermittent health test error */
+		pr_warn_ratelimited("Reset Jitter RNG due to intermittent health test failure\n");
 		ret = -EAGAIN;
-	} else {
-		rng->reset_cnt = 0;
-
-		/* Convert the Jitter RNG error into a usable error code */
-		if (ret == -1)
-			ret = -EINVAL;
+	} else if (ret == -1) {
+		/* Handle other errors */
+		ret = -EINVAL;
 	}
 
-out:
-	spin_unlock(&rng->jent_lock);
+	mutex_unlock(&rng->jent_lock);
 
 	return ret;
 }
@@ -187,16 +272,27 @@ static struct rng_alg jent_alg = {
 		.cra_module             = THIS_MODULE,
 		.cra_init               = jent_kcapi_init,
 		.cra_exit               = jent_kcapi_cleanup,
-
 	}
 };
 
 static int __init jent_mod_init(void)
 {
+	struct sha3_ctx hash_state;
 	int ret = 0;
 
-	ret = jent_entropy_init();
+	jent_testing_init();
+
+	sha3_256_init(&hash_state);
+
+	ret = jent_entropy_init(CONFIG_CRYPTO_JITTERENTROPY_OSR, 0, &hash_state,
+				NULL);
+	memzero_explicit(&hash_state, sizeof(hash_state));
 	if (ret) {
+		/* Handle permanent health test error */
+		if (fips_enabled)
+			panic("jitterentropy: Initialization failed with host not compliant with requirements: %d\n", ret);
+
+		jent_testing_exit();
 		pr_info("jitterentropy: Initialization failed with host not compliant with requirements: %d\n", ret);
 		return -EFAULT;
 	}
@@ -205,6 +301,7 @@ static int __init jent_mod_init(void)
 
 static void __exit jent_mod_exit(void)
 {
+	jent_testing_exit();
 	crypto_unregister_rng(&jent_alg);
 }
 

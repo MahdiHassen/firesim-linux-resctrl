@@ -26,7 +26,7 @@
 #endif
 
 	.section	.empty_zero_page, "aw"
-ENTRY(empty_zero_page)
+ENTRY(boot_params_page)
 	.long	1		/* MOUNT_ROOT_RDONLY */
 	.long	0		/* RAMDISK_FLAGS */
 	.long	0x0200		/* ORIG_ROOT_DEV */
@@ -39,7 +39,7 @@ ENTRY(empty_zero_page)
 	.long	0x53453f00 + 29	/* "SE?" = 29 bit */
 #endif
 1:
-	.skip	PAGE_SIZE - empty_zero_page - 1b
+	.skip	PAGE_SIZE - boot_params_page - 1b
 
 	__HEAD
 
@@ -64,7 +64,7 @@ ENTRY(_stext)
 	ldc	r0, r6_bank
 #endif
 
-#ifdef CONFIG_OF_FLATTREE
+#ifdef CONFIG_OF_EARLY_FLATTREE
 	mov	r4, r12		! Store device tree blob pointer in r12
 #endif
 	
@@ -315,7 +315,7 @@ ENTRY(_stext)
 10:		
 #endif
 
-#ifdef CONFIG_OF_FLATTREE
+#ifdef CONFIG_OF_EARLY_FLATTREE
 	mov.l	8f, r0		! Make flat device tree available early.
 	jsr	@r0
 	 mov	r12, r4
@@ -346,7 +346,7 @@ ENTRY(stack_start)
 5:	.long	start_kernel
 6:	.long	cpu_init
 7:	.long	init_thread_union
-#if defined(CONFIG_OF_FLATTREE)
+#if defined(CONFIG_OF_EARLY_FLATTREE)
 8:	.long	sh_fdt_init
 #endif
 

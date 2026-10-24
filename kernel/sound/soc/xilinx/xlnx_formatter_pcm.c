@@ -281,8 +281,7 @@ static irqreturn_t xlnx_mm2s_irq_handler(int irq, void *arg)
 {
 	u32 val;
 	void __iomem *reg;
-	struct device *dev = arg;
-	struct xlnx_pcm_drv_data *adata = dev_get_drvdata(dev);
+	struct xlnx_pcm_drv_data *adata = arg;
 
 	reg = adata->mmio + XLNX_MM2S_OFFSET + XLNX_AUD_STS;
 	val = readl(reg);
@@ -300,8 +299,7 @@ static irqreturn_t xlnx_s2mm_irq_handler(int irq, void *arg)
 {
 	u32 val;
 	void __iomem *reg;
-	struct device *dev = arg;
-	struct xlnx_pcm_drv_data *adata = dev_get_drvdata(dev);
+	struct xlnx_pcm_drv_data *adata = arg;
 
 	reg = adata->mmio + XLNX_S2MM_OFFSET + XLNX_AUD_STS;
 	val = readl(reg);
@@ -341,7 +339,7 @@ static int xlnx_formatter_pcm_open(struct snd_soc_component *component,
 		 !adata->s2mm_presence)
 		return -ENODEV;
 
-	stream_data = kzalloc(sizeof(*stream_data), GFP_KERNEL);
+	stream_data = kzalloc_obj(*stream_data);
 	if (!stream_data)
 		return -ENOMEM;
 
@@ -582,7 +580,7 @@ static const struct snd_soc_component_driver xlnx_asoc_component = {
 	.hw_params		= xlnx_formatter_pcm_hw_params,
 	.trigger		= xlnx_formatter_pcm_trigger,
 	.pointer		= xlnx_formatter_pcm_pointer,
-	.pcm_construct		= xlnx_formatter_pcm_new,
+	.pcm_new		= xlnx_formatter_pcm_new,
 };
 
 static int xlnx_formatter_pcm_probe(struct platform_device *pdev)
@@ -637,7 +635,7 @@ static int xlnx_formatter_pcm_probe(struct platform_device *pdev)
 		}
 		ret = devm_request_irq(dev, aud_drv_data->mm2s_irq,
 				       xlnx_mm2s_irq_handler, 0,
-				       "xlnx_formatter_pcm_mm2s_irq", dev);
+				       "xlnx_formatter_pcm_mm2s_irq", aud_drv_data);
 		if (ret) {
 			dev_err(dev, "xlnx audio mm2s irq request failed\n");
 			goto clk_err;
@@ -664,7 +662,7 @@ static int xlnx_formatter_pcm_probe(struct platform_device *pdev)
 		ret = devm_request_irq(dev, aud_drv_data->s2mm_irq,
 				       xlnx_s2mm_irq_handler, 0,
 				       "xlnx_formatter_pcm_s2mm_irq",
-				       dev);
+				       aud_drv_data);
 		if (ret) {
 			dev_err(dev, "xlnx audio s2mm irq request failed\n");
 			goto clk_err;
@@ -687,7 +685,7 @@ clk_err:
 	return ret;
 }
 
-static int xlnx_formatter_pcm_remove(struct platform_device *pdev)
+static void xlnx_formatter_pcm_remove(struct platform_device *pdev)
 {
 	int ret = 0;
 	struct xlnx_pcm_drv_data *adata = dev_get_drvdata(&pdev->dev);
@@ -703,7 +701,6 @@ static int xlnx_formatter_pcm_remove(struct platform_device *pdev)
 		dev_err(&pdev->dev, "audio formatter reset failed\n");
 
 	clk_disable_unprepare(adata->axi_clk);
-	return 0;
 }
 
 static const struct of_device_id xlnx_formatter_pcm_of_match[] = {
@@ -714,7 +711,7 @@ MODULE_DEVICE_TABLE(of, xlnx_formatter_pcm_of_match);
 
 static struct platform_driver xlnx_formatter_pcm_driver = {
 	.probe	= xlnx_formatter_pcm_probe,
-	.remove	= xlnx_formatter_pcm_remove,
+	.remove = xlnx_formatter_pcm_remove,
 	.driver	= {
 		.name	= DRV_NAME,
 		.of_match_table	= xlnx_formatter_pcm_of_match,
@@ -722,5 +719,7 @@ static struct platform_driver xlnx_formatter_pcm_driver = {
 };
 
 module_platform_driver(xlnx_formatter_pcm_driver);
+
+MODULE_DESCRIPTION("ASoC driver for Xilinx audio formatter");
 MODULE_AUTHOR("Maruthi Srinivas Bayyavarapu <maruthis@xilinx.com>");
 MODULE_LICENSE("GPL v2");

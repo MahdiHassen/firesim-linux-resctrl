@@ -13,7 +13,6 @@
 #include <linux/vdpa.h>
 #include <uapi/linux/vdpa.h>
 #include <net/genetlink.h>
-#include <linux/mod_devicetable.h>
 #include <linux/virtio_ids.h>
 
 static LIST_HEAD(mdev_head);
@@ -39,6 +38,11 @@ static int vdpa_dev_probe(struct device *d)
 	u32 max_num, min_num = 1;
 	int ret = 0;
 
+	d->dma_mask = &d->coherent_dma_mask;
+	ret = dma_set_mask_and_coherent(d, DMA_BIT_MASK(64));
+	if (ret)
+		return ret;
+
 	max_num = ops->get_vq_num_max(vdev);
 	if (ops->get_vq_num_min)
 		min_num = ops->get_vq_num_min(vdev);
@@ -60,59 +64,22 @@ static void vdpa_dev_remove(struct device *d)
 		drv->remove(vdev);
 }
 
-static int vdpa_dev_match(struct device *dev, struct device_driver *drv)
+static int vdpa_dev_match(struct device *dev, const struct device_driver *drv)
 {
-	struct vdpa_device *vdev = dev_to_vdpa(dev);
+	int ret;
 
 	/* Check override first, and if set, only use the named driver */
-	if (vdev->driver_override)
-		return strcmp(vdev->driver_override, drv->name) == 0;
+	ret = device_match_driver_override(dev, drv);
+	if (ret >= 0)
+		return ret;
 
 	/* Currently devices must be supported by all vDPA bus drivers */
 	return 1;
 }
 
-static ssize_t driver_override_store(struct device *dev,
-				     struct device_attribute *attr,
-				     const char *buf, size_t count)
-{
-	struct vdpa_device *vdev = dev_to_vdpa(dev);
-	int ret;
-
-	ret = driver_set_override(dev, &vdev->driver_override, buf, count);
-	if (ret)
-		return ret;
-
-	return count;
-}
-
-static ssize_t driver_override_show(struct device *dev,
-				    struct device_attribute *attr, char *buf)
-{
-	struct vdpa_device *vdev = dev_to_vdpa(dev);
-	ssize_t len;
-
-	device_lock(dev);
-	len = snprintf(buf, PAGE_SIZE, "%s\n", vdev->driver_override);
-	device_unlock(dev);
-
-	return len;
-}
-static DEVICE_ATTR_RW(driver_override);
-
-static struct attribute *vdpa_dev_attrs[] = {
-	&dev_attr_driver_override.attr,
-	NULL,
-};
-
-static const struct attribute_group vdpa_dev_group = {
-	.attrs  = vdpa_dev_attrs,
-};
-__ATTRIBUTE_GROUPS(vdpa_dev);
-
-static struct bus_type vdpa_bus = {
+static const struct bus_type vdpa_bus = {
 	.name  = "vdpa",
-	.dev_groups = vdpa_dev_groups,
+	.driver_override = true,
 	.match = vdpa_dev_match,
 	.probe = vdpa_dev_probe,
 	.remove = vdpa_dev_remove,
@@ -126,8 +93,7 @@ static void vdpa_release_dev(struct device *d)
 	if (ops->free)
 		ops->free(vdev);
 
-	ida_simple_remove(&vdpa_index_ida, vdev->index);
-	kfree(vdev->driver_override);
+	ida_free(&vdpa_index_ida, vdev->index);
 	kfree(vdev);
 }
 
@@ -137,6 +103,7 @@ static void vdpa_release_dev(struct device *d)
  * initialized but before registered.
  * @parent: the parent device
  * @config: the bus operations that is supported by this device
+ * @map: the map operations that is supported by this device
  * @ngroups: number of groups supported by this device
  * @nas: number of address spaces supported by this device
  * @size: size of the parent structure that contains private data
@@ -146,11 +113,12 @@ static void vdpa_release_dev(struct device *d)
  * Driver should use vdpa_alloc_device() wrapper macro instead of
  * using this directly.
  *
- * Return: Returns an error when parent/config/dma_dev is not set or fail to get
+ * Return: Returns an error when parent/config/map is not set or fail to get
  *	   ida.
  */
 struct vdpa_device *__vdpa_alloc_device(struct device *parent,
 					const struct vdpa_config_ops *config,
+					const struct virtio_map_ops *map,
 					unsigned int ngroups, unsigned int nas,
 					size_t size, const char *name,
 					bool use_va)
@@ -182,6 +150,7 @@ struct vdpa_device *__vdpa_alloc_device(struct device *parent,
 	vdev->dev.release = vdpa_release_dev;
 	vdev->index = err;
 	vdev->config = config;
+	vdev->map = map;
 	vdev->features_valid = false;
 	vdev->use_va = use_va;
 	vdev->ngroups = ngroups;
@@ -200,7 +169,7 @@ struct vdpa_device *__vdpa_alloc_device(struct device *parent,
 	return vdev;
 
 err_name:
-	ida_simple_remove(&vdpa_index_ida, vdev->index);
+	ida_free(&vdpa_index_ida, vdev->index);
 err_ida:
 	kfree(vdev);
 err:
@@ -460,12 +429,28 @@ static int vdpa_nl_mgmtdev_handle_fill(struct sk_buff *msg, const struct vdpa_mg
 	return 0;
 }
 
+static u64 vdpa_mgmtdev_get_classes(const struct vdpa_mgmt_dev *mdev,
+				    unsigned int *nclasses)
+{
+	u64 supported_classes = 0;
+	unsigned int n = 0;
+
+	for (int i = 0; mdev->id_table[i].device; i++) {
+		if (mdev->id_table[i].device > 63)
+			continue;
+		supported_classes |= BIT_ULL(mdev->id_table[i].device);
+		n++;
+	}
+	if (nclasses)
+		*nclasses = n;
+
+	return supported_classes;
+}
+
 static int vdpa_mgmtdev_fill(const struct vdpa_mgmt_dev *mdev, struct sk_buff *msg,
 			     u32 portid, u32 seq, int flags)
 {
-	u64 supported_classes = 0;
 	void *hdr;
-	int i = 0;
 	int err;
 
 	hdr = genlmsg_put(msg, portid, seq, &vdpa_nl_family, flags, VDPA_CMD_MGMTDEV_NEW);
@@ -475,14 +460,9 @@ static int vdpa_mgmtdev_fill(const struct vdpa_mgmt_dev *mdev, struct sk_buff *m
 	if (err)
 		goto msg_err;
 
-	while (mdev->id_table[i].device) {
-		if (mdev->id_table[i].device <= 63)
-			supported_classes |= BIT_ULL(mdev->id_table[i].device);
-		i++;
-	}
-
 	if (nla_put_u64_64bit(msg, VDPA_ATTR_MGMTDEV_SUPPORTED_CLASSES,
-			      supported_classes, VDPA_ATTR_UNSPEC)) {
+			      vdpa_mgmtdev_get_classes(mdev, NULL),
+			      VDPA_ATTR_UNSPEC)) {
 		err = -EMSGSIZE;
 		goto msg_err;
 	}
@@ -566,13 +546,25 @@ out:
 				 BIT_ULL(VDPA_ATTR_DEV_NET_CFG_MTU)     | \
 				 BIT_ULL(VDPA_ATTR_DEV_NET_CFG_MAX_VQP))
 
+/*
+ * Bitmask for all per-device features: feature bits VIRTIO_TRANSPORT_F_START
+ * through VIRTIO_TRANSPORT_F_END are unset, i.e. 0xfffffc000fffffff for
+ * all 64bit features. If the features are extended beyond 64 bits, or new
+ * "holes" are reserved for other type of features than per-device, this
+ * macro would have to be updated.
+ */
+#define VIRTIO_DEVICE_F_MASK (~0ULL << (VIRTIO_TRANSPORT_F_END + 1) | \
+			      ((1ULL << VIRTIO_TRANSPORT_F_START) - 1))
+
 static int vdpa_nl_cmd_dev_add_set_doit(struct sk_buff *skb, struct genl_info *info)
 {
 	struct vdpa_dev_set_config config = {};
 	struct nlattr **nl_attrs = info->attrs;
 	struct vdpa_mgmt_dev *mdev;
+	unsigned int ncls = 0;
 	const u8 *macaddr;
 	const char *name;
+	u64 classes;
 	int err = 0;
 
 	if (!info->attrs[VDPA_ATTR_DEV_NAME])
@@ -601,8 +593,26 @@ static int vdpa_nl_cmd_dev_add_set_doit(struct sk_buff *skb, struct genl_info *i
 		config.mask |= BIT_ULL(VDPA_ATTR_DEV_NET_CFG_MAX_VQP);
 	}
 	if (nl_attrs[VDPA_ATTR_DEV_FEATURES]) {
+		u64 missing = 0x0ULL;
+
 		config.device_features =
 			nla_get_u64(nl_attrs[VDPA_ATTR_DEV_FEATURES]);
+		if (nl_attrs[VDPA_ATTR_DEV_NET_CFG_MACADDR] &&
+		    !(config.device_features & BIT_ULL(VIRTIO_NET_F_MAC)))
+			missing |= BIT_ULL(VIRTIO_NET_F_MAC);
+		if (nl_attrs[VDPA_ATTR_DEV_NET_CFG_MTU] &&
+		    !(config.device_features & BIT_ULL(VIRTIO_NET_F_MTU)))
+			missing |= BIT_ULL(VIRTIO_NET_F_MTU);
+		if (nl_attrs[VDPA_ATTR_DEV_NET_CFG_MAX_VQP] &&
+		    config.net.max_vq_pairs > 1 &&
+		    !(config.device_features & BIT_ULL(VIRTIO_NET_F_MQ)))
+			missing |= BIT_ULL(VIRTIO_NET_F_MQ);
+		if (missing) {
+			NL_SET_ERR_MSG_FMT_MOD(info->extack,
+					       "Missing features 0x%llx for provided attributes",
+					       missing);
+			return -EINVAL;
+		}
 		config.mask |= BIT_ULL(VDPA_ATTR_DEV_FEATURES);
 	}
 
@@ -622,10 +632,30 @@ static int vdpa_nl_cmd_dev_add_set_doit(struct sk_buff *skb, struct genl_info *i
 		err = PTR_ERR(mdev);
 		goto err;
 	}
+
 	if ((config.mask & mdev->config_attr_mask) != config.mask) {
-		NL_SET_ERR_MSG_MOD(info->extack,
-				   "All provided attributes are not supported");
+		NL_SET_ERR_MSG_FMT_MOD(info->extack,
+				       "Some provided attributes are not supported: 0x%llx",
+				       config.mask & ~mdev->config_attr_mask);
 		err = -EOPNOTSUPP;
+		goto err;
+	}
+
+	classes = vdpa_mgmtdev_get_classes(mdev, &ncls);
+	if (config.mask & VDPA_DEV_NET_ATTRS_MASK &&
+	    !(classes & BIT_ULL(VIRTIO_ID_NET))) {
+		NL_SET_ERR_MSG_MOD(info->extack,
+				   "Network class attributes provided on unsupported management device");
+		err = -EINVAL;
+		goto err;
+	}
+	if (!(config.mask & VDPA_DEV_NET_ATTRS_MASK) &&
+	    config.mask & BIT_ULL(VDPA_ATTR_DEV_FEATURES) &&
+	    classes & BIT_ULL(VIRTIO_ID_NET) && ncls > 1 &&
+	    config.device_features & VIRTIO_DEVICE_F_MASK) {
+		NL_SET_ERR_MSG_MOD(info->extack,
+				   "Management device supports multi-class while device features specified are ambiguous");
+		err = -EINVAL;
 		goto err;
 	}
 
@@ -841,17 +871,24 @@ static int vdpa_dev_net_mac_config_fill(struct sk_buff *msg, u64 features,
 			sizeof(config->mac), config->mac);
 }
 
+static int vdpa_dev_net_status_config_fill(struct sk_buff *msg, u64 features,
+					   const struct virtio_net_config *config)
+{
+	u16 val_u16;
+
+	if ((features & BIT_ULL(VIRTIO_NET_F_STATUS)) == 0)
+		return 0;
+
+	val_u16 = __virtio16_to_cpu(true, config->status);
+	return nla_put_u16(msg, VDPA_ATTR_DEV_NET_STATUS, val_u16);
+}
+
 static int vdpa_dev_net_config_fill(struct vdpa_device *vdev, struct sk_buff *msg)
 {
 	struct virtio_net_config config = {};
 	u64 features_device;
-	u16 val_u16;
 
 	vdev->config->get_config(vdev, 0, &config, sizeof(config));
-
-	val_u16 = __virtio16_to_cpu(true, config.status);
-	if (nla_put_u16(msg, VDPA_ATTR_DEV_NET_STATUS, val_u16))
-		return -EMSGSIZE;
 
 	features_device = vdev->config->get_device_features(vdev);
 
@@ -865,7 +902,219 @@ static int vdpa_dev_net_config_fill(struct vdpa_device *vdev, struct sk_buff *ms
 	if (vdpa_dev_net_mac_config_fill(msg, features_device, &config))
 		return -EMSGSIZE;
 
+	if (vdpa_dev_net_status_config_fill(msg, features_device, &config))
+		return -EMSGSIZE;
+
 	return vdpa_dev_net_mq_config_fill(msg, features_device, &config);
+}
+
+static int
+vdpa_dev_blk_capacity_config_fill(struct sk_buff *msg,
+				  const struct virtio_blk_config *config)
+{
+	u64 val_u64;
+
+	val_u64 = __virtio64_to_cpu(true, config->capacity);
+
+	return nla_put_u64_64bit(msg, VDPA_ATTR_DEV_BLK_CFG_CAPACITY,
+				 val_u64, VDPA_ATTR_PAD);
+}
+
+static int
+vdpa_dev_blk_seg_size_config_fill(struct sk_buff *msg, u64 features,
+				  const struct virtio_blk_config *config)
+{
+	u32 val_u32;
+
+	if ((features & BIT_ULL(VIRTIO_BLK_F_SIZE_MAX)) == 0)
+		return 0;
+
+	val_u32 = __virtio32_to_cpu(true, config->size_max);
+
+	return nla_put_u32(msg, VDPA_ATTR_DEV_BLK_CFG_SIZE_MAX, val_u32);
+}
+
+/* fill the block size*/
+static int
+vdpa_dev_blk_block_size_config_fill(struct sk_buff *msg, u64 features,
+				    const struct virtio_blk_config *config)
+{
+	u32 val_u32;
+
+	if ((features & BIT_ULL(VIRTIO_BLK_F_BLK_SIZE)) == 0)
+		return 0;
+
+	val_u32 = __virtio32_to_cpu(true, config->blk_size);
+
+	return nla_put_u32(msg, VDPA_ATTR_DEV_BLK_CFG_BLK_SIZE, val_u32);
+}
+
+static int
+vdpa_dev_blk_seg_max_config_fill(struct sk_buff *msg, u64 features,
+				 const struct virtio_blk_config *config)
+{
+	u32 val_u32;
+
+	if ((features & BIT_ULL(VIRTIO_BLK_F_SEG_MAX)) == 0)
+		return 0;
+
+	val_u32 = __virtio32_to_cpu(true, config->seg_max);
+
+	return nla_put_u32(msg, VDPA_ATTR_DEV_BLK_CFG_SEG_MAX, val_u32);
+}
+
+static int vdpa_dev_blk_mq_config_fill(struct sk_buff *msg, u64 features,
+				       const struct virtio_blk_config *config)
+{
+	u16 val_u16;
+
+	if ((features & BIT_ULL(VIRTIO_BLK_F_MQ)) == 0)
+		return 0;
+
+	val_u16 = __virtio16_to_cpu(true, config->num_queues);
+
+	return nla_put_u16(msg, VDPA_ATTR_DEV_BLK_CFG_NUM_QUEUES, val_u16);
+}
+
+static int vdpa_dev_blk_topology_config_fill(struct sk_buff *msg, u64 features,
+				       const struct virtio_blk_config *config)
+{
+	u16 min_io_size;
+	u32 opt_io_size;
+
+	if ((features & BIT_ULL(VIRTIO_BLK_F_TOPOLOGY)) == 0)
+		return 0;
+
+	min_io_size = __virtio16_to_cpu(true, config->min_io_size);
+	opt_io_size = __virtio32_to_cpu(true, config->opt_io_size);
+
+	if (nla_put_u8(msg, VDPA_ATTR_DEV_BLK_CFG_PHY_BLK_EXP,
+	    config->physical_block_exp))
+		return -EMSGSIZE;
+
+	if (nla_put_u8(msg, VDPA_ATTR_DEV_BLK_CFG_ALIGN_OFFSET,
+	    config->alignment_offset))
+		return -EMSGSIZE;
+
+	if (nla_put_u16(msg, VDPA_ATTR_DEV_BLK_CFG_MIN_IO_SIZE, min_io_size))
+		return -EMSGSIZE;
+
+	if (nla_put_u32(msg, VDPA_ATTR_DEV_BLK_CFG_OPT_IO_SIZE, opt_io_size))
+		return -EMSGSIZE;
+
+	return 0;
+}
+
+static int vdpa_dev_blk_discard_config_fill(struct sk_buff *msg, u64 features,
+				       const struct virtio_blk_config *config)
+{
+	u32 val_u32;
+
+	if ((features & BIT_ULL(VIRTIO_BLK_F_DISCARD)) == 0)
+		return 0;
+
+	val_u32 = __virtio32_to_cpu(true, config->max_discard_sectors);
+	if (nla_put_u32(msg, VDPA_ATTR_DEV_BLK_CFG_MAX_DISCARD_SEC, val_u32))
+		return -EMSGSIZE;
+
+	val_u32 = __virtio32_to_cpu(true, config->max_discard_seg);
+	if (nla_put_u32(msg, VDPA_ATTR_DEV_BLK_CFG_MAX_DISCARD_SEG, val_u32))
+		return -EMSGSIZE;
+
+	val_u32 = __virtio32_to_cpu(true, config->discard_sector_alignment);
+	if (nla_put_u32(msg, VDPA_ATTR_DEV_BLK_CFG_DISCARD_SEC_ALIGN, val_u32))
+		return -EMSGSIZE;
+
+	return 0;
+}
+
+static int
+vdpa_dev_blk_write_zeroes_config_fill(struct sk_buff *msg, u64 features,
+				     const struct virtio_blk_config *config)
+{
+	u32 val_u32;
+
+	if ((features & BIT_ULL(VIRTIO_BLK_F_WRITE_ZEROES)) == 0)
+		return 0;
+
+	val_u32 = __virtio32_to_cpu(true, config->max_write_zeroes_sectors);
+	if (nla_put_u32(msg, VDPA_ATTR_DEV_BLK_CFG_MAX_WRITE_ZEROES_SEC, val_u32))
+		return -EMSGSIZE;
+
+	val_u32 = __virtio32_to_cpu(true, config->max_write_zeroes_seg);
+	if (nla_put_u32(msg, VDPA_ATTR_DEV_BLK_CFG_MAX_WRITE_ZEROES_SEG, val_u32))
+		return -EMSGSIZE;
+
+	return 0;
+}
+
+static int vdpa_dev_blk_ro_config_fill(struct sk_buff *msg, u64 features)
+{
+	u8 ro;
+
+	ro = ((features & BIT_ULL(VIRTIO_BLK_F_RO)) == 0) ? 0 : 1;
+	if (nla_put_u8(msg, VDPA_ATTR_DEV_BLK_READ_ONLY, ro))
+		return -EMSGSIZE;
+
+	return 0;
+}
+
+static int vdpa_dev_blk_flush_config_fill(struct sk_buff *msg, u64 features)
+{
+	u8 flush;
+
+	flush = ((features & BIT_ULL(VIRTIO_BLK_F_FLUSH)) == 0) ? 0 : 1;
+	if (nla_put_u8(msg, VDPA_ATTR_DEV_BLK_FLUSH, flush))
+		return -EMSGSIZE;
+
+	return 0;
+}
+
+static int vdpa_dev_blk_config_fill(struct vdpa_device *vdev,
+				    struct sk_buff *msg)
+{
+	struct virtio_blk_config config = {};
+	u64 features_device;
+
+	vdev->config->get_config(vdev, 0, &config, sizeof(config));
+
+	features_device = vdev->config->get_device_features(vdev);
+
+	if (nla_put_u64_64bit(msg, VDPA_ATTR_DEV_FEATURES, features_device,
+			      VDPA_ATTR_PAD))
+		return -EMSGSIZE;
+
+	if (vdpa_dev_blk_capacity_config_fill(msg, &config))
+		return -EMSGSIZE;
+
+	if (vdpa_dev_blk_seg_size_config_fill(msg, features_device, &config))
+		return -EMSGSIZE;
+
+	if (vdpa_dev_blk_block_size_config_fill(msg, features_device, &config))
+		return -EMSGSIZE;
+
+	if (vdpa_dev_blk_seg_max_config_fill(msg, features_device, &config))
+		return -EMSGSIZE;
+
+	if (vdpa_dev_blk_mq_config_fill(msg, features_device, &config))
+		return -EMSGSIZE;
+
+	if (vdpa_dev_blk_topology_config_fill(msg, features_device, &config))
+		return -EMSGSIZE;
+
+	if (vdpa_dev_blk_discard_config_fill(msg, features_device, &config))
+		return -EMSGSIZE;
+
+	if (vdpa_dev_blk_write_zeroes_config_fill(msg, features_device, &config))
+		return -EMSGSIZE;
+
+	if (vdpa_dev_blk_ro_config_fill(msg, features_device))
+		return -EMSGSIZE;
+
+	if (vdpa_dev_blk_flush_config_fill(msg, features_device))
+		return -EMSGSIZE;
+
+	return 0;
 }
 
 static int
@@ -911,6 +1160,9 @@ vdpa_dev_config_fill(struct vdpa_device *vdev, struct sk_buff *msg, u32 portid, 
 	switch (device_id) {
 	case VIRTIO_ID_NET:
 		err = vdpa_dev_net_config_fill(vdev, msg);
+		break;
+	case VIRTIO_ID_BLOCK:
+		err = vdpa_dev_blk_config_fill(vdev, msg);
 		break;
 	default:
 		err = -EOPNOTSUPP;
@@ -1011,7 +1263,7 @@ static int vdpa_dev_vendor_stats_fill(struct vdpa_device *vdev,
 	switch (device_id) {
 	case VIRTIO_ID_NET:
 		if (index > VIRTIO_NET_CTRL_MQ_VQ_PAIRS_MAX) {
-			NL_SET_ERR_MSG_MOD(info->extack, "queue index excceeds max value");
+			NL_SET_ERR_MSG_MOD(info->extack, "queue index exceeds max value");
 			err = -ERANGE;
 			break;
 		}
@@ -1070,6 +1322,80 @@ dev_err:
 	up_read(&vdpa_dev_lock);
 	if (err)
 		nlmsg_free(msg);
+	return err;
+}
+
+static int vdpa_dev_net_device_attr_set(struct vdpa_device *vdev,
+					struct genl_info *info)
+{
+	struct vdpa_dev_set_config set_config = {};
+	struct vdpa_mgmt_dev *mdev = vdev->mdev;
+	struct nlattr **nl_attrs = info->attrs;
+	const u8 *macaddr;
+	int err = -EOPNOTSUPP;
+
+	down_write(&vdev->cf_lock);
+	if (nl_attrs[VDPA_ATTR_DEV_NET_CFG_MACADDR]) {
+		set_config.mask |= BIT_ULL(VDPA_ATTR_DEV_NET_CFG_MACADDR);
+		macaddr = nla_data(nl_attrs[VDPA_ATTR_DEV_NET_CFG_MACADDR]);
+
+		if (is_valid_ether_addr(macaddr)) {
+			ether_addr_copy(set_config.net.mac, macaddr);
+			if (mdev->ops->dev_set_attr) {
+				err = mdev->ops->dev_set_attr(mdev, vdev,
+							      &set_config);
+			} else {
+				NL_SET_ERR_MSG_FMT_MOD(info->extack,
+						       "Operation not supported by the device.");
+			}
+		} else {
+			NL_SET_ERR_MSG_FMT_MOD(info->extack,
+					       "Invalid MAC address");
+		}
+	}
+	up_write(&vdev->cf_lock);
+	return err;
+}
+
+static int vdpa_nl_cmd_dev_attr_set_doit(struct sk_buff *skb,
+					 struct genl_info *info)
+{
+	struct vdpa_device *vdev;
+	struct device *dev;
+	const char *name;
+	u64 classes;
+	int err = 0;
+
+	if (!info->attrs[VDPA_ATTR_DEV_NAME])
+		return -EINVAL;
+
+	name = nla_data(info->attrs[VDPA_ATTR_DEV_NAME]);
+
+	down_write(&vdpa_dev_lock);
+	dev = bus_find_device(&vdpa_bus, NULL, name, vdpa_name_match);
+	if (!dev) {
+		NL_SET_ERR_MSG_MOD(info->extack, "device not found");
+		err = -ENODEV;
+		goto dev_err;
+	}
+	vdev = container_of(dev, struct vdpa_device, dev);
+	if (!vdev->mdev) {
+		NL_SET_ERR_MSG_MOD(info->extack, "unmanaged vdpa device");
+		err = -EINVAL;
+		goto mdev_err;
+	}
+	classes = vdpa_mgmtdev_get_classes(vdev->mdev, NULL);
+	if (classes & BIT_ULL(VIRTIO_ID_NET)) {
+		err = vdpa_dev_net_device_attr_set(vdev, info);
+	} else {
+		NL_SET_ERR_MSG_FMT_MOD(info->extack, "%s device not supported",
+				       name);
+	}
+
+mdev_err:
+	put_device(dev);
+dev_err:
+	up_write(&vdpa_dev_lock);
 	return err;
 }
 
@@ -1171,45 +1497,47 @@ static const struct nla_policy vdpa_nl_policy[VDPA_ATTR_MAX + 1] = {
 	[VDPA_ATTR_MGMTDEV_DEV_NAME] = { .type = NLA_STRING },
 	[VDPA_ATTR_DEV_NAME] = { .type = NLA_STRING },
 	[VDPA_ATTR_DEV_NET_CFG_MACADDR] = NLA_POLICY_ETH_ADDR,
+	[VDPA_ATTR_DEV_NET_CFG_MAX_VQP] = { .type = NLA_U16 },
 	/* virtio spec 1.1 section 5.1.4.1 for valid MTU range */
 	[VDPA_ATTR_DEV_NET_CFG_MTU] = NLA_POLICY_MIN(NLA_U16, 68),
+	[VDPA_ATTR_DEV_QUEUE_INDEX] = { .type = NLA_U32 },
+	[VDPA_ATTR_DEV_FEATURES] = { .type = NLA_U64 },
 };
 
 static const struct genl_ops vdpa_nl_ops[] = {
 	{
 		.cmd = VDPA_CMD_MGMTDEV_GET,
-		.validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
 		.doit = vdpa_nl_cmd_mgmtdev_get_doit,
 		.dumpit = vdpa_nl_cmd_mgmtdev_get_dumpit,
 	},
 	{
 		.cmd = VDPA_CMD_DEV_NEW,
-		.validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
 		.doit = vdpa_nl_cmd_dev_add_set_doit,
 		.flags = GENL_ADMIN_PERM,
 	},
 	{
 		.cmd = VDPA_CMD_DEV_DEL,
-		.validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
 		.doit = vdpa_nl_cmd_dev_del_set_doit,
 		.flags = GENL_ADMIN_PERM,
 	},
 	{
 		.cmd = VDPA_CMD_DEV_GET,
-		.validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
 		.doit = vdpa_nl_cmd_dev_get_doit,
 		.dumpit = vdpa_nl_cmd_dev_get_dumpit,
 	},
 	{
 		.cmd = VDPA_CMD_DEV_CONFIG_GET,
-		.validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
 		.doit = vdpa_nl_cmd_dev_config_get_doit,
 		.dumpit = vdpa_nl_cmd_dev_config_get_dumpit,
 	},
 	{
 		.cmd = VDPA_CMD_DEV_VSTATS_GET,
-		.validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
 		.doit = vdpa_nl_cmd_dev_stats_get_doit,
+		.flags = GENL_ADMIN_PERM,
+	},
+	{
+		.cmd = VDPA_CMD_DEV_ATTR_SET,
+		.doit = vdpa_nl_cmd_dev_attr_set_doit,
 		.flags = GENL_ADMIN_PERM,
 	},
 };
@@ -1253,4 +1581,5 @@ core_initcall(vdpa_init);
 module_exit(vdpa_exit);
 
 MODULE_AUTHOR("Jason Wang <jasowang@redhat.com>");
+MODULE_DESCRIPTION("vDPA bus");
 MODULE_LICENSE("GPL v2");

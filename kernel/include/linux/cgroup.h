@@ -10,8 +10,8 @@
  */
 
 #include <linux/sched.h>
-#include <linux/cpumask.h>
 #include <linux/nodemask.h>
+#include <linux/list.h>
 #include <linux/rculist.h>
 #include <linux/cgroupstats.h>
 #include <linux/fs.h>
@@ -19,6 +19,7 @@
 #include <linux/kernfs.h>
 #include <linux/jump_label.h>
 #include <linux/types.h>
+#include <linux/notifier.h>
 #include <linux/ns_common.h>
 #include <linux/nsproxy.h>
 #include <linux/user_namespace.h>
@@ -26,10 +27,9 @@
 #include <linux/kernel_stat.h>
 
 #include <linux/cgroup-defs.h>
+#include <linux/cgroup_namespace.h>
 
 struct kernel_clone_args;
-
-#ifdef CONFIG_CGROUPS
 
 /*
  * All weight knobs on the default hierarchy should use the following min,
@@ -40,13 +40,22 @@ struct kernel_clone_args;
 #define CGROUP_WEIGHT_DFL		100
 #define CGROUP_WEIGHT_MAX		10000
 
-/* walk only threadgroup leaders */
-#define CSS_TASK_ITER_PROCS		(1U << 0)
-/* walk all threaded css_sets in the domain */
-#define CSS_TASK_ITER_THREADED		(1U << 1)
+#ifdef CONFIG_CGROUPS
 
-/* internal flags */
-#define CSS_TASK_ITER_SKIPPED		(1U << 16)
+/*
+ * To avoid confusing the compiler (and generating warnings) with code
+ * that attempts to access what would be a 0-element array (i.e. sized
+ * to a potentially empty array when CGROUP_SUBSYS_COUNT == 0), this
+ * constant expression can be added.
+ */
+#define CGROUP_HAS_SUBSYS_CONFIG	(CGROUP_SUBSYS_COUNT > 0)
+
+enum css_task_iter_flags {
+	CSS_TASK_ITER_PROCS    = (1U << 0),  /* walk only threadgroup leaders */
+	CSS_TASK_ITER_THREADED = (1U << 1),  /* walk all threaded css_sets in the domain */
+	CSS_TASK_ITER_WITH_DEAD = (1U << 2),  /* include exiting tasks */
+	CSS_TASK_ITER_SKIPPED  = (1U << 16), /* internal flags */
+};
 
 /* a css_task_iter should be treated as an opaque object */
 struct css_task_iter {
@@ -68,9 +77,17 @@ struct css_task_iter {
 	struct list_head		iters_node;	/* css_set->task_iters */
 };
 
+enum cgroup_lifetime_events {
+	CGROUP_LIFETIME_ONLINE,
+	CGROUP_LIFETIME_OFFLINE,
+};
+
 extern struct file_system_type cgroup_fs_type;
 extern struct cgroup_root cgrp_dfl_root;
 extern struct css_set init_css_set;
+extern struct mutex cgroup_mutex;
+extern spinlock_t css_set_lock;
+extern struct blocking_notifier_head cgroup_lifetime_notifier;
 
 #define SUBSYS(_x) extern struct cgroup_subsys _x ## _cgrp_subsys;
 #include <linux/cgroup_subsys.h>
@@ -96,6 +113,8 @@ extern struct css_set init_css_set;
 #define cgroup_subsys_on_dfl(ss)						\
 	static_branch_likely(&ss ## _on_dfl_key)
 
+bool cgroup_on_dfl(const struct cgroup *cgrp);
+
 bool css_has_online_children(struct cgroup_subsys_state *css);
 struct cgroup_subsys_state *css_from_id(int id, struct cgroup_subsys *ss);
 struct cgroup_subsys_state *cgroup_e_css(struct cgroup *cgroup,
@@ -114,11 +133,11 @@ int cgroup_transfer_tasks(struct cgroup *to, struct cgroup *from);
 
 int cgroup_add_dfl_cftypes(struct cgroup_subsys *ss, struct cftype *cfts);
 int cgroup_add_legacy_cftypes(struct cgroup_subsys *ss, struct cftype *cfts);
+int cgroup_add_cftypes(struct cgroup_subsys *ss, struct cftype *cfts);
 int cgroup_rm_cftypes(struct cftype *cfts);
 void cgroup_file_notify(struct cgroup_file *cfile);
 void cgroup_file_show(struct cgroup_file *cfile, bool show);
 
-int task_cgroup_path(struct task_struct *task, char *buf, size_t buflen);
 int cgroupstats_build(struct cgroupstats *stats, struct dentry *dentry);
 int proc_cgroup_show(struct seq_file *m, struct pid_namespace *ns,
 		     struct pid *pid, struct task_struct *tsk);
@@ -130,9 +149,10 @@ extern void cgroup_cancel_fork(struct task_struct *p,
 			       struct kernel_clone_args *kargs);
 extern void cgroup_post_fork(struct task_struct *p,
 			     struct kernel_clone_args *kargs);
-void cgroup_exit(struct task_struct *p);
-void cgroup_release(struct task_struct *p);
-void cgroup_free(struct task_struct *p);
+void cgroup_task_exit(struct task_struct *p);
+void cgroup_task_dead(struct task_struct *p);
+void cgroup_task_release(struct task_struct *p);
+void cgroup_task_free(struct task_struct *p);
 
 int cgroup_init_early(void);
 int cgroup_init(void);
@@ -266,6 +286,32 @@ void css_task_iter_end(struct css_task_iter *it);
 	for ((pos) = css_next_descendant_post(NULL, (css)); (pos);	\
 	     (pos) = css_next_descendant_post((pos), (css)))
 
+/* iterate over child cgrps, lock should be held throughout iteration */
+#define cgroup_for_each_live_child(child, cgrp)				\
+	list_for_each_entry((child), &(cgrp)->self.children, self.sibling) \
+		if (({ lockdep_assert_held(&cgroup_mutex);		\
+		       cgroup_is_dead(child); }))			\
+			;						\
+		else
+
+/* walk live descendants in pre order */
+#define cgroup_for_each_live_descendant_pre(dsct, d_css, cgrp)		\
+	css_for_each_descendant_pre((d_css), cgroup_css((cgrp), NULL))	\
+		if (({ lockdep_assert_held(&cgroup_mutex);		\
+		       (dsct) = (d_css)->cgroup;			\
+		       cgroup_is_dead(dsct); }))			\
+			;						\
+		else
+
+/* walk live descendants in postorder */
+#define cgroup_for_each_live_descendant_post(dsct, d_css, cgrp)		\
+	css_for_each_descendant_post((d_css), cgroup_css((cgrp), NULL))	\
+		if (({ lockdep_assert_held(&cgroup_mutex);		\
+		       (dsct) = (d_css)->cgroup;			\
+		       cgroup_is_dead(dsct); }))			\
+			;						\
+		else
+
 /**
  * cgroup_taskset_for_each - iterate cgroup_taskset
  * @task: the loop cursor
@@ -329,6 +375,27 @@ static inline u64 cgroup_id(const struct cgroup *cgrp)
 }
 
 /**
+ * cgroup_css - obtain a cgroup's css for the specified subsystem
+ * @cgrp: the cgroup of interest
+ * @ss: the subsystem of interest (%NULL returns @cgrp->self)
+ *
+ * Return @cgrp's css (cgroup_subsys_state) associated with @ss.  This
+ * function must be called either under cgroup_mutex or rcu_read_lock() and
+ * the caller is responsible for pinning the returned css if it wants to
+ * keep accessing it outside the said locks.  This function may return
+ * %NULL if @cgrp doesn't have @subsys_id enabled.
+ */
+static inline struct cgroup_subsys_state *cgroup_css(struct cgroup *cgrp,
+						     struct cgroup_subsys *ss)
+{
+	if (CGROUP_HAS_SUBSYS_CONFIG && ss)
+		return rcu_dereference_check(cgrp->subsys[ss->id],
+					lockdep_is_held(&cgroup_mutex));
+	else
+		return &cgrp->self;
+}
+
+/**
  * css_is_dying - test whether the specified css is dying
  * @css: target css
  *
@@ -345,7 +412,28 @@ static inline u64 cgroup_id(const struct cgroup *cgrp)
  */
 static inline bool css_is_dying(struct cgroup_subsys_state *css)
 {
-	return !(css->flags & CSS_NO_REF) && percpu_ref_is_dying(&css->refcnt);
+	return css->flags & CSS_DYING;
+}
+
+static inline bool css_is_online(struct cgroup_subsys_state *css)
+{
+	return css->flags & CSS_ONLINE;
+}
+
+static inline bool css_is_self(struct cgroup_subsys_state *css)
+{
+	if (css == &css->cgroup->self) {
+		/* cgroup::self should not have subsystem association */
+		WARN_ON(css->ss != NULL);
+		return true;
+	}
+
+	return false;
+}
+
+static inline bool cgroup_is_dead(const struct cgroup *cgrp)
+{
+	return !(cgrp->self.flags & CSS_ONLINE);
 }
 
 static inline void cgroup_get(struct cgroup *cgrp)
@@ -362,8 +450,6 @@ static inline void cgroup_put(struct cgroup *cgrp)
 {
 	css_put(&cgrp->self);
 }
-
-extern struct mutex cgroup_mutex;
 
 static inline void cgroup_lock(void)
 {
@@ -389,7 +475,6 @@ static inline void cgroup_unlock(void)
  * as locks used during the cgroup_subsys::attach() methods.
  */
 #ifdef CONFIG_PROVE_RCU
-extern spinlock_t css_set_lock;
 #define task_css_set_check(task, __c)					\
 	rcu_dereference_check((task)->cgroups,				\
 		rcu_read_lock_sched_held() ||				\
@@ -555,11 +640,32 @@ static inline bool task_under_cgroup_hierarchy(struct task_struct *task,
 	return cgroup_is_descendant(cset->dfl_cgrp, ancestor);
 }
 
-/* no synchronization, the result can only be used as a hint */
+/*
+ * Populated counters: writes happen under css_set_lock. The accessors below
+ * may read unlocked. What an unpopulated result means depends on context:
+ *
+ * - No lock held. Just a snapshot. May race with concurrent updates and is
+ *   useful only as a hint.
+ *
+ * - cgroup_mutex held. Migration into the cgroup is blocked, so an observed
+ *   !populated stays !populated until cgroup_mutex is dropped.
+ *
+ * - CSS_DYING set. The css can no longer be repopulated, so !populated is
+ *   sticky once observed.
+ */
+static inline bool cgroup_has_tasks(struct cgroup *cgrp)
+{
+	return READ_ONCE(cgrp->self.nr_populated_csets);
+}
+
+static inline bool css_is_populated(struct cgroup_subsys_state *css)
+{
+	return READ_ONCE(css->nr_populated_csets) || READ_ONCE(css->nr_populated_children);
+}
+
 static inline bool cgroup_is_populated(struct cgroup *cgrp)
 {
-	return cgrp->nr_populated_csets + cgrp->nr_populated_domain_children +
-		cgrp->nr_populated_threaded_children;
+	return css_is_populated(&cgrp->self);
 }
 
 /* returns ino associated with a cgroup */
@@ -634,6 +740,7 @@ static inline void cgroup_kthread_ready(void)
 }
 
 void cgroup_path_from_kernfs_id(u64 id, char *buf, size_t buflen);
+struct cgroup *__cgroup_get_from_id(u64 id);
 struct cgroup *cgroup_get_from_id(u64 id);
 #else /* !CONFIG_CGROUPS */
 
@@ -657,9 +764,10 @@ static inline void cgroup_cancel_fork(struct task_struct *p,
 				      struct kernel_clone_args *kargs) {}
 static inline void cgroup_post_fork(struct task_struct *p,
 				    struct kernel_clone_args *kargs) {}
-static inline void cgroup_exit(struct task_struct *p) {}
-static inline void cgroup_release(struct task_struct *p) {}
-static inline void cgroup_free(struct task_struct *p) {}
+static inline void cgroup_task_exit(struct task_struct *p) {}
+static inline void cgroup_task_dead(struct task_struct *p) {}
+static inline void cgroup_task_release(struct task_struct *p) {}
+static inline void cgroup_task_free(struct task_struct *p) {}
 
 static inline int cgroup_init_early(void) { return 0; }
 static inline int cgroup_init(void) { return 0; }
@@ -690,11 +798,9 @@ static inline void cgroup_path_from_kernfs_id(u64 id, char *buf, size_t buflen)
 /*
  * cgroup scalable recursive statistics.
  */
-void cgroup_rstat_updated(struct cgroup *cgrp, int cpu);
-void cgroup_rstat_flush(struct cgroup *cgrp);
-void cgroup_rstat_flush_irqsafe(struct cgroup *cgrp);
-void cgroup_rstat_flush_hold(struct cgroup *cgrp);
-void cgroup_rstat_flush_release(void);
+void __css_rstat_updated(struct cgroup_subsys_state *css, int cpu);
+void css_rstat_updated(struct cgroup_subsys_state *css, int cpu);
+void css_rstat_flush(struct cgroup_subsys_state *css);
 
 /*
  * Basic resource stats.
@@ -770,50 +876,6 @@ static inline void cgroup_sk_free(struct sock_cgroup_data *skcd) {}
 
 #endif	/* CONFIG_CGROUP_DATA */
 
-struct cgroup_namespace {
-	struct ns_common	ns;
-	struct user_namespace	*user_ns;
-	struct ucounts		*ucounts;
-	struct css_set          *root_cset;
-};
-
-extern struct cgroup_namespace init_cgroup_ns;
-
-#ifdef CONFIG_CGROUPS
-
-void free_cgroup_ns(struct cgroup_namespace *ns);
-
-struct cgroup_namespace *copy_cgroup_ns(unsigned long flags,
-					struct user_namespace *user_ns,
-					struct cgroup_namespace *old_ns);
-
-int cgroup_path_ns(struct cgroup *cgrp, char *buf, size_t buflen,
-		   struct cgroup_namespace *ns);
-
-#else /* !CONFIG_CGROUPS */
-
-static inline void free_cgroup_ns(struct cgroup_namespace *ns) { }
-static inline struct cgroup_namespace *
-copy_cgroup_ns(unsigned long flags, struct user_namespace *user_ns,
-	       struct cgroup_namespace *old_ns)
-{
-	return old_ns;
-}
-
-#endif /* !CONFIG_CGROUPS */
-
-static inline void get_cgroup_ns(struct cgroup_namespace *ns)
-{
-	if (ns)
-		refcount_inc(&ns->ns.count);
-}
-
-static inline void put_cgroup_ns(struct cgroup_namespace *ns)
-{
-	if (ns && refcount_dec_and_test(&ns->ns.count))
-		free_cgroup_ns(ns);
-}
-
 #ifdef CONFIG_CGROUPS
 
 void cgroup_enter_frozen(void);
@@ -856,5 +918,9 @@ static inline void cgroup_bpf_get(struct cgroup *cgrp) {}
 static inline void cgroup_bpf_put(struct cgroup *cgrp) {}
 
 #endif /* CONFIG_CGROUP_BPF */
+
+struct cgroup *task_get_cgroup1(struct task_struct *tsk, int hierarchy_id);
+
+struct cgroup_of_peak *of_peak(struct kernfs_open_file *of);
 
 #endif /* _LINUX_CGROUP_H */

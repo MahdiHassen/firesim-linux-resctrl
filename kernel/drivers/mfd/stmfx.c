@@ -53,7 +53,7 @@ static const struct regmap_config stmfx_regmap_config = {
 	.max_register	= STMFX_REG_MAX,
 	.volatile_reg	= stmfx_reg_volatile,
 	.writeable_reg	= stmfx_reg_writeable,
-	.cache_type	= REGCACHE_RBTREE,
+	.cache_type	= REGCACHE_MAPLE,
 };
 
 static const struct resource stmfx_pinctrl_resources[] = {
@@ -269,9 +269,8 @@ static int stmfx_irq_init(struct i2c_client *client)
 	u32 irqoutpin = 0, irqtrigger;
 	int ret;
 
-	stmfx->irq_domain = irq_domain_add_simple(stmfx->dev->of_node,
-						  STMFX_REG_IRQ_SRC_MAX, 0,
-						  &stmfx_irq_ops, stmfx);
+	stmfx->irq_domain = irq_domain_create_simple(dev_fwnode(stmfx->dev), STMFX_REG_IRQ_SRC_MAX,
+						     0, &stmfx_irq_ops, stmfx);
 	if (!stmfx->irq_domain) {
 		dev_err(stmfx->dev, "Failed to create IRQ domain\n");
 		return -EINVAL;
@@ -330,9 +329,8 @@ static int stmfx_chip_init(struct i2c_client *client)
 	stmfx->vdd = devm_regulator_get_optional(&client->dev, "vdd");
 	ret = PTR_ERR_OR_ZERO(stmfx->vdd);
 	if (ret) {
-		if (ret == -ENODEV)
-			stmfx->vdd = NULL;
-		else
+		stmfx->vdd = NULL;
+		if (ret != -ENODEV)
 			return dev_err_probe(&client->dev, ret, "Failed to get VDD regulator\n");
 	}
 
@@ -387,7 +385,7 @@ static int stmfx_chip_init(struct i2c_client *client)
 
 err:
 	if (stmfx->vdd)
-		return regulator_disable(stmfx->vdd);
+		regulator_disable(stmfx->vdd);
 
 	return ret;
 }
@@ -553,7 +551,7 @@ static struct i2c_driver stmfx_driver = {
 		.of_match_table = stmfx_of_match,
 		.pm = pm_sleep_ptr(&stmfx_dev_pm_ops),
 	},
-	.probe_new = stmfx_probe,
+	.probe = stmfx_probe,
 	.remove = stmfx_remove,
 };
 module_i2c_driver(stmfx_driver);

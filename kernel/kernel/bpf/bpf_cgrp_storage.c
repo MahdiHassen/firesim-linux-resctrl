@@ -11,31 +11,6 @@
 
 DEFINE_BPF_STORAGE_CACHE(cgroup_cache);
 
-static DEFINE_PER_CPU(int, bpf_cgrp_storage_busy);
-
-static void bpf_cgrp_storage_lock(void)
-{
-	migrate_disable();
-	this_cpu_inc(bpf_cgrp_storage_busy);
-}
-
-static void bpf_cgrp_storage_unlock(void)
-{
-	this_cpu_dec(bpf_cgrp_storage_busy);
-	migrate_enable();
-}
-
-static bool bpf_cgrp_storage_trylock(void)
-{
-	migrate_disable();
-	if (unlikely(this_cpu_inc_return(bpf_cgrp_storage_busy) != 1)) {
-		this_cpu_dec(bpf_cgrp_storage_busy);
-		migrate_enable();
-		return false;
-	}
-	return true;
-}
-
 static struct bpf_local_storage __rcu **cgroup_storage_ptr(void *owner)
 {
 	struct cgroup *cg = owner;
@@ -46,25 +21,15 @@ static struct bpf_local_storage __rcu **cgroup_storage_ptr(void *owner)
 void bpf_cgrp_storage_free(struct cgroup *cgroup)
 {
 	struct bpf_local_storage *local_storage;
-	bool free_cgroup_storage = false;
-	unsigned long flags;
 
 	rcu_read_lock();
 	local_storage = rcu_dereference(cgroup->bpf_cgrp_storage);
-	if (!local_storage) {
-		rcu_read_unlock();
-		return;
-	}
+	if (!local_storage)
+		goto out;
 
-	bpf_cgrp_storage_lock();
-	raw_spin_lock_irqsave(&local_storage->lock, flags);
-	free_cgroup_storage = bpf_local_storage_unlink_nolock(local_storage);
-	raw_spin_unlock_irqrestore(&local_storage->lock, flags);
-	bpf_cgrp_storage_unlock();
+	bpf_local_storage_destroy(local_storage);
+out:
 	rcu_read_unlock();
-
-	if (free_cgroup_storage)
-		kfree_rcu(local_storage, rcu);
 }
 
 static struct bpf_local_storage_data *
@@ -89,33 +54,29 @@ static void *bpf_cgrp_storage_lookup_elem(struct bpf_map *map, void *key)
 	int fd;
 
 	fd = *(int *)key;
-	cgroup = cgroup_get_from_fd(fd);
+	cgroup = cgroup_v1v2_get_from_fd(fd);
 	if (IS_ERR(cgroup))
 		return ERR_CAST(cgroup);
 
-	bpf_cgrp_storage_lock();
 	sdata = cgroup_storage_lookup(cgroup, map, true);
-	bpf_cgrp_storage_unlock();
 	cgroup_put(cgroup);
 	return sdata ? sdata->data : NULL;
 }
 
-static int bpf_cgrp_storage_update_elem(struct bpf_map *map, void *key,
-					  void *value, u64 map_flags)
+static long bpf_cgrp_storage_update_elem(struct bpf_map *map, void *key,
+					 void *value, u64 map_flags)
 {
 	struct bpf_local_storage_data *sdata;
 	struct cgroup *cgroup;
 	int fd;
 
 	fd = *(int *)key;
-	cgroup = cgroup_get_from_fd(fd);
+	cgroup = cgroup_v1v2_get_from_fd(fd);
 	if (IS_ERR(cgroup))
 		return PTR_ERR(cgroup);
 
-	bpf_cgrp_storage_lock();
 	sdata = bpf_local_storage_update(cgroup, (struct bpf_local_storage_map *)map,
-					 value, map_flags, GFP_ATOMIC);
-	bpf_cgrp_storage_unlock();
+					 value, map_flags, false);
 	cgroup_put(cgroup);
 	return PTR_ERR_OR_ZERO(sdata);
 }
@@ -128,23 +89,20 @@ static int cgroup_storage_delete(struct cgroup *cgroup, struct bpf_map *map)
 	if (!sdata)
 		return -ENOENT;
 
-	bpf_selem_unlink(SELEM(sdata), true);
-	return 0;
+	return bpf_selem_unlink(SELEM(sdata));
 }
 
-static int bpf_cgrp_storage_delete_elem(struct bpf_map *map, void *key)
+static long bpf_cgrp_storage_delete_elem(struct bpf_map *map, void *key)
 {
 	struct cgroup *cgroup;
 	int err, fd;
 
 	fd = *(int *)key;
-	cgroup = cgroup_get_from_fd(fd);
+	cgroup = cgroup_v1v2_get_from_fd(fd);
 	if (IS_ERR(cgroup))
 		return PTR_ERR(cgroup);
 
-	bpf_cgrp_storage_lock();
 	err = cgroup_storage_delete(cgroup, map);
-	bpf_cgrp_storage_unlock();
 	cgroup_put(cgroup);
 	return err;
 }
@@ -161,12 +119,11 @@ static struct bpf_map *cgroup_storage_map_alloc(union bpf_attr *attr)
 
 static void cgroup_storage_map_free(struct bpf_map *map)
 {
-	bpf_local_storage_map_free(map, &cgroup_cache, NULL);
+	bpf_local_storage_map_free(map, &cgroup_cache);
 }
 
-/* *gfp_flags* is a hidden argument provided by the verifier */
-BPF_CALL_5(bpf_cgrp_storage_get, struct bpf_map *, map, struct cgroup *, cgroup,
-	   void *, value, u64, flags, gfp_t, gfp_flags)
+BPF_CALL_4(bpf_cgrp_storage_get, struct bpf_map *, map, struct cgroup *, cgroup,
+	   void *, value, u64, flags)
 {
 	struct bpf_local_storage_data *sdata;
 
@@ -177,38 +134,27 @@ BPF_CALL_5(bpf_cgrp_storage_get, struct bpf_map *, map, struct cgroup *, cgroup,
 	if (!cgroup)
 		return (unsigned long)NULL;
 
-	if (!bpf_cgrp_storage_trylock())
-		return (unsigned long)NULL;
-
 	sdata = cgroup_storage_lookup(cgroup, map, true);
 	if (sdata)
-		goto unlock;
+		goto out;
 
 	/* only allocate new storage, when the cgroup is refcounted */
 	if (!percpu_ref_is_dying(&cgroup->self.refcnt) &&
 	    (flags & BPF_LOCAL_STORAGE_GET_F_CREATE))
 		sdata = bpf_local_storage_update(cgroup, (struct bpf_local_storage_map *)map,
-						 value, BPF_NOEXIST, gfp_flags);
+						 value, BPF_NOEXIST, false);
 
-unlock:
-	bpf_cgrp_storage_unlock();
+out:
 	return IS_ERR_OR_NULL(sdata) ? (unsigned long)NULL : (unsigned long)sdata->data;
 }
 
 BPF_CALL_2(bpf_cgrp_storage_delete, struct bpf_map *, map, struct cgroup *, cgroup)
 {
-	int ret;
-
 	WARN_ON_ONCE(!bpf_rcu_lock_held());
 	if (!cgroup)
 		return -EINVAL;
 
-	if (!bpf_cgrp_storage_trylock())
-		return -EBUSY;
-
-	ret = cgroup_storage_delete(cgroup, map);
-	bpf_cgrp_storage_unlock();
-	return ret;
+	return cgroup_storage_delete(cgroup, map);
 }
 
 const struct bpf_map_ops cgrp_storage_map_ops = {
@@ -221,6 +167,7 @@ const struct bpf_map_ops cgrp_storage_map_ops = {
 	.map_update_elem = bpf_cgrp_storage_update_elem,
 	.map_delete_elem = bpf_cgrp_storage_delete_elem,
 	.map_check_btf = bpf_local_storage_map_check_btf,
+	.map_mem_usage = bpf_local_storage_map_mem_usage,
 	.map_btf_id = &bpf_local_storage_map_btf_id[0],
 	.map_owner_storage_ptr = cgroup_storage_ptr,
 };
@@ -230,7 +177,7 @@ const struct bpf_func_proto bpf_cgrp_storage_get_proto = {
 	.gpl_only	= false,
 	.ret_type	= RET_PTR_TO_MAP_VALUE_OR_NULL,
 	.arg1_type	= ARG_CONST_MAP_PTR,
-	.arg2_type	= ARG_PTR_TO_BTF_ID,
+	.arg2_type	= ARG_PTR_TO_BTF_ID_OR_NULL,
 	.arg2_btf_id	= &bpf_cgroup_btf_id[0],
 	.arg3_type	= ARG_PTR_TO_MAP_VALUE_OR_NULL,
 	.arg4_type	= ARG_ANYTHING,
@@ -241,6 +188,6 @@ const struct bpf_func_proto bpf_cgrp_storage_delete_proto = {
 	.gpl_only	= false,
 	.ret_type	= RET_INTEGER,
 	.arg1_type	= ARG_CONST_MAP_PTR,
-	.arg2_type	= ARG_PTR_TO_BTF_ID,
+	.arg2_type	= ARG_PTR_TO_BTF_ID_OR_NULL,
 	.arg2_btf_id	= &bpf_cgroup_btf_id[0],
 };

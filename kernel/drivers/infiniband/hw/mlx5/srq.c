@@ -45,26 +45,17 @@ static int create_srq_user(struct ib_pd *pd, struct mlx5_ib_srq *srq,
 			   struct ib_udata *udata, int buf_size)
 {
 	struct mlx5_ib_dev *dev = to_mdev(pd->device);
-	struct mlx5_ib_create_srq ucmd = {};
+	struct mlx5_ib_create_srq ucmd;
 	struct mlx5_ib_ucontext *ucontext = rdma_udata_to_drv_context(
 		udata, struct mlx5_ib_ucontext, ibucontext);
-	size_t ucmdlen;
 	int err;
 	u32 uidx = MLX5_IB_DEFAULT_UIDX;
 
-	ucmdlen = min(udata->inlen, sizeof(ucmd));
-
-	if (ib_copy_from_udata(&ucmd, udata, ucmdlen)) {
-		mlx5_ib_dbg(dev, "failed copy udata\n");
-		return -EFAULT;
-	}
+	err = ib_copy_validate_udata_in(udata, ucmd, flags);
+	if (err)
+		return err;
 
 	if (ucmd.reserved0 || ucmd.reserved1)
-		return -EINVAL;
-
-	if (udata->inlen > sizeof(ucmd) &&
-	    !ib_is_udata_cleared(udata, sizeof(ucmd),
-				 udata->inlen - sizeof(ucmd)))
 		return -EINVAL;
 
 	if (in->type != IB_SRQT_BASIC) {
@@ -75,7 +66,7 @@ static int create_srq_user(struct ib_pd *pd, struct mlx5_ib_srq *srq,
 
 	srq->wq_sig = !!(ucmd.flags & MLX5_SRQ_FLAG_SIGNATURE);
 
-	srq->umem = ib_umem_get(pd->device, ucmd.buf_addr, buf_size, 0);
+	srq->umem = ib_umem_get_va(pd->device, ucmd.buf_addr, buf_size, 0);
 	if (IS_ERR(srq->umem)) {
 		mlx5_ib_dbg(dev, "failed umem get, size %d\n", buf_size);
 		err = PTR_ERR(srq->umem);
@@ -83,7 +74,7 @@ static int create_srq_user(struct ib_pd *pd, struct mlx5_ib_srq *srq,
 	}
 	in->umem = srq->umem;
 
-	err = mlx5_ib_db_map_user(ucontext, ucmd.db_addr, &srq->db);
+	err = mlx5_ib_db_map_user(ucontext, NULL, 0, ucmd.db_addr, &srq->db);
 	if (err) {
 		mlx5_ib_dbg(dev, "map doorbell failed\n");
 		goto err_umem;
@@ -199,19 +190,26 @@ int mlx5_ib_create_srq(struct ib_srq *ib_srq,
 	int err;
 	struct mlx5_srq_attr in = {};
 	__u32 max_srq_wqes = 1 << MLX5_CAP_GEN(dev->mdev, log_max_srq_sz);
+	__u32 max_sge_sz =  MLX5_CAP_GEN(dev->mdev, max_wqe_sz_rq) /
+			    sizeof(struct mlx5_wqe_data_seg);
 
 	if (init_attr->srq_type != IB_SRQT_BASIC &&
 	    init_attr->srq_type != IB_SRQT_XRC &&
 	    init_attr->srq_type != IB_SRQT_TM)
 		return -EOPNOTSUPP;
 
-	/* Sanity check SRQ size before proceeding */
-	if (init_attr->attr.max_wr >= max_srq_wqes) {
-		mlx5_ib_dbg(dev, "max_wr %d, cap %d\n",
-			    init_attr->attr.max_wr,
-			    max_srq_wqes);
+	/* Sanity check SRQ and sge size before proceeding */
+	if (init_attr->attr.max_wr >= max_srq_wqes ||
+	    init_attr->attr.max_sge > max_sge_sz) {
+		mlx5_ib_dbg(dev, "max_wr %d,wr_cap %d,max_sge %d, sge_cap:%d\n",
+			    init_attr->attr.max_wr, max_srq_wqes,
+			    init_attr->attr.max_sge, max_sge_sz);
 		return -EINVAL;
 	}
+
+	err = mlx5_ib_dev_res_cq_init(dev);
+	if (err)
+		return err;
 
 	mutex_init(&srq->mutex);
 	spin_lock_init(&srq->lock);
@@ -294,12 +292,9 @@ int mlx5_ib_create_srq(struct ib_srq *ib_srq,
 			.srqn = srq->msrq.srqn,
 		};
 
-		if (ib_copy_to_udata(udata, &resp, min(udata->outlen,
-				     sizeof(resp)))) {
-			mlx5_ib_dbg(dev, "copy to user failed\n");
-			err = -EFAULT;
+		err = ib_respond_udata(udata, resp);
+		if (err)
 			goto err_core;
-		}
 	}
 
 	init_attr->attr.max_wr = srq->msrq.max - 1;
@@ -351,7 +346,7 @@ int mlx5_ib_query_srq(struct ib_srq *ibsrq, struct ib_srq_attr *srq_attr)
 	int ret;
 	struct mlx5_srq_attr *out;
 
-	out = kzalloc(sizeof(*out), GFP_KERNEL);
+	out = kzalloc_obj(*out);
 	if (!out)
 		return -ENOMEM;
 
@@ -447,7 +442,7 @@ int mlx5_ib_post_srq_recv(struct ib_srq *ibsrq, const struct ib_recv_wr *wr,
 
 		if (i < srq->msrq.max_avail_gather) {
 			scat[i].byte_count = 0;
-			scat[i].lkey       = cpu_to_be32(MLX5_INVALID_LKEY);
+			scat[i].lkey = dev->mkeys.terminate_scatter_list_mkey;
 			scat[i].addr       = 0;
 		}
 	}

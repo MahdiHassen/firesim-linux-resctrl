@@ -10,6 +10,7 @@
 
 #include "tc_bindings.h"
 #include "tc.h"
+#include "tc_encap_actions.h"
 
 struct efx_tc_block_binding {
 	struct list_head list;
@@ -58,7 +59,7 @@ static struct efx_tc_block_binding *efx_tc_create_binding(
 			struct efx_nic *efx, struct efx_rep *efv,
 			struct net_device *otherdev, struct flow_block *block)
 {
-	struct efx_tc_block_binding *binding = kmalloc(sizeof(*binding), GFP_KERNEL);
+	struct efx_tc_block_binding *binding = kmalloc_obj(*binding);
 
 	if (!binding)
 		return ERR_PTR(-ENOMEM);
@@ -225,4 +226,16 @@ int efx_tc_setup(struct net_device *net_dev, enum tc_setup_type type,
 		return efx_tc_setup_block(net_dev, efx, type_data, NULL);
 
 	return -EOPNOTSUPP;
+}
+
+int efx_tc_netdev_event(struct efx_nic *efx, unsigned long event,
+			struct net_device *net_dev)
+{
+	if (efx->type->is_vf)
+		return NOTIFY_DONE;
+
+	if (event == NETDEV_UNREGISTER)
+		efx_tc_unregister_egdev(efx, net_dev);
+
+	return NOTIFY_OK;
 }

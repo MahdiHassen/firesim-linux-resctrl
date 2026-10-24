@@ -14,11 +14,12 @@ import os
 import shlex
 import shutil
 import signal
+import sys
 import threading
-from typing import Iterator, List, Optional, Tuple
+from typing import Iterator, List, Optional, Tuple, Any
+from types import FrameType
 
 import kunit_config
-from kunit_printer import stdout
 import qemu_config
 
 KCONFIG_PATH = '.config'
@@ -57,7 +58,7 @@ class LinuxSourceTreeOperations:
 	def make_arch_config(self, base_kunitconfig: kunit_config.Kconfig) -> kunit_config.Kconfig:
 		return base_kunitconfig
 
-	def make_olddefconfig(self, build_dir: str, make_options) -> None:
+	def make_olddefconfig(self, build_dir: str, make_options: Optional[List[str]]) -> None:
 		command = ['make', 'ARCH=' + self._linux_arch, 'O=' + build_dir, 'olddefconfig']
 		if self._cross_compile:
 			command += ['CROSS_COMPILE=' + self._cross_compile]
@@ -71,8 +72,9 @@ class LinuxSourceTreeOperations:
 		except subprocess.CalledProcessError as e:
 			raise ConfigError(e.output.decode())
 
-	def make(self, jobs, build_dir: str, make_options) -> None:
-		command = ['make', 'ARCH=' + self._linux_arch, 'O=' + build_dir, '--jobs=' + str(jobs)]
+	def make(self, jobs: int, build_dir: str, make_options: Optional[List[str]]) -> None:
+		command = ['make', 'all', 'compile_commands.json', 'scripts_gdb',
+			   'ARCH=' + self._linux_arch, 'O=' + build_dir, '--jobs=' + str(jobs)]
 		if make_options:
 			command.extend(make_options)
 		if self._cross_compile:
@@ -104,8 +106,11 @@ class LinuxSourceTreeOperationsQemu(LinuxSourceTreeOperations):
 		self._kconfig = qemu_arch_params.kconfig
 		self._qemu_arch = qemu_arch_params.qemu_arch
 		self._kernel_path = qemu_arch_params.kernel_path
-		self._kernel_command_line = qemu_arch_params.kernel_command_line + ' kunit_shutdown=reboot'
+		self._kernel_command_line = qemu_arch_params.kernel_command_line
+		if 'kunit_shutdown=' not in self._kernel_command_line:
+			self._kernel_command_line += ' kunit_shutdown=reboot'
 		self._extra_qemu_params = qemu_arch_params.extra_qemu_params
+		self._serial = qemu_arch_params.serial
 
 	def make_arch_config(self, base_kunitconfig: kunit_config.Kconfig) -> kunit_config.Kconfig:
 		kconfig = kunit_config.parse_from_string(self._kconfig)
@@ -121,7 +126,10 @@ class LinuxSourceTreeOperationsQemu(LinuxSourceTreeOperations):
 				'-append', ' '.join(params + [self._kernel_command_line]),
 				'-no-reboot',
 				'-nographic',
-				'-serial', 'stdio'] + self._extra_qemu_params
+				'-accel', 'kvm',
+				'-accel', 'hvf',
+				'-accel', 'tcg',
+				'-serial', self._serial] + self._extra_qemu_params
 		# Note: shlex.join() does what we want, but requires python 3.8+.
 		print('Running tests with:\n$', ' '.join(shlex.quote(arg) for arg in qemu_command))
 		return subprocess.Popen(qemu_command,
@@ -133,7 +141,7 @@ class LinuxSourceTreeOperationsQemu(LinuxSourceTreeOperations):
 class LinuxSourceTreeOperationsUml(LinuxSourceTreeOperations):
 	"""An abstraction over command line operations performed on a source tree."""
 
-	def __init__(self, cross_compile=None):
+	def __init__(self, cross_compile: Optional[str]=None):
 		super().__init__(linux_arch='um', cross_compile=cross_compile)
 
 	def make_arch_config(self, base_kunitconfig: kunit_config.Kconfig) -> kunit_config.Kconfig:
@@ -145,6 +153,7 @@ class LinuxSourceTreeOperationsUml(LinuxSourceTreeOperations):
 		"""Runs the Linux UML binary. Must be named 'linux'."""
 		linux_bin = os.path.join(build_dir, 'linux')
 		params.extend(['mem=1G', 'console=tty', 'kunit_shutdown=halt'])
+		print('Running tests with:\n$', linux_bin, ' '.join(shlex.quote(arg) for arg in params))
 		return subprocess.Popen([linux_bin] + params,
 					   stdin=subprocess.PIPE,
 					   stdout=subprocess.PIPE,
@@ -193,6 +202,13 @@ def _default_qemu_config_path(arch: str) -> str:
 		return config_path
 
 	options = [f[:-3] for f in os.listdir(QEMU_CONFIGS_DIR) if f.endswith('.py')]
+
+	if arch == 'help':
+		print('um')
+		for option in options:
+			print(option)
+		sys.exit()
+
 	raise ConfigError(arch + ' is not a valid arch, options are ' + str(sorted(options)))
 
 def _get_qemu_ops(config_path: str,
@@ -202,7 +218,7 @@ def _get_qemu_ops(config_path: str,
 	# exists (I learned this through experimentation and could not find it
 	# anywhere in the Python documentation).
 	#
-	# Bascially, we completely ignore the actual file location of the config
+	# Basically, we completely ignore the actual file location of the config
 	# we are loading and just tell Python that the module lives in the
 	# QEMU_CONFIGS_DIR for import purposes regardless of where it actually
 	# exists as a file.
@@ -216,7 +232,7 @@ def _get_qemu_ops(config_path: str,
 
 	if not hasattr(config, 'QEMU_ARCH'):
 		raise ValueError('qemu_config module missing "QEMU_ARCH": ' + config_path)
-	params: qemu_config.QemuArchParams = config.QEMU_ARCH  # type: ignore
+	params: qemu_config.QemuArchParams = config.QEMU_ARCH
 	if extra_qemu_args:
 		params.extra_qemu_params.extend(extra_qemu_args)
 	return params.linux_arch, LinuxSourceTreeOperationsQemu(
@@ -230,10 +246,10 @@ class LinuxSourceTree:
 	      build_dir: str,
 	      kunitconfig_paths: Optional[List[str]]=None,
 	      kconfig_add: Optional[List[str]]=None,
-	      arch=None,
-	      cross_compile=None,
-	      qemu_config_path=None,
-	      extra_qemu_args=None) -> None:
+	      arch: Optional[str]=None,
+	      cross_compile: Optional[str]=None,
+	      qemu_config_path: Optional[str]=None,
+	      extra_qemu_args: Optional[List[str]]=None) -> None:
 		signal.signal(signal.SIGINT, self.signal_handler)
 		if qemu_config_path:
 			self._arch, self._ops = _get_qemu_ops(qemu_config_path, extra_qemu_args, cross_compile)
@@ -249,6 +265,7 @@ class LinuxSourceTree:
 		if kconfig_add:
 			kconfig = kunit_config.parse_from_string('\n'.join(kconfig_add))
 			self._kconfig.merge_in_entries(kconfig)
+		self._process : Optional[subprocess.Popen[Any]] = None
 
 	def arch(self) -> str:
 		return self._arch
@@ -276,7 +293,7 @@ class LinuxSourceTree:
 		logging.error(message)
 		return False
 
-	def build_config(self, build_dir: str, make_options) -> bool:
+	def build_config(self, build_dir: str, make_options: Optional[List[str]]) -> bool:
 		kconfig_path = get_kconfig_path(build_dir)
 		if build_dir and not os.path.exists(build_dir):
 			os.mkdir(build_dir)
@@ -304,7 +321,7 @@ class LinuxSourceTree:
 		old_kconfig = kunit_config.parse_file(old_path)
 		return old_kconfig != self._kconfig
 
-	def build_reconfig(self, build_dir: str, make_options) -> bool:
+	def build_reconfig(self, build_dir: str, make_options: Optional[List[str]]) -> bool:
 		"""Creates a new .config if it is not a subset of the .kunitconfig."""
 		kconfig_path = get_kconfig_path(build_dir)
 		if not os.path.exists(kconfig_path):
@@ -320,7 +337,7 @@ class LinuxSourceTree:
 		os.remove(kconfig_path)
 		return self.build_config(build_dir, make_options)
 
-	def build_kernel(self, jobs, build_dir: str, make_options) -> bool:
+	def build_kernel(self, jobs: int, build_dir: str, make_options: Optional[List[str]]) -> bool:
 		try:
 			self._ops.make_olddefconfig(build_dir, make_options)
 			self._ops.make(jobs, build_dir, make_options)
@@ -329,43 +346,64 @@ class LinuxSourceTree:
 			return False
 		return self.validate_config(build_dir)
 
-	def run_kernel(self, args=None, build_dir='', filter_glob='', timeout=None) -> Iterator[str]:
-		if not args:
-			args = []
+	def _restore_terminal_if_tty(self) -> None:
+		# stty requires a controlling terminal; skip headless runs.
+		if sys.stdin is None or not sys.stdin.isatty():
+			return
+		subprocess.call(['stty', 'sane'])
+
+	def run_kernel(self, args: Optional[List[str]]=None, build_dir: str='', filter_glob: str='', filter: str='', filter_action: Optional[str]=None, timeout: Optional[int]=None) -> Iterator[str]:
+		# Copy to avoid mutating the caller-supplied list. exec_tests() reuses
+		# the same args across repeated run_kernel() calls (e.g. --run_isolated),
+		# so appending to the original would accumulate stale flags on each call.
+		args = list(args) if args else []
 		if filter_glob:
-			args.append('kunit.filter_glob='+filter_glob)
+			args.append('kunit.filter_glob=' + filter_glob)
+		if filter:
+			args.append('kunit.filter="' + filter + '"')
+		if filter_action:
+			args.append('kunit.filter_action=' + filter_action)
 		args.append('kunit.enable=1')
 
-		process = self._ops.start(args, build_dir)
-		assert process.stdout is not None  # tell mypy it's set
+		self._process = self._ops.start(args, build_dir)
+		assert self._process is not None # tell mypy it's set
+		assert self._process.stdout is not None  # tell mypy it's set
 
 		# Enforce the timeout in a background thread.
-		def _wait_proc():
+		def _wait_proc() -> None:
 			try:
-				process.wait(timeout=timeout)
+				if self._process:
+					self._process.wait(timeout=timeout)
 			except Exception as e:
 				print(e)
-				process.terminate()
-				process.wait()
+				if self._process:
+					self._process.terminate()
+					self._process.wait()
 		waiter = threading.Thread(target=_wait_proc)
 		waiter.start()
 
 		output = open(get_outfile_path(build_dir), 'w')
 		try:
 			# Tee the output to the file and to our caller in real time.
-			for line in process.stdout:
+			for line in self._process.stdout:
 				output.write(line)
 				yield line
 		# This runs even if our caller doesn't consume every line.
 		finally:
 			# Flush any leftover output to the file
-			output.write(process.stdout.read())
+			if self._process:
+				if self._process.stdout:
+					output.write(self._process.stdout.read())
+					self._process.stdout.close()
+				self._process = None
 			output.close()
-			process.stdout.close()
 
 			waiter.join()
-			subprocess.call(['stty', 'sane'])
+			self._restore_terminal_if_tty()
 
-	def signal_handler(self, unused_sig, unused_frame) -> None:
+	def signal_handler(self, unused_sig: int, unused_frame: Optional[FrameType]) -> None:
 		logging.error('Build interruption occurred. Cleaning console.')
-		subprocess.call(['stty', 'sane'])
+		if self._process:
+				self._process.terminate()
+				self._process.wait()
+		self._restore_terminal_if_tty()

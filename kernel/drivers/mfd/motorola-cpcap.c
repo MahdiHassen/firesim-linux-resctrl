@@ -11,7 +11,6 @@
 #include <linux/irq.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/of_device.h>
 #include <linux/regmap.h>
 #include <linux/sysfs.h>
 
@@ -290,13 +289,8 @@ static const struct mfd_cell cpcap_mfd_devices[] = {
 
 static int cpcap_probe(struct spi_device *spi)
 {
-	const struct of_device_id *match;
 	struct cpcap_ddata *cpcap;
 	int ret;
-
-	match = of_match_device(cpcap_of_match, &spi->dev);
-	if (!match)
-		return -ENODEV;
 
 	cpcap = devm_kzalloc(&spi->dev, sizeof(*cpcap), GFP_KERNEL);
 	if (!cpcap)

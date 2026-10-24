@@ -22,7 +22,7 @@
 #define USB0_RESET		35
 #define USB1_RESET		36
 #define NAND_RESET		37
-/* 38 is empty */
+#define COMBOPHY_RESET		38
 #define SDMMC_RESET		39
 #define EMAC0_OCP_RESET		40
 #define EMAC1_OCP_RESET		41
@@ -63,12 +63,15 @@
 #define I2C2_RESET		74
 #define I2C3_RESET		75
 #define I2C4_RESET		76
-/* 77-79 is empty */
+#define I3C0_RESET		77
+#define I3C1_RESET		78
+/* 79 is empty */
 #define UART0_RESET		80
 #define UART1_RESET		81
 /* 82-87 is empty */
 #define GPIO0_RESET		88
 #define GPIO1_RESET		89
+#define WATCHDOG4_RESET		90
 
 /* BRGMODRST */
 #define SOC2FPGA_RESET		96

@@ -2,8 +2,9 @@
 
 #include <linux/ethtool.h>
 #include <linux/sfp.h>
-#include "netlink.h"
+
 #include "common.h"
+#include "netlink.h"
 
 struct eeprom_req_info {
 	struct ethnl_req_info	base;
@@ -43,6 +44,9 @@ static int fallback_set_params(struct eeprom_req_info *request,
 	if (offset >= modinfo->eeprom_len)
 		return -EINVAL;
 
+	if (length > modinfo->eeprom_len - offset)
+		return -EINVAL;
+
 	eeprom->cmd = ETHTOOL_GMODULEEEPROM;
 	eeprom->len = length;
 	eeprom->offset = offset;
@@ -51,8 +55,7 @@ static int fallback_set_params(struct eeprom_req_info *request,
 }
 
 static int eeprom_fallback(struct eeprom_req_info *request,
-			   struct eeprom_reply_data *reply,
-			   struct genl_info *info)
+			   struct eeprom_reply_data *reply)
 {
 	struct net_device *dev = reply->base.dev;
 	struct ethtool_modinfo modinfo = {0};
@@ -69,7 +72,7 @@ static int eeprom_fallback(struct eeprom_req_info *request,
 	if (err < 0)
 		return err;
 
-	data = kmalloc(eeprom.len, GFP_KERNEL);
+	data = kzalloc(eeprom.len, GFP_KERNEL);
 	if (!data)
 		return -ENOMEM;
 	err = ethtool_get_module_eeprom_call(dev, &eeprom, data);
@@ -92,6 +95,12 @@ static int get_module_eeprom_by_page(struct net_device *dev,
 {
 	const struct ethtool_ops *ops = dev->ethtool_ops;
 
+	if (dev->ethtool->module_fw_flash_in_progress) {
+		NL_SET_ERR_MSG(extack,
+			       "Module firmware flashing is in progress");
+		return -EBUSY;
+	}
+
 	if (dev->sfp_bus)
 		return sfp_get_module_eeprom_by_page(dev->sfp_bus, page_data, extack);
 
@@ -103,7 +112,7 @@ static int get_module_eeprom_by_page(struct net_device *dev,
 
 static int eeprom_prepare_data(const struct ethnl_req_info *req_base,
 			       struct ethnl_reply_data *reply_base,
-			       struct genl_info *info)
+			       const struct genl_info *info)
 {
 	struct eeprom_reply_data *reply = MODULE_EEPROM_REPDATA(reply_base);
 	struct eeprom_req_info *request = MODULE_EEPROM_REQINFO(req_base);
@@ -124,7 +133,7 @@ static int eeprom_prepare_data(const struct ethnl_req_info *req_base,
 	if (ret)
 		goto err_free;
 
-	ret = get_module_eeprom_by_page(dev, &page_data, info ? info->extack : NULL);
+	ret = get_module_eeprom_by_page(dev, &page_data, info->extack);
 	if (ret < 0)
 		goto err_ops;
 
@@ -135,24 +144,25 @@ static int eeprom_prepare_data(const struct ethnl_req_info *req_base,
 	return 0;
 
 err_ops:
+	if (ret == -EOPNOTSUPP)
+		ret = eeprom_fallback(request, reply);
 	ethnl_ops_complete(dev);
 err_free:
 	kfree(page_data.data);
-
-	if (ret == -EOPNOTSUPP)
-		return eeprom_fallback(request, reply, info);
 	return ret;
 }
 
-static int eeprom_parse_request(struct ethnl_req_info *req_info, struct nlattr **tb,
+static int eeprom_parse_request(struct ethnl_req_info *req_info,
+				const struct genl_info *info,
+				struct nlattr **tb,
 				struct netlink_ext_ack *extack)
 {
 	struct eeprom_req_info *request = MODULE_EEPROM_REQINFO(req_info);
 
-	if (!tb[ETHTOOL_A_MODULE_EEPROM_OFFSET] ||
-	    !tb[ETHTOOL_A_MODULE_EEPROM_LENGTH] ||
-	    !tb[ETHTOOL_A_MODULE_EEPROM_PAGE] ||
-	    !tb[ETHTOOL_A_MODULE_EEPROM_I2C_ADDRESS])
+	if (GENL_REQ_ATTR_CHECK(info, ETHTOOL_A_MODULE_EEPROM_OFFSET) ||
+	    GENL_REQ_ATTR_CHECK(info, ETHTOOL_A_MODULE_EEPROM_LENGTH) ||
+	    GENL_REQ_ATTR_CHECK(info, ETHTOOL_A_MODULE_EEPROM_PAGE) ||
+	    GENL_REQ_ATTR_CHECK(info, ETHTOOL_A_MODULE_EEPROM_I2C_ADDRESS))
 		return -EINVAL;
 
 	request->i2c_address = nla_get_u8(tb[ETHTOOL_A_MODULE_EEPROM_I2C_ADDRESS]);

@@ -72,13 +72,9 @@ void rproc_init_debugfs(void);
 void rproc_exit_debugfs(void);
 
 /* from remoteproc_sysfs.c */
-extern struct class rproc_class;
+extern const struct class rproc_class;
 int rproc_init_sysfs(void);
 void rproc_exit_sysfs(void);
-
-/* from remoteproc_coredump.c */
-void rproc_coredump_cleanup(struct rproc *rproc);
-void rproc_coredump(struct rproc *rproc);
 
 #ifdef CONFIG_REMOTEPROC_CDEV
 void rproc_init_cdev(void);
@@ -222,7 +218,7 @@ bool rproc_u64_fit_in_size_t(u64 val)
 	if (sizeof(size_t) == sizeof(u64))
 		return true;
 
-	return (val <= (size_t) -1);
+	return val <= SIZE_MAX;
 }
 
 #endif /* REMOTEPROC_INTERNAL_H */

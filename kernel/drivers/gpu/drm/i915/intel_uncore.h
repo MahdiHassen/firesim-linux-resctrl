@@ -123,12 +123,6 @@ struct intel_forcewake_range {
 	enum forcewake_domains domains;
 };
 
-/* Other register ranges (e.g., shadow tables, MCR tables, etc.) */
-struct i915_range {
-	u32 start;
-	u32 end;
-};
-
 struct intel_uncore {
 	void __iomem *regs;
 
@@ -153,6 +147,7 @@ struct intel_uncore {
 #define UNCORE_HAS_FPGA_DBG_UNCLAIMED	BIT(1)
 #define UNCORE_HAS_DBG_UNCLAIMED	BIT(2)
 #define UNCORE_HAS_FIFO			BIT(3)
+#define UNCORE_NEEDS_FLR_ON_FINI	BIT(4)
 
 	const struct intel_forcewake_range *fw_domains_table;
 	unsigned int fw_domains_table_entries;
@@ -161,7 +156,7 @@ struct intel_uncore {
 	 * Shadowed registers are special cases where we can safely write
 	 * to the register *without* grabbing forcewake.
 	 */
-	const struct i915_range *shadowed_reg_table;
+	const struct i915_mmio_range *shadowed_reg_table;
 	unsigned int shadowed_reg_table_entries;
 
 	struct notifier_block pmic_bus_access_nb;
@@ -221,6 +216,18 @@ static inline bool
 intel_uncore_has_fifo(const struct intel_uncore *uncore)
 {
 	return uncore->flags & UNCORE_HAS_FIFO;
+}
+
+static inline bool
+intel_uncore_needs_flr_on_fini(const struct intel_uncore *uncore)
+{
+	return uncore->flags & UNCORE_NEEDS_FLR_ON_FINI;
+}
+
+static inline bool
+intel_uncore_set_flr_on_fini(struct intel_uncore *uncore)
+{
+	return uncore->flags |= UNCORE_NEEDS_FLR_ON_FINI;
 }
 
 void intel_uncore_mmio_debug_init_early(struct drm_i915_private *i915);
@@ -300,10 +307,11 @@ intel_wait_for_register_fw(struct intel_uncore *uncore,
 			   i915_reg_t reg,
 			   u32 mask,
 			   u32 value,
-			       unsigned int timeout_ms)
+			   unsigned int timeout_ms,
+			   u32 *out_value)
 {
 	return __intel_wait_for_register_fw(uncore, reg, mask, value,
-					    2, timeout_ms, NULL);
+					    2, timeout_ms, out_value);
 }
 
 #define IS_GSI_REG(reg) ((reg) < 0x40000)
@@ -482,6 +490,13 @@ static inline int intel_uncore_write_and_verify(struct intel_uncore *uncore,
 
 	return (reg_val & mask) != expected_val ? -EINVAL : 0;
 }
+
+static inline void __iomem *intel_uncore_regs(struct intel_uncore *uncore)
+{
+	return uncore->regs;
+}
+
+struct intel_uncore *to_intel_uncore(struct drm_device *drm);
 
 /*
  * The raw_reg_{read,write} macros are intended as a micro-optimization for

@@ -27,7 +27,6 @@
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
@@ -306,14 +305,12 @@ static void omap_wdt_shutdown(struct platform_device *pdev)
 	mutex_unlock(&wdev->lock);
 }
 
-static int omap_wdt_remove(struct platform_device *pdev)
+static void omap_wdt_remove(struct platform_device *pdev)
 {
 	struct omap_wdt_dev *wdev = platform_get_drvdata(pdev);
 
 	pm_runtime_disable(wdev->dev);
 	watchdog_unregister_device(&wdev->wdog);
-
-	return 0;
 }
 
 /* REVISIT ... not clear this is the best way to handle system suspend; and
@@ -372,5 +369,6 @@ static struct platform_driver omap_wdt_driver = {
 module_platform_driver(omap_wdt_driver);
 
 MODULE_AUTHOR("George G. Davis");
+MODULE_DESCRIPTION("Driver for the TI OMAP 16xx/24xx/34xx 32KHz (non-secure) watchdog");
 MODULE_LICENSE("GPL");
 MODULE_ALIAS("platform:omap_wdt");

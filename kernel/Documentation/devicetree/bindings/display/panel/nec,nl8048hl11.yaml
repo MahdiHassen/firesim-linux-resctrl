@@ -21,10 +21,8 @@ properties:
   compatible:
     const: nec,nl8048hl11
 
-  label: true
-  port: true
-  reg: true
-  reset-gpios: true
+  reg:
+    maxItems: 1
 
   spi-max-frequency:
     maximum: 10000000
@@ -41,7 +39,7 @@ examples:
   - |
     #include <dt-bindings/gpio/gpio.h>
 
-    spi0 {
+    spi {
       #address-cells = <1>;
       #size-cells = <0>;
 

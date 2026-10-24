@@ -9,7 +9,6 @@
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/of_irq.h>
-#include <linux/of_platform.h>
 #include <linux/platform_device.h>
 #include <linux/remoteproc/qcom_rproc.h>
 #include <linux/rpmsg.h>
@@ -204,7 +203,7 @@ static const struct qmi_elem_info ssctl_shutdown_resp_ei[] = {
 };
 
 struct ssctl_subsys_event_req {
-	u8 subsys_name_len;
+	u32 subsys_name_len;
 	char subsys_name[SSCTL_SUBSYS_NAME_LENGTH];
 	u32 event;
 	u8 evt_driven_valid;
@@ -388,7 +387,7 @@ static void ssctl_send_event(struct qcom_sysmon *sysmon,
 	}
 
 	memset(&req, 0, sizeof(req));
-	strlcpy(req.subsys_name, event->subsys_name, sizeof(req.subsys_name));
+	strscpy(req.subsys_name, event->subsys_name, sizeof(req.subsys_name));
 	req.subsys_name_len = strlen(req.subsys_name);
 	req.event = event->ssr_event;
 	req.evt_driven_valid = true;
@@ -620,7 +619,7 @@ static irqreturn_t sysmon_shutdown_interrupt(int irq, void *data)
  * @name:	name of this subdev, to use in SSR
  * @ssctl_instance: instance id of the ssctl QMI service
  *
- * Return: A new qcom_sysmon object, or NULL on failure
+ * Return: A new qcom_sysmon object, or an error pointer on failure
  */
 struct qcom_sysmon *qcom_add_sysmon_subdev(struct rproc *rproc,
 					   const char *name,
@@ -629,7 +628,7 @@ struct qcom_sysmon *qcom_add_sysmon_subdev(struct rproc *rproc,
 	struct qcom_sysmon *sysmon;
 	int ret;
 
-	sysmon = kzalloc(sizeof(*sysmon), GFP_KERNEL);
+	sysmon = kzalloc_obj(*sysmon);
 	if (!sysmon)
 		return ERR_PTR(-ENOMEM);
 
@@ -678,7 +677,7 @@ struct qcom_sysmon *qcom_add_sysmon_subdev(struct rproc *rproc,
 		return ERR_PTR(ret);
 	}
 
-	qmi_add_lookup(&sysmon->qmi, 43, 0, 0);
+	qmi_add_lookup(&sysmon->qmi, QMI_SERVICE_ID_SSCTL, 0, 0);
 
 	sysmon->subdev.prepare = sysmon_prepare;
 	sysmon->subdev.start = sysmon_start;

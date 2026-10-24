@@ -1,12 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * ALSA SoC SPDIF Out Audio Layer for spear processors
  *
  * Copyright (C) 2012 ST Microelectronics
  * Vipin Kumar <vipin.kumar@st.com>
- *
- * This file is licensed under the terms of the GNU General Public
- * License version 2. This program is licensed "as is" without any
- * warranty of any kind, whether express or implied.
  */
 
 #include <linux/clk.h>
@@ -244,7 +241,8 @@ static int spdif_soc_dai_probe(struct snd_soc_dai *dai)
 	struct spdif_out_dev *host = snd_soc_dai_get_drvdata(dai);
 
 	host->dma_params_tx.filter_data = &host->dma_params;
-	dai->playback_dma_data = &host->dma_params_tx;
+
+	snd_soc_dai_dma_data_set_playback(dai, &host->dma_params_tx);
 
 	return snd_soc_add_dai_controls(dai, spdif_out_controls,
 				ARRAY_SIZE(spdif_out_controls));

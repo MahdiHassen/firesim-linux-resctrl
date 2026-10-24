@@ -12,7 +12,7 @@
 #include <linux/errno.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/of_device.h>
+#include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/regulator/consumer.h>
 #include <linux/reset.h>
@@ -175,6 +175,7 @@ struct tegra_ahci_priv {
 	struct reset_control	   *sata_cold_rst;
 	/* Needs special handling, cannot use ahci_platform */
 	struct clk		   *sata_clk;
+	struct tegra_pmc	   *pmc;
 	struct regulator_bulk_data *supplies;
 	const struct tegra_ahci_soc *soc;
 };
@@ -246,9 +247,10 @@ static int tegra_ahci_power_on(struct ahci_host_priv *hpriv)
 		return ret;
 
 	if (!tegra->pdev->dev.pm_domain) {
-		ret = tegra_powergate_sequence_power_up(TEGRA_POWERGATE_SATA,
-							tegra->sata_clk,
-							tegra->sata_rst);
+		ret = tegra_pmc_powergate_sequence_power_up(tegra->pmc,
+							    TEGRA_POWERGATE_SATA,
+							    tegra->sata_clk,
+							    tegra->sata_rst);
 		if (ret)
 			goto disable_regulators;
 	}
@@ -269,7 +271,7 @@ disable_power:
 	clk_disable_unprepare(tegra->sata_clk);
 
 	if (!tegra->pdev->dev.pm_domain)
-		tegra_powergate_power_off(TEGRA_POWERGATE_SATA);
+		tegra_pmc_powergate_power_off(tegra->pmc, TEGRA_POWERGATE_SATA);
 
 disable_regulators:
 	regulator_bulk_disable(tegra->soc->num_supplies, tegra->supplies);
@@ -289,7 +291,7 @@ static void tegra_ahci_power_off(struct ahci_host_priv *hpriv)
 
 	clk_disable_unprepare(tegra->sata_clk);
 	if (!tegra->pdev->dev.pm_domain)
-		tegra_powergate_power_off(TEGRA_POWERGATE_SATA);
+		tegra_pmc_powergate_power_off(tegra->pmc, TEGRA_POWERGATE_SATA);
 
 	regulator_bulk_disable(tegra->soc->num_supplies, tegra->supplies);
 }
@@ -506,7 +508,7 @@ static const struct of_device_id tegra_ahci_of_match[] = {
 };
 MODULE_DEVICE_TABLE(of, tegra_ahci_of_match);
 
-static struct scsi_host_template ahci_platform_sht = {
+static const struct scsi_host_template ahci_platform_sht = {
 	AHCI_SHT(DRV_NAME),
 };
 
@@ -530,8 +532,7 @@ static int tegra_ahci_probe(struct platform_device *pdev)
 	tegra->pdev = pdev;
 	tegra->soc = of_device_get_match_data(&pdev->dev);
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 1);
-	tegra->sata_regs = devm_ioremap_resource(&pdev->dev, res);
+	tegra->sata_regs = devm_platform_ioremap_resource(pdev, 1);
 	if (IS_ERR(tegra->sata_regs))
 		return PTR_ERR(tegra->sata_regs);
 
@@ -571,6 +572,11 @@ static int tegra_ahci_probe(struct platform_device *pdev)
 		dev_err(&pdev->dev, "Failed to get sata clock\n");
 		return PTR_ERR(tegra->sata_clk);
 	}
+
+	tegra->pmc = devm_tegra_pmc_get(&pdev->dev);
+	if (IS_ERR(tegra->pmc))
+		return dev_err_probe(&pdev->dev, PTR_ERR(tegra->pmc),
+				     "failed to get PMC\n");
 
 	tegra->supplies = devm_kcalloc(&pdev->dev,
 				       tegra->soc->num_supplies,

@@ -204,11 +204,13 @@
 		A53_L2: l2-cache0 {
 			compatible = "cache";
 			cache-level = <2>;
+			cache-unified;
 		};
 
 		A73_L2: l2-cache1 {
 			compatible = "cache";
 			cache-level = <2>;
+			cache-unified;
 		};
 	};
 
@@ -1055,7 +1057,7 @@
 		};
 
 		/* SD */
-		dwmmc1: dwmmc1@ff37f000 {
+		dwmmc1: mmc@ff37f000 {
 			compatible = "hisilicon,hi3660-dw-mshc";
 			reg = <0x0 0xff37f000 0x0 0x1000>;
 			#address-cells = <1>;
@@ -1073,7 +1075,7 @@
 		};
 
 		/* SDIO */
-		dwmmc2: dwmmc2@ff3ff000 {
+		dwmmc2: mmc@ff3ff000 {
 			compatible = "hisilicon,hi3660-dw-mshc";
 			reg = <0x0 0xff3ff000 0x0 0x1000>;
 			#address-cells = <0x1>;
@@ -1159,7 +1161,7 @@
 		};
 
 		usb3_otg_bc: usb3_otg_bc@ff200000 {
-			compatible = "syscon", "simple-mfd";
+			compatible = "hisilicon,hi3660-usb3-otg-bc", "syscon", "simple-mfd";
 			reg = <0x0 0xff200000 0x0 0x1000>;
 
 			usb_phy: usb-phy {

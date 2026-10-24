@@ -208,7 +208,7 @@ qm1d1b0004_probe(struct i2c_client *client)
 	fe = cfg->fe;
 	i2c_set_clientdata(client, fe);
 
-	fe->tuner_priv = kzalloc(sizeof(struct qm1d1b0004_state), GFP_KERNEL);
+	fe->tuner_priv = kzalloc_obj(struct qm1d1b0004_state);
 	if (!fe->tuner_priv) {
 		ret = -ENOMEM;
 		goto err_mem;
@@ -243,8 +243,8 @@ static void qm1d1b0004_remove(struct i2c_client *client)
 
 
 static const struct i2c_device_id qm1d1b0004_id[] = {
-	{"qm1d1b0004", 0},
-	{}
+	{ .name = "qm1d1b0004" },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(i2c, qm1d1b0004_id);
@@ -253,7 +253,7 @@ static struct i2c_driver qm1d1b0004_driver = {
 	.driver = {
 		.name = "qm1d1b0004",
 	},
-	.probe_new = qm1d1b0004_probe,
+	.probe    = qm1d1b0004_probe,
 	.remove   = qm1d1b0004_remove,
 	.id_table = qm1d1b0004_id,
 };

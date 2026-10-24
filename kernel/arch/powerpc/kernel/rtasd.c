@@ -89,6 +89,8 @@ static char *rtas_event_type(int type)
 			return "Platform Resource Reassignment Event";
 		case RTAS_TYPE_HOTPLUG:
 			return "Hotplug Event";
+		case RTAS_TYPE_HVPIPE:
+			return "Hypervisor Pipe Notification event";
 	}
 
 	return rtas_type[0];
@@ -506,7 +508,7 @@ static int __init rtas_event_scan_init(void)
 		return 0;
 
 	/* No RTAS */
-	event_scan = rtas_token("event-scan");
+	event_scan = rtas_function_token(RTAS_FN_EVENT_SCAN);
 	if (event_scan == RTAS_UNKNOWN_SERVICE) {
 		printk(KERN_INFO "rtasd: No event-scan on system\n");
 		return -ENODEV;

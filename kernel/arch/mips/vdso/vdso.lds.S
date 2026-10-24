@@ -5,6 +5,8 @@
  */
 
 #include <asm/sgidefs.h>
+#include <asm/vdso/vdso.h>
+#include <vdso/datapage.h>
 
 #if _MIPS_SIM == _MIPS_SIM_ABI64
 OUTPUT_FORMAT("elf64-tradlittlemips", "elf64-tradbigmips", "elf64-tradlittlemips")
@@ -18,7 +20,8 @@ OUTPUT_ARCH(mips)
 
 SECTIONS
 {
-	PROVIDE(_start = .);
+	VDSO_VVAR_SYMS
+
 	. = SIZEOF_HEADERS;
 
 	/*
@@ -53,6 +56,7 @@ SECTIONS
 	.dynamic	: { *(.dynamic) }		:text :dynamic
 
 	.rodata		: { *(.rodata*) }		:text
+	.got		: { *(.got) }
 
 	_end = .;
 	PROVIDE(end = .);
@@ -91,13 +95,14 @@ PHDRS
 VERSION
 {
 	LINUX_2.6 {
-#ifndef CONFIG_MIPS_DISABLE_VDSO
+#ifdef CONFIG_GENERIC_GETTIMEOFDAY
 	global:
 		__vdso_clock_gettime;
 		__vdso_gettimeofday;
 		__vdso_clock_getres;
 #if _MIPS_SIM != _MIPS_SIM_ABI64
 		__vdso_clock_gettime64;
+		__vdso_clock_getres_time64;
 #endif
 #endif
 	local: *;

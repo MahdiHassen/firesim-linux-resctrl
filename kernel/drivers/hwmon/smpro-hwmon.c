@@ -9,7 +9,6 @@
 #include <linux/hwmon.h>
 #include <linux/hwmon-sysfs.h>
 #include <linux/kernel.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/property.h>
@@ -385,7 +384,7 @@ static umode_t smpro_is_visible(const void *data, enum hwmon_sensor_types type,
 	return 0444;
 }
 
-static const struct hwmon_channel_info *smpro_info[] = {
+static const struct hwmon_channel_info * const smpro_info[] = {
 	HWMON_CHANNEL_INFO(temp,
 			   HWMON_T_INPUT | HWMON_T_LABEL,
 			   HWMON_T_INPUT | HWMON_T_LABEL | HWMON_T_CRIT,

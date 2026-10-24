@@ -1174,7 +1174,12 @@ static u16 MXL5005_ControlInit(struct dvb_frontend *fe)
 	state->Init_Ctrl[39].bit[0] = 3;
 	state->Init_Ctrl[39].val[0] = 1;
 
+	return 0;
+}
 
+static u16 MXL5005_ControlInitCH(struct dvb_frontend *fe)
+{
+	struct mxl5005s_state *state = fe->tuner_priv;
 	state->CH_Ctrl_Num = CHCTRL_NUM ;
 
 	state->CH_Ctrl[0].Ctrl_Num = DN_POLY ;
@@ -1663,6 +1668,7 @@ static void InitTunerControls(struct dvb_frontend *fe)
 {
 	MXL5005_RegisterInit(fe);
 	MXL5005_ControlInit(fe);
+	MXL5005_ControlInitCH(fe);
 #ifdef _MXL_INTERNAL
 	MXL5005_MXLControlInit(fe);
 #endif
@@ -2639,7 +2645,7 @@ static u16 MXL_TuneRF(struct dvb_frontend *fe, u32 RF_Freq)
 	E5A = (((Fmax - state->RF_LO)/1000)*4/((Fmax-Fmin)/1000)) + 1 ;
 	status += MXL_ControlWrite(fe, RFSYN_LPF_R, E5A);
 
-	/* Euqation E5B CHCAL_EN_INIT_RF */
+	/* Equation E5B CHCAL_EN_INIT_RF */
 	status += MXL_ControlWrite(fe, CHCAL_EN_INT_RF, ((E5 == 0) ? 1 : 0));
 	/*if (E5 == 0)
 	 *	status += MXL_ControlWrite(fe, CHCAL_EN_INT_RF, 1);
@@ -3423,9 +3429,11 @@ static u16 MXL_ControlWrite_Group(struct dvb_frontend *fe, u16 controlNum,
 
 			if (controlNum == state->Init_Ctrl[i].Ctrl_Num) {
 
-				highLimit = 1 << state->Init_Ctrl[i].size;
+				u16 size = min_t(u16, state->Init_Ctrl[i].size,
+					       ARRAY_SIZE(state->Init_Ctrl[i].val));
+				highLimit = 1 << size;
 				if (value < highLimit) {
-					for (j = 0; j < state->Init_Ctrl[i].size; j++) {
+					for (j = 0; j < size; j++) {
 						state->Init_Ctrl[i].val[j] = (u8)((value >> j) & 0x01);
 						MXL_RegWriteBit(fe, (u8)(state->Init_Ctrl[i].addr[j]),
 							(u8)(state->Init_Ctrl[i].bit[j]),
@@ -3442,9 +3450,11 @@ static u16 MXL_ControlWrite_Group(struct dvb_frontend *fe, u16 controlNum,
 
 			if (controlNum == state->CH_Ctrl[i].Ctrl_Num) {
 
-				highLimit = 1 << state->CH_Ctrl[i].size;
+				u16 size = min_t(u16, state->CH_Ctrl[i].size,
+					       ARRAY_SIZE(state->CH_Ctrl[i].val));
+				highLimit = 1 << size;
 				if (value < highLimit) {
-					for (j = 0; j < state->CH_Ctrl[i].size; j++) {
+					for (j = 0; j < size; j++) {
 						state->CH_Ctrl[i].val[j] = (u8)((value >> j) & 0x01);
 						MXL_RegWriteBit(fe, (u8)(state->CH_Ctrl[i].addr[j]),
 							(u8)(state->CH_Ctrl[i].bit[j]),
@@ -4099,7 +4109,7 @@ struct dvb_frontend *mxl5005s_attach(struct dvb_frontend *fe,
 	struct mxl5005s_state *state = NULL;
 	dprintk(1, "%s()\n", __func__);
 
-	state = kzalloc(sizeof(struct mxl5005s_state), GFP_KERNEL);
+	state = kzalloc_obj(struct mxl5005s_state);
 	if (state == NULL)
 		return NULL;
 
@@ -4116,7 +4126,7 @@ struct dvb_frontend *mxl5005s_attach(struct dvb_frontend *fe,
 	fe->tuner_priv = state;
 	return fe;
 }
-EXPORT_SYMBOL(mxl5005s_attach);
+EXPORT_SYMBOL_GPL(mxl5005s_attach);
 
 MODULE_DESCRIPTION("MaxLinear MXL5005S silicon tuner driver");
 MODULE_AUTHOR("Steven Toth");

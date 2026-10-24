@@ -153,7 +153,7 @@ static int tef6862_probe(struct i2c_client *client)
 	v4l_info(client, "chip found @ 0x%02x (%s)\n",
 			client->addr << 1, client->adapter->name);
 
-	state = kzalloc(sizeof(struct tef6862_state), GFP_KERNEL);
+	state = kzalloc_obj(struct tef6862_state);
 	if (state == NULL)
 		return -ENOMEM;
 	state->freq = TEF6862_LO_FREQ;
@@ -173,8 +173,8 @@ static void tef6862_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id tef6862_id[] = {
-	{DRIVER_NAME, 0},
-	{},
+	{ .name = DRIVER_NAME },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(i2c, tef6862_id);
@@ -183,7 +183,7 @@ static struct i2c_driver tef6862_driver = {
 	.driver = {
 		.name	= DRIVER_NAME,
 	},
-	.probe_new	= tef6862_probe,
+	.probe		= tef6862_probe,
 	.remove		= tef6862_remove,
 	.id_table	= tef6862_id,
 };

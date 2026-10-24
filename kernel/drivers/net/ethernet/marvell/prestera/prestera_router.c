@@ -166,11 +166,11 @@ prestera_util_neigh2nc_key(struct prestera_switch *sw, struct neighbour *n,
 
 static bool __prestera_fi_is_direct(struct fib_info *fi)
 {
-	struct fib_nh *fib_nh;
+	struct fib_nh_common *fib_nhc;
 
 	if (fib_info_num_path(fi) == 1) {
-		fib_nh = fib_info_nh(fi, 0);
-		if (fib_nh->fib_nh_gw_family == AF_UNSPEC)
+		fib_nhc = fib_info_nhc(fi, 0);
+		if (fib_nhc->nhc_gw_family == AF_UNSPEC)
 			return true;
 	}
 
@@ -261,7 +261,7 @@ static bool
 __prestera_util_kern_n_is_reachable_v4(u32 tb_id, __be32 *addr,
 				       struct net_device *dev)
 {
-	struct fib_nh *fib_nh;
+	struct fib_nh_common *fib_nhc;
 	struct fib_result res;
 	bool reachable;
 
@@ -269,8 +269,8 @@ __prestera_util_kern_n_is_reachable_v4(u32 tb_id, __be32 *addr,
 
 	if (!prestera_util_kern_get_route(&res, tb_id, addr))
 		if (prestera_fi_is_direct(res.fi)) {
-			fib_nh = fib_info_nh(res.fi, 0);
-			if (dev == fib_nh->fib_nh_dev)
+			fib_nhc = fib_info_nhc(res.fi, 0);
+			if (dev == fib_nhc->nhc_dev)
 				reachable = true;
 		}
 
@@ -324,7 +324,7 @@ prestera_kern_fib_info_nhc(struct fib_notifier_info *info, int n)
 	if (info->family == AF_INET) {
 		fen4_info = container_of(info, struct fib_entry_notifier_info,
 					 info);
-		return &fib_info_nh(fen4_info->fi, n)->nh_common;
+		return fib_info_nhc(fen4_info->fi, n);
 	} else if (info->family == AF_INET6) {
 		fen6_info = container_of(info, struct fib6_entry_notifier_info,
 					 info);
@@ -485,7 +485,7 @@ __prestera_kern_neigh_cache_create(struct prestera_switch *sw,
 	struct prestera_kern_neigh_cache *n_cache;
 	int err;
 
-	n_cache = kzalloc(sizeof(*n_cache), GFP_KERNEL);
+	n_cache = kzalloc_obj(*n_cache);
 	if (!n_cache)
 		goto err_kzalloc;
 
@@ -623,7 +623,7 @@ prestera_kern_fib_cache_create(struct prestera_switch *sw,
 	struct prestera_kern_fib_cache *fib_cache;
 	int err;
 
-	fib_cache = kzalloc(sizeof(*fib_cache), GFP_KERNEL);
+	fib_cache = kzalloc_obj(*fib_cache);
 	if (!fib_cache)
 		goto err_kzalloc;
 
@@ -1448,7 +1448,7 @@ static int __prestera_router_fib_event(struct notifier_block *nb,
 		if (!fen_info->fi)
 			return NOTIFY_DONE;
 
-		fib_work = kzalloc(sizeof(*fib_work), GFP_ATOMIC);
+		fib_work = kzalloc_obj(*fib_work, GFP_ATOMIC);
 		if (WARN_ON(!fib_work))
 			return NOTIFY_BAD;
 
@@ -1503,7 +1503,7 @@ static int prestera_router_netevent_event(struct notifier_block *nb,
 		if (n->tbl->family != AF_INET)
 			return NOTIFY_DONE;
 
-		net_work = kzalloc(sizeof(*net_work), GFP_ATOMIC);
+		net_work = kzalloc_obj(*net_work, GFP_ATOMIC);
 		if (WARN_ON(!net_work))
 			return NOTIFY_BAD;
 
@@ -1550,7 +1550,7 @@ int prestera_router_init(struct prestera_switch *sw)
 	struct prestera_router *router;
 	int err, nhgrp_cache_bytes;
 
-	router = kzalloc(sizeof(*sw->router), GFP_KERNEL);
+	router = kzalloc_obj(*sw->router);
 	if (!router)
 		return -ENOMEM;
 

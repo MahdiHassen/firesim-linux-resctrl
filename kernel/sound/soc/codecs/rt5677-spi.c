@@ -112,7 +112,7 @@ static int rt5677_spi_pcm_close(
 		struct snd_soc_component *component,
 		struct snd_pcm_substream *substream)
 {
-	struct snd_soc_pcm_runtime *rtd = asoc_substream_to_rtd(substream);
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
 	struct snd_soc_component *codec_component =
 			snd_soc_rtdcom_lookup(rtd, "rt5677");
 	struct rt5677_priv *rt5677 =
@@ -158,7 +158,7 @@ static int rt5677_spi_prepare(
 		struct snd_soc_component *component,
 		struct snd_pcm_substream *substream)
 {
-	struct snd_soc_pcm_runtime *rtd = asoc_substream_to_rtd(substream);
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
 	struct snd_soc_component *rt5677_component =
 			snd_soc_rtdcom_lookup(rtd, "rt5677");
 	struct rt5677_priv *rt5677 =
@@ -365,8 +365,8 @@ static void rt5677_spi_copy_work(struct work_struct *work)
 		new_bytes -= copy_bytes;
 	}
 
-	delay = bytes_to_frames(runtime, period_bytes) / (runtime->rate / 1000);
-	schedule_delayed_work(&rt5677_dsp->copy_work, msecs_to_jiffies(delay));
+	delay = bytes_to_frames(runtime, period_bytes) / runtime->rate;
+	schedule_delayed_work(&rt5677_dsp->copy_work, secs_to_jiffies(delay));
 done:
 	mutex_unlock(&rt5677_dsp->dma_lock);
 }
@@ -404,7 +404,7 @@ static const struct snd_soc_component_driver rt5677_spi_dai_component = {
 	.hw_free		= rt5677_spi_hw_free,
 	.prepare		= rt5677_spi_prepare,
 	.pointer		= rt5677_spi_pcm_pointer,
-	.pcm_construct		= rt5677_spi_pcm_new,
+	.pcm_new		= rt5677_spi_pcm_new,
 	.legacy_dai_naming	= 1,
 };
 
@@ -617,11 +617,18 @@ static int rt5677_spi_probe(struct spi_device *spi)
 
 #ifdef CONFIG_ACPI
 static const struct acpi_device_id rt5677_spi_acpi_id[] = {
-	{ "RT5677AA", 0 },
+	{ "10EC5677" },
+	{ "RT5677AA" },
 	{ }
 };
 MODULE_DEVICE_TABLE(acpi, rt5677_spi_acpi_id);
 #endif
+
+static const struct spi_device_id rt5677_spi_ids[] = {
+	{ "rt5677", 0 },
+	{ },
+};
+MODULE_DEVICE_TABLE(spi, rt5677_spi_ids);
 
 static struct spi_driver rt5677_spi_driver = {
 	.driver = {
@@ -629,6 +636,7 @@ static struct spi_driver rt5677_spi_driver = {
 		.acpi_match_table = ACPI_PTR(rt5677_spi_acpi_id),
 	},
 	.probe = rt5677_spi_probe,
+	.id_table = rt5677_spi_ids,
 };
 module_spi_driver(rt5677_spi_driver);
 

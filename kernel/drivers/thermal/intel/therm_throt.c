@@ -23,6 +23,7 @@
 #include <linux/types.h>
 #include <linux/init.h>
 #include <linux/smp.h>
+#include <linux/sysfs.h>
 #include <linux/cpu.h>
 
 #include <asm/processor.h>
@@ -144,8 +145,8 @@ static ssize_t therm_throt_device_show_##event##_##name(		\
 									\
 	preempt_disable();	/* CPU hotplug */			\
 	if (cpu_online(cpu)) {						\
-		ret = sprintf(buf, "%lu\n",				\
-			      per_cpu(thermal_state, cpu).event.name);	\
+		ret = sysfs_emit(buf, "%lu\n",				\
+			per_cpu(thermal_state, cpu).event.name);	\
 	} else								\
 		ret = 0;						\
 	preempt_enable();						\
@@ -193,8 +194,67 @@ static const struct attribute_group thermal_attr_group = {
 #define THERM_THROT_POLL_INTERVAL	HZ
 #define THERM_STATUS_PROCHOT_LOG	BIT(1)
 
-#define THERM_STATUS_CLEAR_CORE_MASK (BIT(1) | BIT(3) | BIT(5) | BIT(7) | BIT(9) | BIT(11) | BIT(13) | BIT(15))
-#define THERM_STATUS_CLEAR_PKG_MASK  (BIT(1) | BIT(3) | BIT(5) | BIT(7) | BIT(9) | BIT(11))
+static u64 therm_intr_core_clear_mask;
+static u64 therm_intr_pkg_clear_mask;
+
+static void thermal_intr_init_core_clear_mask(void)
+{
+	if (therm_intr_core_clear_mask)
+		return;
+
+	/*
+	 * Reference: Intel SDM  Volume 4
+	 * "Table 2-2. IA-32 Architectural MSRs", MSR 0x19C
+	 * IA32_THERM_STATUS.
+	 */
+
+	/*
+	 * Bit 1, 3, 5: CPUID.01H:EDX[22] = 1. This driver will not
+	 * enable interrupts, when 0 as it checks for X86_FEATURE_ACPI.
+	 */
+	therm_intr_core_clear_mask = (BIT(1) | BIT(3) | BIT(5));
+
+	/*
+	 * Bit 7 and 9: Thermal Threshold #1 and #2 log
+	 * If CPUID.01H:ECX[8] = 1
+	 */
+	if (boot_cpu_has(X86_FEATURE_TM2))
+		therm_intr_core_clear_mask |= (BIT(7) | BIT(9));
+
+	/* Bit 11: Power Limitation log (R/WC0) If CPUID.06H:EAX[4] = 1 */
+	if (boot_cpu_has(X86_FEATURE_PLN))
+		therm_intr_core_clear_mask |= BIT(11);
+
+	/*
+	 * Bit 13: Current Limit log (R/WC0) If CPUID.06H:EAX[7] = 1
+	 * Bit 15: Cross Domain Limit log (R/WC0) If CPUID.06H:EAX[7] = 1
+	 */
+	if (boot_cpu_has(X86_FEATURE_HWP))
+		therm_intr_core_clear_mask |= (BIT(13) | BIT(15));
+}
+
+static void thermal_intr_init_pkg_clear_mask(void)
+{
+	if (therm_intr_pkg_clear_mask)
+		return;
+
+	/*
+	 * Reference: Intel SDM  Volume 4
+	 * "Table 2-2. IA-32 Architectural MSRs", MSR 0x1B1
+	 * IA32_PACKAGE_THERM_STATUS.
+	 */
+
+	/* All bits except BIT 26 depend on CPUID.06H: EAX[6] = 1 */
+	if (boot_cpu_has(X86_FEATURE_PTS))
+		therm_intr_pkg_clear_mask = (BIT(1) | BIT(3) | BIT(5) | BIT(7) | BIT(9) | BIT(11));
+
+	/*
+	 * Intel SDM Volume 2A: Thermal and Power Management Leaf
+	 * Bit 26: CPUID.06H: EAX[19] = 1
+	 */
+	if (boot_cpu_has(X86_FEATURE_HFI))
+		therm_intr_pkg_clear_mask |= BIT(26);
+}
 
 /*
  * Clear the bits in package thermal status register for bit = 1
@@ -207,17 +267,14 @@ void thermal_clear_package_intr_status(int level, u64 bit_mask)
 
 	if (level == CORE_LEVEL) {
 		msr  = MSR_IA32_THERM_STATUS;
-		msr_val = THERM_STATUS_CLEAR_CORE_MASK;
+		msr_val = therm_intr_core_clear_mask;
 	} else {
 		msr  = MSR_IA32_PACKAGE_THERM_STATUS;
-		msr_val = THERM_STATUS_CLEAR_PKG_MASK;
-		if (boot_cpu_has(X86_FEATURE_HFI))
-			msr_val |= BIT(26);
-
+		msr_val = therm_intr_pkg_clear_mask;
 	}
 
 	msr_val &= ~bit_mask;
-	wrmsrl(msr, msr_val);
+	wrmsrq(msr, msr_val);
 }
 EXPORT_SYMBOL_GPL(thermal_clear_package_intr_status);
 
@@ -231,7 +288,7 @@ static void get_therm_status(int level, bool *proc_hot, u8 *temp)
 	else
 		msr = MSR_IA32_PACKAGE_THERM_STATUS;
 
-	rdmsrl(msr, msr_val);
+	rdmsrq(msr, msr_val);
 	if (msr_val & THERM_STATUS_PROCHOT_LOG)
 		*proc_hot = true;
 	else
@@ -472,7 +529,12 @@ static int thermal_throttle_online(unsigned int cpu)
 {
 	struct thermal_state *state = &per_cpu(thermal_state, cpu);
 	struct device *dev = get_cpu_device(cpu);
+	int err;
 	u32 l;
+
+	err = thermal_throttle_add_dev(dev, cpu);
+	if (err)
+		return err;
 
 	state->package_throttle.level = PACKAGE_LEVEL;
 	state->core_throttle.level = CORE_LEVEL;
@@ -491,7 +553,7 @@ static int thermal_throttle_online(unsigned int cpu)
 	l = apic_read(APIC_LVTTHMR);
 	apic_write(APIC_LVTTHMR, l & ~APIC_LVT_MASKED);
 
-	return thermal_throttle_add_dev(dev, cpu);
+	return err;
 }
 
 static int thermal_throttle_offline(unsigned int cpu)
@@ -587,7 +649,7 @@ static void notify_thresholds(__u64 msr_val)
 
 void __weak notify_hwp_interrupt(void)
 {
-	wrmsrl_safe(MSR_HWP_STATUS, 0);
+	wrmsrq_safe(MSR_HWP_STATUS, 0);
 }
 
 /* Thermal transition interrupt handler */
@@ -598,7 +660,7 @@ void intel_thermal_interrupt(void)
 	if (static_cpu_has(X86_FEATURE_HWP))
 		notify_hwp_interrupt();
 
-	rdmsrl(MSR_IA32_THERM_STATUS, msr_val);
+	rdmsrq(MSR_IA32_THERM_STATUS, msr_val);
 
 	/* Check for violation of core thermal thresholds*/
 	notify_thresholds(msr_val);
@@ -613,7 +675,7 @@ void intel_thermal_interrupt(void)
 					CORE_LEVEL);
 
 	if (this_cpu_has(X86_FEATURE_PTS)) {
-		rdmsrl(MSR_IA32_PACKAGE_THERM_STATUS, msr_val);
+		rdmsrq(MSR_IA32_PACKAGE_THERM_STATUS, msr_val);
 		/* check violations of package thermal thresholds */
 		notify_package_thresholds(msr_val);
 		therm_throt_process(msr_val & PACKAGE_THERM_STATUS_PROCHOT,
@@ -707,6 +769,9 @@ void intel_init_thermal(struct cpuinfo_x86 *c)
 	/* We'll mask the thermal vector in the lapic till we're ready: */
 	h = THERMAL_APIC_VECTOR | APIC_DM_FIXED | APIC_LVT_MASKED;
 	apic_write(APIC_LVTTHMR, h);
+
+	thermal_intr_init_core_clear_mask();
+	thermal_intr_init_pkg_clear_mask();
 
 	rdmsr(MSR_IA32_THERM_INTERRUPT, l, h);
 	if (cpu_has(c, X86_FEATURE_PLN) && !int_pln_enable)

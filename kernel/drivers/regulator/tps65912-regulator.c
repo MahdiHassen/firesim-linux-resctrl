@@ -10,7 +10,6 @@
  */
 
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 #include <linux/regulator/driver.h>
 
@@ -142,7 +141,7 @@ static int tps65912_regulator_probe(struct platform_device *pdev)
 }
 
 static const struct platform_device_id tps65912_regulator_id_table[] = {
-	{ "tps65912-regulator", },
+	{ .name = "tps65912-regulator" },
 	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(platform, tps65912_regulator_id_table);
@@ -150,6 +149,7 @@ MODULE_DEVICE_TABLE(platform, tps65912_regulator_id_table);
 static struct platform_driver tps65912_regulator_driver = {
 	.driver = {
 		.name = "tps65912-regulator",
+		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
 	},
 	.probe = tps65912_regulator_probe,
 	.id_table = tps65912_regulator_id_table,

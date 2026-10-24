@@ -7,7 +7,6 @@
 
 #include <linux/interrupt.h>
 #include <linux/kernel.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/property.h>
@@ -92,4 +91,3 @@ module_platform_driver(sl28cpld_intc_driver);
 
 MODULE_DESCRIPTION("sl28cpld Interrupt Controller Driver");
 MODULE_AUTHOR("Michael Walle <michael@walle.cc>");
-MODULE_LICENSE("GPL");

@@ -24,6 +24,7 @@
 #include <linux/platform_data/i2c-pxa.h>
 #include <linux/platform_data/mmp_dma.h>
 #include <linux/soc/pxa/cpu.h>
+#include <linux/soc/pxa/smemc.h>
 
 #include <asm/mach/map.h>
 #include <asm/irq.h>
@@ -31,7 +32,9 @@
 #include "irqs.h"
 #include "pxa27x.h"
 #include "reset.h"
+#include <linux/platform_data/pxa2xx_udc.h>
 #include <linux/platform_data/usb-ohci-pxa27x.h>
+#include <linux/platform_data/asoc-pxa.h>
 #include "pm.h"
 #include "addr-map.h"
 #include "smemc.h"
@@ -55,8 +58,15 @@ static unsigned long ac97_reset_config[] = {
 	GPIO95_AC97_nRESET,
 };
 
-void pxa27x_configure_ac97reset(int reset_gpio, bool to_gpio)
+void pxa27x_configure_ac97reset(struct gpio_desc *gpiod, bool to_gpio)
 {
+	int reset_gpio;
+
+	if (!gpiod)
+		return;
+
+	reset_gpio = desc_to_gpio(gpiod);
+
 	/*
 	 * This helper function is used to work around a bug in the pxa27x's
 	 * ac97 controller during a warm reset.  The configuration of the
@@ -85,18 +95,6 @@ EXPORT_SYMBOL_GPL(pxa27x_configure_ac97reset);
  */
 static unsigned int pwrmode = PWRMODE_SLEEP;
 
-int pxa27x_set_pwrmode(unsigned int mode)
-{
-	switch (mode) {
-	case PWRMODE_SLEEP:
-	case PWRMODE_DEEPSLEEP:
-		pwrmode = mode;
-		return 0;
-	}
-
-	return -EINVAL;
-}
-
 /*
  * List of global PXA peripheral registers to preserve.
  * More ones like CP and general purpose register values are preserved
@@ -109,7 +107,7 @@ enum {
 	SLEEP_SAVE_COUNT
 };
 
-void pxa27x_cpu_pm_save(unsigned long *sleep_save)
+static void pxa27x_cpu_pm_save(unsigned long *sleep_save)
 {
 	sleep_save[SLEEP_SAVE_MDREFR] = __raw_readl(MDREFR);
 	SAVE(PCFR);
@@ -117,7 +115,7 @@ void pxa27x_cpu_pm_save(unsigned long *sleep_save)
 	SAVE(PSTR);
 }
 
-void pxa27x_cpu_pm_restore(unsigned long *sleep_save)
+static void pxa27x_cpu_pm_restore(unsigned long *sleep_save)
 {
 	__raw_writel(sleep_save[SLEEP_SAVE_MDREFR], MDREFR);
 	RESTORE(PCFR);
@@ -127,7 +125,7 @@ void pxa27x_cpu_pm_restore(unsigned long *sleep_save)
 	RESTORE(PSTR);
 }
 
-void pxa27x_cpu_pm_enter(suspend_state_t state)
+static void pxa27x_cpu_pm_enter(suspend_state_t state)
 {
 	extern void pxa_cpu_standby(void);
 #ifndef CONFIG_IWMMXT
@@ -240,6 +238,7 @@ static int pxa27x_set_wake(struct irq_data *d, unsigned int on)
 void __init pxa27x_init_irq(void)
 {
 	pxa_init_irq(34, pxa27x_set_wake);
+	set_handle_irq(pxa27x_handle_irq);
 }
 
 static int __init
@@ -284,12 +283,8 @@ void __init pxa27x_set_i2c_power_info(struct i2c_pxa_platform_data *info)
 	pxa_register_device(&pxa27x_device_i2c_power, info);
 }
 
-static struct pxa_gpio_platform_data pxa27x_gpio_info __initdata = {
-	.irq_base	= PXA_GPIO_TO_IRQ(0),
-	.gpio_set_wake	= gpio_set_wake,
-};
-
 static struct platform_device *devices[] __initdata = {
+	&pxa27x_device_gpio,
 	&pxa27x_device_udc,
 	&pxa_device_pmu,
 	&pxa_device_i2s,
@@ -349,12 +344,14 @@ static int __init pxa27x_init(void)
 
 		pxa27x_init_pm();
 
-		register_syscore_ops(&pxa_irq_syscore_ops);
-		register_syscore_ops(&pxa2xx_mfp_syscore_ops);
+		register_syscore(&pxa_irq_syscore);
+		register_syscore(&pxa2xx_mfp_syscore);
 
 		if (!of_have_populated_dt()) {
-			pxa_register_device(&pxa27x_device_gpio,
-					    &pxa27x_gpio_info);
+			software_node_register(&pxa2xx_gpiochip_node);
+			pxa27x_device_gpio.dev.fwnode = software_node_fwnode(
+								&pxa2xx_gpiochip_node);
+
 			pxa2xx_set_dmac_info(&pxa27x_dma_pdata);
 			ret = platform_add_devices(devices,
 						   ARRAY_SIZE(devices));

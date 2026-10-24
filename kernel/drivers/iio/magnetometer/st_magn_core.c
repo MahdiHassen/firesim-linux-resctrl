@@ -305,6 +305,7 @@ static const struct st_sensor_settings st_magn_sensors_settings[] = {
 		.sensors_supported = {
 			[0] = LIS3MDL_MAGN_DEV_NAME,
 			[1] = LSM9DS1_MAGN_DEV_NAME,
+			[2] = LSM303C_MAGN_DEV_NAME,
 		},
 		.ch = (struct iio_chan_spec *)st_magn_2_16bit_channels,
 		.odr = {
@@ -426,6 +427,7 @@ static const struct st_sensor_settings st_magn_sensors_settings[] = {
 		.wai_addr = ST_SENSORS_DEFAULT_WAI_ADDRESS,
 		.sensors_supported = {
 			[0] = LSM9DS0_IMU_DEV_NAME,
+			[1] = LSM303D_IMU_DEV_NAME,
 		},
 		.ch = (struct iio_chan_spec *)st_magn_4_16bit_channels,
 		.odr = {
@@ -502,6 +504,11 @@ static const struct st_sensor_settings st_magn_sensors_settings[] = {
 /* Default magn DRDY is available on INT2 pin */
 static const struct st_sensors_platform_data default_magn_pdata = {
 	.drdy_int_pin = 2,
+};
+
+/* LIS2MDL only supports DRDY on INT1 */
+static const struct st_sensors_platform_data alt_magn_pdata = {
+	.drdy_int_pin = 1,
 };
 
 static int st_magn_read_raw(struct iio_dev *indio_dev,
@@ -599,7 +606,7 @@ const struct st_sensor_settings *st_magn_get_settings(const char *name)
 
 	return &st_magn_sensors_settings[index];
 }
-EXPORT_SYMBOL_NS(st_magn_get_settings, IIO_ST_SENSORS);
+EXPORT_SYMBOL_NS(st_magn_get_settings, "IIO_ST_SENSORS");
 
 int st_magn_common_probe(struct iio_dev *indio_dev)
 {
@@ -626,8 +633,12 @@ int st_magn_common_probe(struct iio_dev *indio_dev)
 	mdata->current_fullscale = &mdata->sensor_settings->fs.fs_avl[0];
 	mdata->odr = mdata->sensor_settings->odr.odr_avl[0].hz;
 
-	if (!pdata)
-		pdata = (struct st_sensors_platform_data *)&default_magn_pdata;
+	if (!pdata) {
+		if (mdata->sensor_settings->drdy_irq.int2.mask)
+			pdata = (struct st_sensors_platform_data *)&default_magn_pdata;
+		else
+			pdata = (struct st_sensors_platform_data *)&alt_magn_pdata;
+	}
 
 	err = st_sensors_init_sensor(indio_dev, pdata);
 	if (err < 0)
@@ -646,9 +657,9 @@ int st_magn_common_probe(struct iio_dev *indio_dev)
 
 	return devm_iio_device_register(parent, indio_dev);
 }
-EXPORT_SYMBOL_NS(st_magn_common_probe, IIO_ST_SENSORS);
+EXPORT_SYMBOL_NS(st_magn_common_probe, "IIO_ST_SENSORS");
 
 MODULE_AUTHOR("Denis Ciocca <denis.ciocca@st.com>");
 MODULE_DESCRIPTION("STMicroelectronics magnetometers driver");
 MODULE_LICENSE("GPL v2");
-MODULE_IMPORT_NS(IIO_ST_SENSORS);
+MODULE_IMPORT_NS("IIO_ST_SENSORS");

@@ -4,7 +4,6 @@
  *
  * Copyright 2022 Analog Devices Inc.
  */
-#include <asm-generic/unaligned.h>
 #include <linux/bitfield.h>
 #include <linux/delay.h>
 #include <linux/device.h>
@@ -15,6 +14,8 @@
 #include <linux/regmap.h>
 #include <linux/regulator/consumer.h>
 #include <linux/spi/spi.h>
+
+#include <linux/unaligned.h>
 
 #include <linux/iio/buffer.h>
 #include <linux/iio/sysfs.h>
@@ -142,7 +143,7 @@ struct max11410_state {
 	int irq;
 	struct {
 		u32 data __aligned(IIO_DMA_MINALIGN);
-		s64 ts __aligned(8);
+		aligned_s64 ts;
 	} scan;
 };
 
@@ -413,13 +414,17 @@ static int max11410_sample(struct max11410_state *st, int *sample_raw,
 		if (!ret)
 			return -ETIMEDOUT;
 	} else {
+		int ret2;
+
 		/* Wait for status register Conversion Ready flag */
-		ret = read_poll_timeout(max11410_read_reg, ret,
-					ret || (val & MAX11410_STATUS_CONV_READY_BIT),
+		ret = read_poll_timeout(max11410_read_reg, ret2,
+					ret2 || (val & MAX11410_STATUS_CONV_READY_BIT),
 					5000, MAX11410_CONVERSION_TIMEOUT_MS * 1000,
 					true, st, MAX11410_REG_STATUS, &val);
 		if (ret)
 			return ret;
+		if (ret2)
+			return ret2;
 	}
 
 	/* Read ADC Data */
@@ -466,9 +471,8 @@ static int max11410_read_raw(struct iio_dev *indio_dev,
 
 		return IIO_VAL_INT;
 	case IIO_CHAN_INFO_RAW:
-		ret = iio_device_claim_direct_mode(indio_dev);
-		if (ret)
-			return ret;
+		if (!iio_device_claim_direct(indio_dev))
+			return -EBUSY;
 
 		mutex_lock(&state->lock);
 
@@ -476,7 +480,7 @@ static int max11410_read_raw(struct iio_dev *indio_dev,
 
 		mutex_unlock(&state->lock);
 
-		iio_device_release_direct_mode(indio_dev);
+		iio_device_release_direct(indio_dev);
 
 		if (ret)
 			return ret;
@@ -502,12 +506,37 @@ static int max11410_read_raw(struct iio_dev *indio_dev,
 	return -EINVAL;
 }
 
+static int __max11410_write_samp_freq(struct max11410_state *st,
+				      int val, int val2)
+{
+	int ret, i, reg_val, filter;
+
+	guard(mutex)(&st->lock);
+
+	ret = regmap_read(st->regmap, MAX11410_REG_FILTER, &reg_val);
+	if (ret)
+		return ret;
+
+	filter = FIELD_GET(MAX11410_FILTER_LINEF_MASK, reg_val);
+
+	for (i = 0; i < max11410_sampling_len[filter]; ++i) {
+		if (val == max11410_sampling_rates[filter][i][0] &&
+		    val2 == max11410_sampling_rates[filter][i][1])
+			break;
+	}
+	if (i == max11410_sampling_len[filter])
+		return -EINVAL;
+
+	return regmap_write_bits(st->regmap, MAX11410_REG_FILTER,
+				 MAX11410_FILTER_RATE_MASK, i);
+}
+
 static int max11410_write_raw(struct iio_dev *indio_dev,
 			      struct iio_chan_spec const *chan,
 			      int val, int val2, long mask)
 {
 	struct max11410_state *st = iio_priv(indio_dev);
-	int i, ret, reg_val, filter, gain;
+	int ret, gain;
 	u32 *scale_avail;
 
 	switch (mask) {
@@ -520,9 +549,8 @@ static int max11410_write_raw(struct iio_dev *indio_dev,
 		if (val != 0 || val2 == 0)
 			return -EINVAL;
 
-		ret = iio_device_claim_direct_mode(indio_dev);
-		if (ret)
-			return ret;
+		if (!iio_device_claim_direct(indio_dev))
+			return -EBUSY;
 
 		/* Convert from INT_PLUS_MICRO to FRACTIONAL_LOG2 */
 		val2 = val2 * DIV_ROUND_CLOSEST(BIT(24), 1000000);
@@ -531,38 +559,15 @@ static int max11410_write_raw(struct iio_dev *indio_dev,
 
 		st->channels[chan->address].gain = clamp_val(gain, 0, 7);
 
-		iio_device_release_direct_mode(indio_dev);
+		iio_device_release_direct(indio_dev);
 
 		return 0;
 	case IIO_CHAN_INFO_SAMP_FREQ:
-		ret = iio_device_claim_direct_mode(indio_dev);
-		if (ret)
-			return ret;
+		if (!iio_device_claim_direct(indio_dev))
+			return -EBUSY;
 
-		mutex_lock(&st->lock);
-
-		ret = regmap_read(st->regmap, MAX11410_REG_FILTER, &reg_val);
-		if (ret)
-			goto out;
-
-		filter = FIELD_GET(MAX11410_FILTER_LINEF_MASK, reg_val);
-
-		for (i = 0; i < max11410_sampling_len[filter]; ++i) {
-			if (val == max11410_sampling_rates[filter][i][0] &&
-			    val2 == max11410_sampling_rates[filter][i][1])
-				break;
-		}
-		if (i == max11410_sampling_len[filter]) {
-			ret = -EINVAL;
-			goto out;
-		}
-
-		ret = regmap_write_bits(st->regmap, MAX11410_REG_FILTER,
-					MAX11410_FILTER_RATE_MASK, i);
-
-out:
-		mutex_unlock(&st->lock);
-		iio_device_release_direct_mode(indio_dev);
+		ret = __max11410_write_samp_freq(st, val, val2);
+		iio_device_release_direct(indio_dev);
 
 		return ret;
 	default:
@@ -627,8 +632,8 @@ static irqreturn_t max11410_trigger_handler(int irq, void *p)
 		goto out;
 	}
 
-	iio_push_to_buffers_with_timestamp(indio_dev, &st->scan,
-					   iio_get_time_ns(indio_dev));
+	iio_push_to_buffers_with_ts(indio_dev, &st->scan, sizeof(st->scan),
+				    iio_get_time_ns(indio_dev));
 
 out:
 	iio_trigger_notify_done(indio_dev->trig);
@@ -677,7 +682,7 @@ static irqreturn_t max11410_interrupt(int irq, void *dev_id)
 	struct max11410_state *st = iio_priv(indio_dev);
 
 	if (iio_buffer_enabled(indio_dev))
-		iio_trigger_poll_chained(st->trig);
+		iio_trigger_poll_nested(st->trig);
 	else
 		complete(&st->completion);
 
@@ -691,7 +696,6 @@ static int max11410_parse_channels(struct max11410_state *st,
 	struct device *dev = &st->spi_dev->dev;
 	struct max11410_channel_config *cfg;
 	struct iio_chan_spec *channels;
-	struct fwnode_handle *child;
 	u32 reference, sig_path;
 	const char *node_name;
 	u32 inputs[2], scale;
@@ -715,7 +719,7 @@ static int max11410_parse_channels(struct max11410_state *st,
 	if (!st->channels)
 		return -ENOMEM;
 
-	device_for_each_child_node(dev, child) {
+	device_for_each_child_node_scoped(dev, child) {
 		node_name = fwnode_get_name(child);
 		if (fwnode_property_present(child, "diff-channels")) {
 			ret = fwnode_property_read_u32_array(child,
@@ -730,47 +734,37 @@ static int max11410_parse_channels(struct max11410_state *st,
 			inputs[1] = 0;
 			chanspec.differential = 0;
 		}
-		if (ret) {
-			fwnode_handle_put(child);
+		if (ret)
 			return ret;
-		}
 
 		if (inputs[0] > MAX11410_CHANNEL_INDEX_MAX ||
-		    inputs[1] > MAX11410_CHANNEL_INDEX_MAX) {
-			fwnode_handle_put(child);
+		    inputs[1] > MAX11410_CHANNEL_INDEX_MAX)
 			return dev_err_probe(&indio_dev->dev, -EINVAL,
 					     "Invalid channel index for %s, should be less than %d\n",
 					     node_name,
 					     MAX11410_CHANNEL_INDEX_MAX + 1);
-		}
 
 		cfg = &st->channels[chan_idx];
 
 		reference = MAX11410_REFSEL_AVDD_AGND;
 		fwnode_property_read_u32(child, "adi,reference", &reference);
-		if (reference > MAX11410_REFSEL_MAX) {
-			fwnode_handle_put(child);
+		if (reference > MAX11410_REFSEL_MAX)
 			return dev_err_probe(&indio_dev->dev, -EINVAL,
 					     "Invalid adi,reference value for %s, should be less than %d.\n",
 					     node_name, MAX11410_REFSEL_MAX + 1);
-		}
 
 		if (!max11410_get_vrefp(st, reference) ||
-		    (!max11410_get_vrefn(st, reference) && reference <= 2)) {
-			fwnode_handle_put(child);
+		    (!max11410_get_vrefn(st, reference) && reference <= 2))
 			return dev_err_probe(&indio_dev->dev, -EINVAL,
 					     "Invalid VREF configuration for %s, either specify corresponding VREF regulators or change adi,reference property.\n",
 					     node_name);
-		}
 
 		sig_path = MAX11410_PGA_SIG_PATH_BUFFERED;
 		fwnode_property_read_u32(child, "adi,input-mode", &sig_path);
-		if (sig_path > MAX11410_SIG_PATH_MAX) {
-			fwnode_handle_put(child);
+		if (sig_path > MAX11410_SIG_PATH_MAX)
 			return dev_err_probe(&indio_dev->dev, -EINVAL,
 					     "Invalid adi,input-mode value for %s, should be less than %d.\n",
 					     node_name, MAX11410_SIG_PATH_MAX + 1);
-		}
 
 		fwnode_property_read_u32(child, "settling-time-us",
 					 &cfg->settling_time_us);
@@ -788,10 +782,8 @@ static int max11410_parse_channels(struct max11410_state *st,
 			cfg->scale_avail = devm_kcalloc(dev, MAX11410_SCALE_AVAIL_SIZE * 2,
 							sizeof(*cfg->scale_avail),
 							GFP_KERNEL);
-			if (!cfg->scale_avail) {
-				fwnode_handle_put(child);
+			if (!cfg->scale_avail)
 				return -ENOMEM;
-			}
 
 			scale = max11410_get_scale(st, *cfg);
 			for (i = 0; i < MAX11410_SCALE_AVAIL_SIZE; i++) {
@@ -812,7 +804,7 @@ static int max11410_parse_channels(struct max11410_state *st,
 		chan_idx++;
 	}
 
-	channels[chan_idx] = (struct iio_chan_spec)IIO_CHAN_SOFT_TIMESTAMP(chan_idx);
+	channels[chan_idx] = IIO_CHAN_SOFT_TIMESTAMP(chan_idx);
 
 	indio_dev->num_channels = chan_idx + 1;
 	indio_dev->channels = channels;
@@ -850,17 +842,21 @@ static int max11410_init_vref(struct device *dev,
 
 static int max11410_calibrate(struct max11410_state *st, u32 cal_type)
 {
-	int ret, val;
+	int ret, ret2, val;
 
 	ret = max11410_write_reg(st, MAX11410_REG_CAL_START, cal_type);
 	if (ret)
 		return ret;
 
 	/* Wait for status register Calibration Ready flag */
-	return read_poll_timeout(max11410_read_reg, ret,
-				 ret || (val & MAX11410_STATUS_CAL_READY_BIT),
-				 50000, MAX11410_CALIB_TIMEOUT_MS * 1000, true,
-				 st, MAX11410_REG_STATUS, &val);
+	ret = read_poll_timeout(max11410_read_reg, ret2,
+				ret2 || (val & MAX11410_STATUS_CAL_READY_BIT),
+				50000, MAX11410_CALIB_TIMEOUT_MS * 1000, true,
+				st, MAX11410_REG_STATUS, &val);
+	if (ret)
+		return ret;
+
+	return ret2;
 }
 
 static int max11410_self_calibrate(struct max11410_state *st)
@@ -916,8 +912,8 @@ static int max11410_self_calibrate(struct max11410_state *st)
 
 static int max11410_probe(struct spi_device *spi)
 {
-	const char *vrefp_regs[] = { "vref0p", "vref1p", "vref2p" };
-	const char *vrefn_regs[] = { "vref0n", "vref1n", "vref2n" };
+	static const char * const vrefp_regs[] = { "vref0p", "vref1p", "vref2p" };
+	static const char * const vrefn_regs[] = { "vref0n", "vref1n", "vref2n" };
 	struct device *dev = &spi->dev;
 	struct max11410_state *st;
 	struct iio_dev *indio_dev;

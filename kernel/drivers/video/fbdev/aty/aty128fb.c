@@ -180,101 +180,54 @@ static const struct dev_pm_ops aty128_pci_pm_ops = {
 
 /* supported Rage128 chipsets */
 static const struct pci_device_id aty128_pci_tbl[] = {
-	{ PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_RAGE128_LE,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, rage_M3_pci },
-	{ PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_RAGE128_LF,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, rage_M3 },
-	{ PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_RAGE128_MF,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, rage_M4 },
-	{ PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_RAGE128_ML,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, rage_M4 },
-	{ PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_RAGE128_PA,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, rage_128_pro },
-	{ PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_RAGE128_PB,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, rage_128_pro },
-	{ PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_RAGE128_PC,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, rage_128_pro },
-	{ PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_RAGE128_PD,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, rage_128_pro_pci },
-	{ PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_RAGE128_PE,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, rage_128_pro },
-	{ PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_RAGE128_PF,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, rage_128_pro },
-	{ PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_RAGE128_PG,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, rage_128_pro },
-	{ PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_RAGE128_PH,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, rage_128_pro },
-	{ PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_RAGE128_PI,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, rage_128_pro },
-	{ PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_RAGE128_PJ,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, rage_128_pro },
-	{ PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_RAGE128_PK,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, rage_128_pro },
-	{ PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_RAGE128_PL,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, rage_128_pro },
-	{ PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_RAGE128_PM,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, rage_128_pro },
-	{ PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_RAGE128_PN,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, rage_128_pro },
-	{ PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_RAGE128_PO,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, rage_128_pro },
-	{ PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_RAGE128_PP,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, rage_128_pro_pci },
-	{ PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_RAGE128_PQ,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, rage_128_pro },
-	{ PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_RAGE128_PR,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, rage_128_pro_pci },
-	{ PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_RAGE128_PS,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, rage_128_pro },
-	{ PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_RAGE128_PT,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, rage_128_pro },
-	{ PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_RAGE128_PU,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, rage_128_pro },
-	{ PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_RAGE128_PV,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, rage_128_pro },
-	{ PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_RAGE128_PW,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, rage_128_pro },
-	{ PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_RAGE128_PX,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, rage_128_pro },
-	{ PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_RAGE128_RE,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, rage_128_pci },
-	{ PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_RAGE128_RF,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, rage_128 },
-	{ PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_RAGE128_RG,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, rage_128 },
-	{ PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_RAGE128_RK,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, rage_128_pci },
-	{ PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_RAGE128_RL,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, rage_128 },
-	{ PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_RAGE128_SE,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, rage_128 },
-	{ PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_RAGE128_SF,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, rage_128_pci },
-	{ PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_RAGE128_SG,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, rage_128 },
-	{ PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_RAGE128_SH,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, rage_128 },
-	{ PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_RAGE128_SK,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, rage_128 },
-	{ PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_RAGE128_SL,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, rage_128 },
-	{ PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_RAGE128_SM,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, rage_128 },
-	{ PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_RAGE128_SN,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, rage_128 },
-	{ PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_RAGE128_TF,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, rage_128_ultra },
-	{ PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_RAGE128_TL,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, rage_128_ultra },
-	{ PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_RAGE128_TR,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, rage_128_ultra },
-	{ PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_RAGE128_TS,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, rage_128_ultra },
-	{ PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_RAGE128_TT,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, rage_128_ultra },
-	{ PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_RAGE128_TU,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, rage_128_ultra },
-	{ 0, }
+	{ PCI_VDEVICE(ATI, PCI_DEVICE_ID_ATI_RAGE128_LE), .driver_data = rage_M3_pci },
+	{ PCI_VDEVICE(ATI, PCI_DEVICE_ID_ATI_RAGE128_LF), .driver_data = rage_M3 },
+	{ PCI_VDEVICE(ATI, PCI_DEVICE_ID_ATI_RAGE128_MF), .driver_data = rage_M4 },
+	{ PCI_VDEVICE(ATI, PCI_DEVICE_ID_ATI_RAGE128_ML), .driver_data = rage_M4 },
+	{ PCI_VDEVICE(ATI, PCI_DEVICE_ID_ATI_RAGE128_PA), .driver_data = rage_128_pro },
+	{ PCI_VDEVICE(ATI, PCI_DEVICE_ID_ATI_RAGE128_PB), .driver_data = rage_128_pro },
+	{ PCI_VDEVICE(ATI, PCI_DEVICE_ID_ATI_RAGE128_PC), .driver_data = rage_128_pro },
+	{ PCI_VDEVICE(ATI, PCI_DEVICE_ID_ATI_RAGE128_PD), .driver_data = rage_128_pro_pci },
+	{ PCI_VDEVICE(ATI, PCI_DEVICE_ID_ATI_RAGE128_PE), .driver_data = rage_128_pro },
+	{ PCI_VDEVICE(ATI, PCI_DEVICE_ID_ATI_RAGE128_PF), .driver_data = rage_128_pro },
+	{ PCI_VDEVICE(ATI, PCI_DEVICE_ID_ATI_RAGE128_PG), .driver_data = rage_128_pro },
+	{ PCI_VDEVICE(ATI, PCI_DEVICE_ID_ATI_RAGE128_PH), .driver_data = rage_128_pro },
+	{ PCI_VDEVICE(ATI, PCI_DEVICE_ID_ATI_RAGE128_PI), .driver_data = rage_128_pro },
+	{ PCI_VDEVICE(ATI, PCI_DEVICE_ID_ATI_RAGE128_PJ), .driver_data = rage_128_pro },
+	{ PCI_VDEVICE(ATI, PCI_DEVICE_ID_ATI_RAGE128_PK), .driver_data = rage_128_pro },
+	{ PCI_VDEVICE(ATI, PCI_DEVICE_ID_ATI_RAGE128_PL), .driver_data = rage_128_pro },
+	{ PCI_VDEVICE(ATI, PCI_DEVICE_ID_ATI_RAGE128_PM), .driver_data = rage_128_pro },
+	{ PCI_VDEVICE(ATI, PCI_DEVICE_ID_ATI_RAGE128_PN), .driver_data = rage_128_pro },
+	{ PCI_VDEVICE(ATI, PCI_DEVICE_ID_ATI_RAGE128_PO), .driver_data = rage_128_pro },
+	{ PCI_VDEVICE(ATI, PCI_DEVICE_ID_ATI_RAGE128_PP), .driver_data = rage_128_pro_pci },
+	{ PCI_VDEVICE(ATI, PCI_DEVICE_ID_ATI_RAGE128_PQ), .driver_data = rage_128_pro },
+	{ PCI_VDEVICE(ATI, PCI_DEVICE_ID_ATI_RAGE128_PR), .driver_data = rage_128_pro_pci },
+	{ PCI_VDEVICE(ATI, PCI_DEVICE_ID_ATI_RAGE128_PS), .driver_data = rage_128_pro },
+	{ PCI_VDEVICE(ATI, PCI_DEVICE_ID_ATI_RAGE128_PT), .driver_data = rage_128_pro },
+	{ PCI_VDEVICE(ATI, PCI_DEVICE_ID_ATI_RAGE128_PU), .driver_data = rage_128_pro },
+	{ PCI_VDEVICE(ATI, PCI_DEVICE_ID_ATI_RAGE128_PV), .driver_data = rage_128_pro },
+	{ PCI_VDEVICE(ATI, PCI_DEVICE_ID_ATI_RAGE128_PW), .driver_data = rage_128_pro },
+	{ PCI_VDEVICE(ATI, PCI_DEVICE_ID_ATI_RAGE128_PX), .driver_data = rage_128_pro },
+	{ PCI_VDEVICE(ATI, PCI_DEVICE_ID_ATI_RAGE128_RE), .driver_data = rage_128_pci },
+	{ PCI_VDEVICE(ATI, PCI_DEVICE_ID_ATI_RAGE128_RF), .driver_data = rage_128 },
+	{ PCI_VDEVICE(ATI, PCI_DEVICE_ID_ATI_RAGE128_RG), .driver_data = rage_128 },
+	{ PCI_VDEVICE(ATI, PCI_DEVICE_ID_ATI_RAGE128_RK), .driver_data = rage_128_pci },
+	{ PCI_VDEVICE(ATI, PCI_DEVICE_ID_ATI_RAGE128_RL), .driver_data = rage_128 },
+	{ PCI_VDEVICE(ATI, PCI_DEVICE_ID_ATI_RAGE128_SE), .driver_data = rage_128 },
+	{ PCI_VDEVICE(ATI, PCI_DEVICE_ID_ATI_RAGE128_SF), .driver_data = rage_128_pci },
+	{ PCI_VDEVICE(ATI, PCI_DEVICE_ID_ATI_RAGE128_SG), .driver_data = rage_128 },
+	{ PCI_VDEVICE(ATI, PCI_DEVICE_ID_ATI_RAGE128_SH), .driver_data = rage_128 },
+	{ PCI_VDEVICE(ATI, PCI_DEVICE_ID_ATI_RAGE128_SK), .driver_data = rage_128 },
+	{ PCI_VDEVICE(ATI, PCI_DEVICE_ID_ATI_RAGE128_SL), .driver_data = rage_128 },
+	{ PCI_VDEVICE(ATI, PCI_DEVICE_ID_ATI_RAGE128_SM), .driver_data = rage_128 },
+	{ PCI_VDEVICE(ATI, PCI_DEVICE_ID_ATI_RAGE128_SN), .driver_data = rage_128 },
+	{ PCI_VDEVICE(ATI, PCI_DEVICE_ID_ATI_RAGE128_TF), .driver_data = rage_128_ultra },
+	{ PCI_VDEVICE(ATI, PCI_DEVICE_ID_ATI_RAGE128_TL), .driver_data = rage_128_ultra },
+	{ PCI_VDEVICE(ATI, PCI_DEVICE_ID_ATI_RAGE128_TR), .driver_data = rage_128_ultra },
+	{ PCI_VDEVICE(ATI, PCI_DEVICE_ID_ATI_RAGE128_TS), .driver_data = rage_128_ultra },
+	{ PCI_VDEVICE(ATI, PCI_DEVICE_ID_ATI_RAGE128_TT), .driver_data = rage_128_ultra },
+	{ PCI_VDEVICE(ATI, PCI_DEVICE_ID_ATI_RAGE128_TU), .driver_data = rage_128_ultra },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(pci, aty128_pci_tbl);
@@ -504,6 +457,7 @@ static void aty128_bl_set_power(struct fb_info *info, int power);
 
 static const struct fb_ops aty128fb_ops = {
 	.owner		= THIS_MODULE,
+	FB_DEFAULT_IOMEM_OPS,
 	.fb_check_var	= aty128fb_check_var,
 	.fb_set_par	= aty128fb_set_par,
 	.fb_setcolreg	= aty128fb_setcolreg,
@@ -511,9 +465,6 @@ static const struct fb_ops aty128fb_ops = {
 	.fb_blank	= aty128fb_blank,
 	.fb_ioctl	= aty128fb_ioctl,
 	.fb_sync	= aty128fb_sync,
-	.fb_fillrect	= cfb_fillrect,
-	.fb_copyarea	= cfb_copyarea,
-	.fb_imageblit	= cfb_imageblit,
 };
 
     /*
@@ -1301,11 +1252,11 @@ static void aty128_set_lcd_enable(struct aty128fb_par *par, int on)
 		reg &= ~LVDS_DISPLAY_DIS;
 		aty_st_le32(LVDS_GEN_CNTL, reg);
 #ifdef CONFIG_FB_ATY128_BACKLIGHT
-		aty128_bl_set_power(info, FB_BLANK_UNBLANK);
+		aty128_bl_set_power(info, BACKLIGHT_POWER_ON);
 #endif
 	} else {
 #ifdef CONFIG_FB_ATY128_BACKLIGHT
-		aty128_bl_set_power(info, FB_BLANK_POWERDOWN);
+		aty128_bl_set_power(info, BACKLIGHT_POWER_OFF);
 #endif
 		reg = aty_ld_le32(LVDS_GEN_CNTL);
 		reg |= LVDS_DISPLAY_DIS;
@@ -1846,7 +1797,7 @@ static void aty128_bl_init(struct aty128fb_par *par)
 	memset(&props, 0, sizeof(struct backlight_properties));
 	props.type = BACKLIGHT_RAW;
 	props.max_brightness = FB_BACKLIGHT_LEVELS - 1;
-	bd = backlight_device_register(name, info->dev, par, &aty128_bl_data,
+	bd = backlight_device_register(name, info->device, par, &aty128_bl_data,
 				       &props);
 	if (IS_ERR(bd)) {
 		info->bl_dev = NULL;
@@ -1860,7 +1811,7 @@ static void aty128_bl_init(struct aty128fb_par *par)
 		219 * FB_BACKLIGHT_MAX / MAX_LEVEL);
 
 	bd->props.brightness = bd->props.max_brightness;
-	bd->props.power = FB_BLANK_UNBLANK;
+	bd->props.power = BACKLIGHT_POWER_ON;
 	backlight_update_status(bd);
 
 	printk("aty128: Backlight initialized (%s)\n", name);
@@ -1927,7 +1878,6 @@ static int aty128_init(struct pci_dev *pdev, const struct pci_device_id *ent)
 
 	/* fill in info */
 	info->fbops = &aty128fb_ops;
-	info->flags = FBINFO_FLAG_DEFAULT;
 
 	par->lcd_on = default_lcd_on;
 	par->crt_on = default_crt_on;
@@ -2028,13 +1978,13 @@ static int aty128_init(struct pci_dev *pdev, const struct pci_device_id *ent)
 	par->asleep = 0;
 	par->lock_blank = 0;
 
+	if (register_framebuffer(info) < 0)
+		return 0;
+
 #ifdef CONFIG_FB_ATY128_BACKLIGHT
 	if (backlight)
 		aty128_bl_init(par);
 #endif
-
-	if (register_framebuffer(info) < 0)
-		return 0;
 
 	fb_info(info, "%s frame buffer device on %s\n",
 		info->fix.id, video_card);
@@ -2167,11 +2117,11 @@ static void aty128_remove(struct pci_dev *pdev)
 
 	par = info->par;
 
-	unregister_framebuffer(info);
-
 #ifdef CONFIG_FB_ATY128_BACKLIGHT
 	aty128_bl_exit(info->bl_dev);
 #endif
+
+	unregister_framebuffer(info);
 
 	arch_phys_wc_del(par->wc_cookie);
 	iounmap(par->regbase);

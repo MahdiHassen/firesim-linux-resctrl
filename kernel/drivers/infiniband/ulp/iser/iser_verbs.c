@@ -37,12 +37,6 @@
 
 #include "iscsi_iser.h"
 
-#define ISCSI_ISER_MAX_CONN	8
-#define ISER_MAX_RX_LEN		(ISER_QP_MAX_RECV_DTOS * ISCSI_ISER_MAX_CONN)
-#define ISER_MAX_TX_LEN		(ISER_QP_MAX_REQ_DTOS  * ISCSI_ISER_MAX_CONN)
-#define ISER_MAX_CQ_LEN		(ISER_MAX_RX_LEN + ISER_MAX_TX_LEN + \
-				 ISCSI_ISER_MAX_CONN)
-
 static void iser_qp_event_callback(struct ib_event *cause, void *context)
 {
 	iser_err("qp event %s (%d)\n",
@@ -111,7 +105,7 @@ iser_create_fastreg_desc(struct iser_device *device,
 	enum ib_mr_type mr_type;
 	int ret;
 
-	desc = kzalloc(sizeof(*desc), GFP_KERNEL);
+	desc = kzalloc_obj(*desc);
 	if (!desc)
 		return ERR_PTR(-ENOMEM);
 
@@ -135,7 +129,6 @@ iser_create_fastreg_desc(struct iser_device *device,
 			goto err_alloc_mr_integrity;
 		}
 	}
-	desc->rsc.mr_valid = 0;
 
 	return desc;
 
@@ -312,7 +305,7 @@ struct iser_device *iser_device_find_by_ib_device(struct rdma_cm_id *cma_id)
 		if (device->ib_device->node_guid == cma_id->device->node_guid)
 			goto inc_refcnt;
 
-	device = kzalloc(sizeof *device, GFP_KERNEL);
+	device = kzalloc_obj(*device);
 	if (!device)
 		goto out;
 

@@ -48,6 +48,15 @@ Contact:	Kay Sievers <kay.sievers@vrfy.org>
 Description:	Show the initialization state(live, coming, going) of
 		the module.
 
+What:		/sys/module/*/import_ns
+Date:		January 2026
+KernelVersion:	7.1
+Contact:	linux-modules@vger.kernel.org
+Description:	List of symbol namespaces imported by this module via
+		MODULE_IMPORT_NS(). Each namespace appears on a separate line.
+		This file only exists for modules that import at least one
+		namespace.
+
 What:		/sys/module/*/taint
 Date:		Jan 2012
 KernelVersion:	3.3
@@ -59,4 +68,17 @@ Description:	Module taint flags:
 			F   force-loaded module
 			C   staging driver module
 			E   unsigned module
+			K   livepatch module
+			N   in-kernel test module
 			==  =====================
+
+What:		/sys/module/grant_table/parameters/free_per_iteration
+Date:		July 2023
+KernelVersion:	6.5 but backported to all supported stable branches
+Contact:	Xen developer discussion <xen-devel@lists.xenproject.org>
+Description:	Read and write number of grant entries to attempt to free per iteration.
+
+		Note: Future versions of Xen and Linux may provide a better
+		interface for controlling the rate of deferred grant reclaim
+		or may not need it at all.
+Users:		Qubes OS (https://www.qubes-os.org)

@@ -8,9 +8,9 @@
 #ifndef _NFCMRVL_H_
 #define _NFCMRVL_H_
 
-#include <linux/platform_data/nfcmrvl.h>
-
 #include "fw_dnld.h"
+
+struct gpio_desc;
 
 /* Define private flags: */
 #define NFCMRVL_NCI_RUNNING			1
@@ -48,6 +48,34 @@ enum nfcmrvl_phy {
 	NFCMRVL_PHY_UART	= 1,
 	NFCMRVL_PHY_I2C		= 2,
 	NFCMRVL_PHY_SPI		= 3,
+};
+
+struct nfcmrvl_platform_data {
+	/*
+	 * Generic
+	 */
+
+	/* GPIO that is wired to RESET_N signal */
+	struct gpio_desc *reset_gpio;
+	/* Tell if transport is muxed in HCI one */
+	bool hci_muxed;
+
+	/*
+	 * UART specific
+	 */
+
+	/* Tell if UART needs flow control at init */
+	bool flow_control;
+	/* Tell if firmware supports break control for power management */
+	bool break_control;
+
+
+	/*
+	 * I2C specific
+	 */
+
+	unsigned int irq;
+	unsigned int irq_polarity;
 };
 
 struct nfcmrvl_private {

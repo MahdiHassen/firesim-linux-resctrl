@@ -163,10 +163,8 @@ int sdio_set_block_size(struct sdio_func *func, unsigned blksz)
 	if (blksz > func->card->host->max_blk_size)
 		return -EINVAL;
 
-	if (blksz == 0) {
-		blksz = min(func->max_blksize, func->card->host->max_blk_size);
-		blksz = min(blksz, 512u);
-	}
+	if (blksz == 0)
+		blksz = min3(func->max_blksize, func->card->host->max_blk_size, 512u);
 
 	ret = mmc_io_rw_direct(func->card, 1, 0,
 		SDIO_FBR_BASE(func->num) + SDIO_FBR_BLKSIZE,
@@ -766,7 +764,7 @@ EXPORT_SYMBOL_GPL(sdio_retune_crc_disable);
  *	sdio_retune_crc_enable - re-enable retuning on CRC errors
  *	@func: SDIO function attached to host
  *
- *	This is the compement to sdio_retune_crc_disable().
+ *	This is the complement to sdio_retune_crc_disable().
  */
 void sdio_retune_crc_enable(struct sdio_func *func)
 {

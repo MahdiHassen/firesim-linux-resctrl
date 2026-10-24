@@ -6,7 +6,6 @@
  ******************************************************************************/
 
 #include <drv_types.h>
-#include <rtw_debug.h>
 #include <hal_data.h>
 
 u8 rtw_hal_sdio_max_txoqt_free_space(struct adapter *padapter)
@@ -81,7 +80,6 @@ u32 rtw_hal_get_sdio_tx_max_length(struct adapter *padapter, u8 queue_idx)
 	struct dvobj_priv *pdvobjpriv = adapter_to_dvobj(padapter);
 	struct hal_com_data	*pHalData = GET_HAL_DATA(padapter);
 	u32 deviceId, max_len;
-
 
 	deviceId = ffaddr2deviceId(pdvobjpriv, queue_idx);
 	switch (deviceId) {

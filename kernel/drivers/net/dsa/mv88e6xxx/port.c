@@ -12,6 +12,8 @@
 #include <linux/if_bridge.h>
 #include <linux/phy.h>
 #include <linux/phylink.h>
+#include <linux/property.h>
+#include <linux/string_choices.h>
 
 #include "chip.h"
 #include "global2.h"
@@ -175,7 +177,7 @@ int mv88e6xxx_port_set_link(struct mv88e6xxx_chip *chip, int port, int link)
 
 	dev_dbg(chip->dev, "p%d: %s link %s\n", port,
 		reg & MV88E6XXX_PORT_MAC_CTL_FORCE_LINK ? "Force" : "Unforce",
-		reg & MV88E6XXX_PORT_MAC_CTL_LINK_UP ? "up" : "down");
+		str_up_down(reg & MV88E6XXX_PORT_MAC_CTL_LINK_UP));
 
 	return 0;
 }
@@ -325,6 +327,21 @@ int mv88e6250_port_set_speed_duplex(struct mv88e6xxx_chip *chip, int port,
 					       duplex);
 }
 
+int mv88e6320_port_set_speed_duplex(struct mv88e6xxx_chip *chip, int port,
+				    int speed, int duplex)
+{
+	bool has_200 = (port == 2 || port == 5 || port == 6);
+
+	if (speed > 1000)
+		return -EOPNOTSUPP;
+
+	if (speed == 200 && !has_200)
+		return -EOPNOTSUPP;
+
+	return mv88e6xxx_port_set_speed_duplex(chip, port, speed, has_200,
+					       false, duplex);
+}
+
 /* Support 10, 100, 200, 1000, 2500 Mbps (e.g. 88E6341) */
 int mv88e6341_port_set_speed_duplex(struct mv88e6xxx_chip *chip, int port,
 				    int speed, int duplex)
@@ -340,14 +357,6 @@ int mv88e6341_port_set_speed_duplex(struct mv88e6xxx_chip *chip, int port,
 
 	return mv88e6xxx_port_set_speed_duplex(chip, port, speed, !port, true,
 					       duplex);
-}
-
-phy_interface_t mv88e6341_port_max_speed_mode(int port)
-{
-	if (port == 5)
-		return PHY_INTERFACE_MODE_2500BASEX;
-
-	return PHY_INTERFACE_MODE_NA;
 }
 
 /* Support 10, 100, 200, 1000 Mbps (e.g. 88E6352 family) */
@@ -381,14 +390,6 @@ int mv88e6390_port_set_speed_duplex(struct mv88e6xxx_chip *chip, int port,
 					       duplex);
 }
 
-phy_interface_t mv88e6390_port_max_speed_mode(int port)
-{
-	if (port == 9 || port == 10)
-		return PHY_INTERFACE_MODE_2500BASEX;
-
-	return PHY_INTERFACE_MODE_NA;
-}
-
 /* Support 10, 100, 200, 1000, 2500, 10000 Mbps (e.g. 88E6190X) */
 int mv88e6390x_port_set_speed_duplex(struct mv88e6xxx_chip *chip, int port,
 				     int speed, int duplex)
@@ -403,14 +404,6 @@ int mv88e6390x_port_set_speed_duplex(struct mv88e6xxx_chip *chip, int port,
 					       duplex);
 }
 
-phy_interface_t mv88e6390x_port_max_speed_mode(int port)
-{
-	if (port == 9 || port == 10)
-		return PHY_INTERFACE_MODE_XAUI;
-
-	return PHY_INTERFACE_MODE_NA;
-}
-
 /* Support 10, 100, 200, 1000, 2500, 5000, 10000 Mbps (e.g. 88E6393X)
  * Function mv88e6xxx_port_set_speed_duplex() can't be used as the register
  * values for speeds 2500 & 5000 conflict.
@@ -420,6 +413,10 @@ int mv88e6393x_port_set_speed_duplex(struct mv88e6xxx_chip *chip, int port,
 {
 	u16 reg, ctrl;
 	int err;
+
+	if (chip->info->prod_num == MV88E6XXX_PORT_SWITCH_ID_PROD_6361 &&
+	    speed > 2500)
+		return -EOPNOTSUPP;
 
 	if (speed == 200 && port != 0)
 		return -EOPNOTSUPP;
@@ -500,19 +497,10 @@ int mv88e6393x_port_set_speed_duplex(struct mv88e6xxx_chip *chip, int port,
 	return 0;
 }
 
-phy_interface_t mv88e6393x_port_max_speed_mode(int port)
-{
-	if (port == 0 || port == 9 || port == 10)
-		return PHY_INTERFACE_MODE_10GBASER;
-
-	return PHY_INTERFACE_MODE_NA;
-}
-
 static int mv88e6xxx_port_set_cmode(struct mv88e6xxx_chip *chip, int port,
 				    phy_interface_t mode, bool force)
 {
 	u16 cmode;
-	int lane;
 	u16 reg;
 	int err;
 
@@ -554,6 +542,9 @@ static int mv88e6xxx_port_set_cmode(struct mv88e6xxx_chip *chip, int port,
 	case PHY_INTERFACE_MODE_10GBASER:
 		cmode = MV88E6393X_PORT_STS_CMODE_10GBASER;
 		break;
+	case PHY_INTERFACE_MODE_USXGMII:
+		cmode = MV88E6393X_PORT_STS_CMODE_USXGMII;
+		break;
 	default:
 		cmode = 0;
 	}
@@ -561,19 +552,6 @@ static int mv88e6xxx_port_set_cmode(struct mv88e6xxx_chip *chip, int port,
 	/* cmode doesn't change, nothing to do for us unless forced */
 	if (cmode == chip->ports[port].cmode && !force)
 		return 0;
-
-	lane = mv88e6xxx_serdes_get_lane(chip, port);
-	if (lane >= 0) {
-		if (chip->ports[port].serdes_irq) {
-			err = mv88e6xxx_serdes_irq_disable(chip, port, lane);
-			if (err)
-				return err;
-		}
-
-		err = mv88e6xxx_serdes_power_down(chip, port, lane);
-		if (err)
-			return err;
-	}
 
 	chip->ports[port].cmode = 0;
 
@@ -590,22 +568,6 @@ static int mv88e6xxx_port_set_cmode(struct mv88e6xxx_chip *chip, int port,
 			return err;
 
 		chip->ports[port].cmode = cmode;
-
-		lane = mv88e6xxx_serdes_get_lane(chip, port);
-		if (lane == -ENODEV)
-			return 0;
-		if (lane < 0)
-			return lane;
-
-		err = mv88e6xxx_serdes_power_up(chip, port, lane);
-		if (err)
-			return err;
-
-		if (chip->ports[port].serdes_irq) {
-			err = mv88e6xxx_serdes_irq_enable(chip, port, lane);
-			if (err)
-				return err;
-		}
 	}
 
 	return 0;
@@ -1393,7 +1355,33 @@ int mv88e6xxx_port_disable_learn_limit(struct mv88e6xxx_chip *chip, int port)
 
 int mv88e6xxx_port_disable_pri_override(struct mv88e6xxx_chip *chip, int port)
 {
-	return mv88e6xxx_port_write(chip, port, MV88E6XXX_PORT_PRI_OVERRIDE, 0);
+	u16 reg;
+	int err;
+
+	err = mv88e6xxx_port_read(chip, port, MV88E6XXX_PORT_PRI_OVERRIDE,
+				  &reg);
+	if (err)
+		return err;
+
+	reg &= MV88E6XXX_PORT_PRI_OVERRIDE_TCAM_MODE_MASK;
+	return mv88e6xxx_port_write(chip, port, MV88E6XXX_PORT_PRI_OVERRIDE,
+				    reg);
+}
+
+int mv88e6xxx_port_enable_tcam(struct mv88e6xxx_chip *chip, int port)
+{
+	u16 reg;
+	int err;
+
+	err = mv88e6xxx_port_read(chip, port, MV88E6XXX_PORT_PRI_OVERRIDE,
+				  &reg);
+	if (err)
+		return err;
+
+	reg &= ~MV88E6XXX_PORT_PRI_OVERRIDE_TCAM_MODE_MASK;
+	reg |= MV88E6XXX_PORT_PRI_OVERRIDE_TCAM_MODE_96_BYTE;
+	return mv88e6xxx_port_write(chip, port, MV88E6XXX_PORT_PRI_OVERRIDE,
+				    reg);
 }
 
 /* Offset 0x0E: Policy & MGMT Control Register for FAMILY 6191X 6193X 6393X */
@@ -1728,6 +1716,7 @@ int mv88e6393x_port_set_policy(struct mv88e6xxx_chip *chip, int port,
 	ptr = shift / 8;
 	shift %= 8;
 	mask >>= ptr * 8;
+	ptr <<= 8;
 
 	err = mv88e6393x_port_policy_read(chip, port, ptr, &reg);
 	if (err)

@@ -39,29 +39,19 @@
 #include "dcn316_smu.h"
 #include "dm_helpers.h"
 #include "dc_dmub_srv.h"
-#include "dc_link_dp.h"
+#include "link_service.h"
 
 // DCN316 this is CLK1 instance
 #define MAX_INSTANCE                                        7
 #define MAX_SEGMENT                                         6
 
-struct IP_BASE_INSTANCE
-{
+struct IP_BASE_INSTANCE {
     unsigned int segment[MAX_SEGMENT];
 };
 
-struct IP_BASE
-{
+struct IP_BASE {
     struct IP_BASE_INSTANCE instance[MAX_INSTANCE];
 };
-
-static const struct IP_BASE CLK_BASE = { { { { 0x00016C00, 0x02401800, 0, 0, 0, 0 } },
-                                        { { 0x00016E00, 0x02401C00, 0, 0, 0, 0 } },
-                                        { { 0x00017000, 0x02402000, 0, 0, 0, 0 } },
-                                        { { 0x00017200, 0x02402400, 0, 0, 0, 0 } },
-                                        { { 0x0001B000, 0x0242D800, 0, 0, 0, 0 } },
-                                        { { 0x0001B200, 0x0242DC00, 0, 0, 0, 0 } },
-                                        { { 0x0001B400, 0x0242E000, 0, 0, 0, 0 } } } };
 
 #define regCLK1_CLK_PLL_REQ						0x0237
 #define regCLK1_CLK_PLL_REQ_BASE_IDX			0
@@ -72,9 +62,6 @@ static const struct IP_BASE CLK_BASE = { { { { 0x00016C00, 0x02401800, 0, 0, 0, 
 #define CLK1_CLK_PLL_REQ__FbMult_int_MASK		0x000001FFL
 #define CLK1_CLK_PLL_REQ__PllSpineDiv_MASK		0x0000F000L
 #define CLK1_CLK_PLL_REQ__FbMult_frac_MASK		0xFFFF0000L
-
-#define REG(reg_name) \
-	(CLK_BASE.instance[0].segment[reg ## reg_name ## _BASE_IDX] + reg ## reg_name)
 
 #define TO_CLK_MGR_DCN316(clk_mgr)\
 	container_of(clk_mgr, struct clk_mgr_dcn316, base)
@@ -94,6 +81,9 @@ static int dcn316_get_active_display_cnt_wa(
 				stream->signal == SIGNAL_TYPE_DVI_SINGLE_LINK ||
 				stream->signal == SIGNAL_TYPE_DVI_DUAL_LINK)
 			tmds_present = true;
+		/* FRL can't be tracked by DIG enablement */
+		if (dc_is_hdmi_frl_signal(stream->signal))
+			display_count++;
 	}
 
 	for (i = 0; i < dc->link_count; i++) {
@@ -112,20 +102,25 @@ static int dcn316_get_active_display_cnt_wa(
 	return display_count;
 }
 
-static void dcn316_disable_otg_wa(struct clk_mgr *clk_mgr_base, struct dc_state *context, bool disable)
+static void dcn316_disable_otg_wa(struct clk_mgr *clk_mgr_base, struct dc_state *context,
+		bool safe_to_lower, bool disable)
 {
 	struct dc *dc = clk_mgr_base->ctx->dc;
-	int i;
+	uint8_t i;
 
 	for (i = 0; i < dc->res_pool->pipe_count; ++i) {
-		struct pipe_ctx *pipe = &dc->current_state->res_ctx.pipe_ctx[i];
+		struct pipe_ctx *pipe = safe_to_lower
+			? &context->res_ctx.pipe_ctx[i]
+			: &dc->current_state->res_ctx.pipe_ctx[i];
 
 		if (pipe->top_pipe || pipe->prev_odm_pipe)
 			continue;
-		if (pipe->stream && (pipe->stream->dpms_off || pipe->plane_state == NULL ||
-				     dc_is_virtual_signal(pipe->stream->signal))) {
+		if (pipe->stream && (pipe->stream->dpms_off || dc_is_virtual_signal(pipe->stream->signal) ||
+				     !pipe->stream->link_enc)) {
 			if (disable) {
-				pipe->stream_res.tg->funcs->immediate_disable_crtc(pipe->stream_res.tg);
+				if (pipe->stream_res.tg && pipe->stream_res.tg->funcs->immediate_disable_crtc)
+					pipe->stream_res.tg->funcs->immediate_disable_crtc(pipe->stream_res.tg);
+
 				reset_sync_context_for_pipe(dc, context, i);
 			} else
 				pipe->stream_res.tg->funcs->enable_crtc(pipe->stream_res.tg);
@@ -148,7 +143,7 @@ static void dcn316_update_clocks(struct clk_mgr *clk_mgr_base,
 	struct clk_mgr_internal *clk_mgr = TO_CLK_MGR_INTERNAL(clk_mgr_base);
 	struct dc_clocks *new_clocks = &context->bw_ctx.bw.dcn.clk;
 	struct dc *dc = clk_mgr_base->ctx->dc;
-	int display_count;
+	int display_count = 0;
 	bool update_dppclk = false;
 	bool update_dispclk = false;
 	bool dpp_clock_lowered = false;
@@ -207,12 +202,8 @@ static void dcn316_update_clocks(struct clk_mgr *clk_mgr_base,
 	}
 
 	// workaround: Limit dppclk to 100Mhz to avoid lower eDP panel switch to plus 4K monitor underflow.
-	if (!IS_DIAG_DC(dc->ctx->dce_environment)) {
-		if (new_clocks->dppclk_khz < 100000)
-			new_clocks->dppclk_khz = 100000;
-		if (new_clocks->dispclk_khz < 100000)
-			new_clocks->dispclk_khz = 100000;
-	}
+	if (new_clocks->dppclk_khz < 100000)
+		new_clocks->dppclk_khz = 100000;
 
 	if (should_set_clock(safe_to_lower, new_clocks->dppclk_khz, clk_mgr->base.clks.dppclk_khz)) {
 		if (clk_mgr->base.clks.dppclk_khz > new_clocks->dppclk_khz)
@@ -221,12 +212,19 @@ static void dcn316_update_clocks(struct clk_mgr *clk_mgr_base,
 		update_dppclk = true;
 	}
 
-	if (should_set_clock(safe_to_lower, new_clocks->dispclk_khz, clk_mgr_base->clks.dispclk_khz)) {
-		dcn316_disable_otg_wa(clk_mgr_base, context, true);
+	if (should_set_clock(safe_to_lower, new_clocks->dispclk_khz, clk_mgr_base->clks.dispclk_khz) &&
+	    (new_clocks->dispclk_khz > 0 || (safe_to_lower && display_count == 0))) {
+		uint32_t requested_dispclk_khz = new_clocks->dispclk_khz;
 
+		dcn316_disable_otg_wa(clk_mgr_base, context, safe_to_lower, true);
+
+		/* Clamp the requested clock to PMFW based on their limit. */
+		if (dc->debug.min_disp_clk_khz > 0 && requested_dispclk_khz < dc->debug.min_disp_clk_khz)
+			requested_dispclk_khz = dc->debug.min_disp_clk_khz;
+
+		dcn316_smu_set_dispclk(clk_mgr, requested_dispclk_khz);
 		clk_mgr_base->clks.dispclk_khz = new_clocks->dispclk_khz;
-		dcn316_smu_set_dispclk(clk_mgr, clk_mgr_base->clks.dispclk_khz);
-		dcn316_disable_otg_wa(clk_mgr_base, context, false);
+		dcn316_disable_otg_wa(clk_mgr_base, context, safe_to_lower, false);
 
 		update_dispclk = true;
 	}
@@ -254,14 +252,15 @@ static void dcn316_update_clocks(struct clk_mgr *clk_mgr_base,
 	cmd.notify_clocks.clocks.dispclk_khz = clk_mgr_base->clks.dispclk_khz;
 	cmd.notify_clocks.clocks.dppclk_khz = clk_mgr_base->clks.dppclk_khz;
 
-	dc_dmub_srv_cmd_queue(dc->ctx->dmub_srv, &cmd);
-	dc_dmub_srv_cmd_execute(dc->ctx->dmub_srv);
-	dc_dmub_srv_wait_idle(dc->ctx->dmub_srv);
+	dc_wake_and_execute_dmub_cmd(dc->ctx, &cmd, DM_DMUB_WAIT_TYPE_WAIT);
 }
 
 static void dcn316_dump_clk_registers(struct clk_state_registers_and_bypass *regs_and_bypass,
 		struct clk_mgr *clk_mgr_base, struct clk_log_info *log_info)
 {
+	(void)regs_and_bypass;
+	(void)clk_mgr_base;
+	(void)log_info;
 	return;
 }
 
@@ -354,7 +353,7 @@ static struct dcn316_watermarks dummy_wms = { 0 };
 
 static void dcn316_build_watermark_ranges(struct clk_bw_params *bw_params, struct dcn316_watermarks *table)
 {
-	int i, num_valid_sets;
+	uint8_t i, num_valid_sets;
 
 	num_valid_sets = 0;
 
@@ -363,8 +362,11 @@ static void dcn316_build_watermark_ranges(struct clk_bw_params *bw_params, struc
 		if (!bw_params->wm_table.entries[i].valid)
 			continue;
 
-		table->WatermarkRow[WM_DCFCLK][num_valid_sets].WmSetting = bw_params->wm_table.entries[i].wm_inst;
-		table->WatermarkRow[WM_DCFCLK][num_valid_sets].WmType = bw_params->wm_table.entries[i].wm_type;
+
+		table->WatermarkRow[WM_DCFCLK][num_valid_sets].WmSetting =
+			(uint8_t)bw_params->wm_table.entries[i].wm_inst;
+		table->WatermarkRow[WM_DCFCLK][num_valid_sets].WmType =
+			(uint8_t)bw_params->wm_table.entries[i].wm_type;
 		/* We will not select WM based on fclk, so leave it as unconstrained */
 		table->WatermarkRow[WM_DCFCLK][num_valid_sets].MinClock = 0;
 		table->WatermarkRow[WM_DCFCLK][num_valid_sets].MaxClock = 0xFFFF;
@@ -375,10 +377,10 @@ static void dcn316_build_watermark_ranges(struct clk_bw_params *bw_params, struc
 			else {
 				/* add 1 to make it non-overlapping with next lvl */
 				table->WatermarkRow[WM_DCFCLK][num_valid_sets].MinMclk =
-						bw_params->clk_table.entries[i - 1].dcfclk_mhz + 1;
+						(uint16_t)(bw_params->clk_table.entries[i - 1].dcfclk_mhz + 1);
 			}
 			table->WatermarkRow[WM_DCFCLK][num_valid_sets].MaxMclk =
-					bw_params->clk_table.entries[i].dcfclk_mhz;
+					(uint16_t)bw_params->clk_table.entries[i].dcfclk_mhz;
 
 		} else {
 			/* unconstrained for memory retraining */
@@ -453,7 +455,7 @@ static void dcn316_get_dpm_table_from_smu(struct clk_mgr_internal *clk_mgr,
 static uint32_t find_max_clk_value(const uint32_t clocks[], uint32_t num_clocks)
 {
 	uint32_t max = 0;
-	int i;
+	uint32_t i;
 
 	for (i = 0; i < num_clocks; ++i) {
 		if (clocks[i] > max)
@@ -469,8 +471,8 @@ static unsigned int find_clk_for_voltage(
 		unsigned int voltage)
 {
 	int i;
-	int max_voltage = 0;
-	int clock = 0;
+	unsigned int max_voltage = 0;
+	unsigned int clock = 0;
 
 	for (i = 0; i < NUM_SOC_VOLTAGE_LEVELS; i++) {
 		if (clock_table->SocVoltage[i] == voltage) {
@@ -492,12 +494,14 @@ static void dcn316_clk_mgr_helper_populate_bw_params(
 		const DpmClocks_316_t *clock_table)
 {
 	int i, j;
+	unsigned int entry_idx;
 	struct clk_bw_params *bw_params = clk_mgr->base.bw_params;
 	uint32_t max_dispclk = 0, max_dppclk = 0;
 
 	j = -1;
 
-	ASSERT(NUM_DF_PSTATE_LEVELS <= MAX_NUM_DPM_LVL);
+	static_assert(NUM_DF_PSTATE_LEVELS <= MAX_NUM_DPM_LVL,
+		"number of reported pstate levels exceeds maximum");
 
 	/* Find lowest DPM, FCLK is filled in reverse order*/
 
@@ -525,46 +529,46 @@ static void dcn316_clk_mgr_helper_populate_bw_params(
 		ASSERT(0);
 	}
 
-	for (i = 0; i < bw_params->clk_table.num_entries; i++, j--) {
+	for (entry_idx = 0; entry_idx < bw_params->clk_table.num_entries; entry_idx++, j--) {
 		int temp;
 
-		bw_params->clk_table.entries[i].fclk_mhz = clock_table->DfPstateTable[j].FClk;
-		bw_params->clk_table.entries[i].memclk_mhz = clock_table->DfPstateTable[j].MemClk;
-		bw_params->clk_table.entries[i].voltage = clock_table->DfPstateTable[j].Voltage;
+		bw_params->clk_table.entries[entry_idx].fclk_mhz = clock_table->DfPstateTable[j].FClk;
+		bw_params->clk_table.entries[entry_idx].memclk_mhz = clock_table->DfPstateTable[j].MemClk;
+		bw_params->clk_table.entries[entry_idx].voltage = clock_table->DfPstateTable[j].Voltage;
 		switch (clock_table->DfPstateTable[j].WckRatio) {
 		case WCK_RATIO_1_2:
-			bw_params->clk_table.entries[i].wck_ratio = 2;
+			bw_params->clk_table.entries[entry_idx].wck_ratio = 2;
 			break;
 		case WCK_RATIO_1_4:
-			bw_params->clk_table.entries[i].wck_ratio = 4;
+			bw_params->clk_table.entries[entry_idx].wck_ratio = 4;
 			break;
 		default:
-			bw_params->clk_table.entries[i].wck_ratio = 1;
+			bw_params->clk_table.entries[entry_idx].wck_ratio = 1;
 		}
 		temp = find_clk_for_voltage(clock_table, clock_table->DcfClocks, clock_table->DfPstateTable[j].Voltage);
 		if (temp)
-			bw_params->clk_table.entries[i].dcfclk_mhz = temp;
+			bw_params->clk_table.entries[entry_idx].dcfclk_mhz = temp;
 		temp = find_clk_for_voltage(clock_table, clock_table->SocClocks, clock_table->DfPstateTable[j].Voltage);
 		if (temp)
-			bw_params->clk_table.entries[i].socclk_mhz = temp;
-		bw_params->clk_table.entries[i].dispclk_mhz = max_dispclk;
-		bw_params->clk_table.entries[i].dppclk_mhz = max_dppclk;
+			bw_params->clk_table.entries[entry_idx].socclk_mhz = temp;
+		bw_params->clk_table.entries[entry_idx].dispclk_mhz = max_dispclk;
+		bw_params->clk_table.entries[entry_idx].dppclk_mhz = max_dppclk;
 	}
 
 	bw_params->vram_type = bios_info->memory_type;
 	bw_params->num_channels = bios_info->ma_channel_number;
 	bw_params->dram_channel_width_bytes = bios_info->memory_type == 0x22 ? 8 : 4;
 
-	for (i = 0; i < WM_SET_COUNT; i++) {
-		bw_params->wm_table.entries[i].wm_inst = i;
+	for (entry_idx = 0; entry_idx < (unsigned int)WM_SET_COUNT; entry_idx++) {
+		bw_params->wm_table.entries[entry_idx].wm_inst = entry_idx;
 
-		if (i >= bw_params->clk_table.num_entries) {
-			bw_params->wm_table.entries[i].valid = false;
+		if (entry_idx >= bw_params->clk_table.num_entries) {
+			bw_params->wm_table.entries[entry_idx].valid = false;
 			continue;
 		}
 
-		bw_params->wm_table.entries[i].wm_type = WM_TYPE_PSTATE_CHG;
-		bw_params->wm_table.entries[i].valid = true;
+		bw_params->wm_table.entries[entry_idx].wm_type = WM_TYPE_PSTATE_CHG;
+		bw_params->wm_table.entries[entry_idx].valid = true;
 	}
 }
 
@@ -581,36 +585,6 @@ static struct clk_mgr_funcs dcn316_funcs = {
 };
 extern struct clk_mgr_funcs dcn3_fpga_funcs;
 
-static int get_vco_frequency_from_reg(struct clk_mgr_internal *clk_mgr)
-{
-	/* get FbMult value */
-	struct fixed31_32 pll_req;
-	unsigned int fbmult_frac_val = 0;
-	unsigned int fbmult_int_val = 0;
-
-	/*
-	 * Register value of fbmult is in 8.16 format, we are converting to 31.32
-	 * to leverage the fix point operations available in driver
-	 */
-
-	REG_GET(CLK1_CLK_PLL_REQ, FbMult_frac, &fbmult_frac_val); /* 16 bit fractional part*/
-	REG_GET(CLK1_CLK_PLL_REQ, FbMult_int, &fbmult_int_val); /* 8 bit integer part */
-
-	pll_req = dc_fixpt_from_int(fbmult_int_val);
-
-	/*
-	 * since fractional part is only 16 bit in register definition but is 32 bit
-	 * in our fix point definiton, need to shift left by 16 to obtain correct value
-	 */
-	pll_req.value |= fbmult_frac_val << 16;
-
-	/* multiply by REFCLK period */
-	pll_req = dc_fixpt_mul_int(pll_req, clk_mgr->dfs_ref_freq_khz);
-
-	/* integer part is now VCO frequency in kHz */
-	return dc_fixpt_floor(pll_req);
-}
-
 void dcn316_clk_mgr_construct(
 		struct dc_context *ctx,
 		struct clk_mgr_dcn316 *clk_mgr,
@@ -618,6 +592,7 @@ void dcn316_clk_mgr_construct(
 		struct dccg *dccg)
 {
 	struct dcn316_smu_dpm_clks smu_dpm_clks = { 0 };
+	struct clk_log_info log_info = {0};
 
 	clk_mgr->base.base.ctx = ctx;
 	clk_mgr->base.base.funcs = &dcn316_funcs;
@@ -657,35 +632,29 @@ void dcn316_clk_mgr_construct(
 
 	ASSERT(smu_dpm_clks.dpm_clks);
 
-	if (IS_FPGA_MAXIMUS_DC(ctx->dce_environment)) {
-		clk_mgr->base.base.funcs = &dcn3_fpga_funcs;
-		clk_mgr->base.base.dentist_vco_freq_khz = 2500000;
-	} else {
-		struct clk_log_info log_info = {0};
+	clk_mgr->base.smu_ver = dcn316_smu_get_smu_version(&clk_mgr->base);
 
-		clk_mgr->base.smu_ver = dcn316_smu_get_smu_version(&clk_mgr->base);
+	if (clk_mgr->base.smu_ver > 0)
+		clk_mgr->base.smu_present = true;
 
-		if (clk_mgr->base.smu_ver > 0)
-			clk_mgr->base.smu_present = true;
+	// Skip this for now as it did not work on DCN315, renable during bring up
+	//clk_mgr->base.base.dentist_vco_freq_khz = get_vco_frequency_from_reg(&clk_mgr->base);
+	clk_mgr->base.base.dentist_vco_freq_khz = 2500000;
 
-		// Skip this for now as it did not work on DCN315, renable during bring up
-		clk_mgr->base.base.dentist_vco_freq_khz = get_vco_frequency_from_reg(&clk_mgr->base);
-
-		/* in case we don't get a value from the register, use default */
-		if (clk_mgr->base.base.dentist_vco_freq_khz == 0)
-			clk_mgr->base.base.dentist_vco_freq_khz = 2500000; /* 2400MHz */
+	/* in case we don't get a value from the register, use default */
+	if (clk_mgr->base.base.dentist_vco_freq_khz == 0)
+		clk_mgr->base.base.dentist_vco_freq_khz = 2500000; /* 2400MHz */
 
 
-		if (ctx->dc_bios->integrated_info->memory_type == LpDdr5MemType) {
-			dcn316_bw_params.wm_table = lpddr5_wm_table;
-		} else {
-			dcn316_bw_params.wm_table = ddr4_wm_table;
-		}
-		/* Saved clocks configured at boot for debug purposes */
-		dcn316_dump_clk_registers(&clk_mgr->base.base.boot_snapshot,
-					  &clk_mgr->base.base, &log_info);
+	if (ctx->dc_bios->integrated_info &&
+	    ctx->dc_bios->integrated_info->memory_type == LpDdr5MemType)
+		dcn316_bw_params.wm_table = lpddr5_wm_table;
+	else
+		dcn316_bw_params.wm_table = ddr4_wm_table;
 
-	}
+	/* Saved clocks configured at boot for debug purposes */
+	dcn316_dump_clk_registers(&clk_mgr->base.base.boot_snapshot,
+				  &clk_mgr->base.base, &log_info);
 
 	clk_mgr->base.base.dprefclk_khz = 600000;
 	clk_mgr->base.base.dprefclk_khz = dcn316_smu_get_dpref_clk(&clk_mgr->base);
@@ -699,7 +668,7 @@ void dcn316_clk_mgr_construct(
 	if (clk_mgr->base.base.ctx->dc->debug.pstate_enabled) {
 		dcn316_get_dpm_table_from_smu(&clk_mgr->base, &smu_dpm_clks);
 
-		if (ctx->dc_bios && ctx->dc_bios->integrated_info) {
+		if (ctx->dc_bios->integrated_info) {
 			dcn316_clk_mgr_helper_populate_bw_params(
 					&clk_mgr->base,
 					ctx->dc_bios->integrated_info,

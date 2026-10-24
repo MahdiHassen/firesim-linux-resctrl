@@ -18,7 +18,6 @@
 #include <linux/kernel.h>
 #include <linux/libata.h>
 #include <linux/mm.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/types.h>
 #include <linux/zorro.h>
@@ -27,7 +26,6 @@
 
 #include <asm/amigahw.h>
 #include <asm/amigaints.h>
-#include <asm/ide.h>
 #include <asm/setup.h>
 
 #define DRV_NAME "pata_buddha"
@@ -57,7 +55,7 @@ static unsigned int xsurf_bases[2] = {
 	XSURF_BASE1, XSURF_BASE2
 };
 
-static struct scsi_host_template pata_buddha_sht = {
+static const struct scsi_host_template pata_buddha_sht = {
 	ATA_PIO_SHT(DRV_NAME),
 };
 

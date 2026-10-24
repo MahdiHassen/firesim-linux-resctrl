@@ -17,7 +17,8 @@
 #include "network_helpers.h"
 #include <linux/if_bonding.h>
 #include <linux/limits.h>
-#include <linux/udp.h>
+#include <netinet/udp.h>
+#include <uapi/linux/netdev.h>
 
 #include "xdp_dummy.skel.h"
 #include "xdp_redirect_multi_kern.skel.h"
@@ -141,41 +142,33 @@ static const char * const xmit_policy_names[] = {
 static int bonding_setup(struct skeletons *skeletons, int mode, int xmit_policy,
 			 int bond_both_attach)
 {
-#define SYS(fmt, ...)						\
-	({							\
-		char cmd[1024];					\
-		snprintf(cmd, sizeof(cmd), fmt, ##__VA_ARGS__);	\
-		if (!ASSERT_OK(system(cmd), cmd))		\
-			return -1;				\
-	})
+	SYS(fail, "ip netns add ns_dst");
+	SYS(fail, "ip link add veth1_1 type veth peer name veth2_1 netns ns_dst");
+	SYS(fail, "ip link add veth1_2 type veth peer name veth2_2 netns ns_dst");
 
-	SYS("ip netns add ns_dst");
-	SYS("ip link add veth1_1 type veth peer name veth2_1 netns ns_dst");
-	SYS("ip link add veth1_2 type veth peer name veth2_2 netns ns_dst");
-
-	SYS("ip link add bond1 type bond mode %s xmit_hash_policy %s",
+	SYS(fail, "ip link add bond1 type bond mode %s xmit_hash_policy %s",
 	    mode_names[mode], xmit_policy_names[xmit_policy]);
-	SYS("ip link set bond1 up address " BOND1_MAC_STR " addrgenmode none");
-	SYS("ip -netns ns_dst link add bond2 type bond mode %s xmit_hash_policy %s",
+	SYS(fail, "ip link set bond1 up address " BOND1_MAC_STR " addrgenmode none");
+	SYS(fail, "ip -netns ns_dst link add bond2 type bond mode %s xmit_hash_policy %s",
 	    mode_names[mode], xmit_policy_names[xmit_policy]);
-	SYS("ip -netns ns_dst link set bond2 up address " BOND2_MAC_STR " addrgenmode none");
+	SYS(fail, "ip -netns ns_dst link set bond2 up address " BOND2_MAC_STR " addrgenmode none");
 
-	SYS("ip link set veth1_1 master bond1");
+	SYS(fail, "ip link set veth1_1 master bond1");
 	if (bond_both_attach == BOND_BOTH_AND_ATTACH) {
-		SYS("ip link set veth1_2 master bond1");
+		SYS(fail, "ip link set veth1_2 master bond1");
 	} else {
-		SYS("ip link set veth1_2 up addrgenmode none");
+		SYS(fail, "ip link set veth1_2 up addrgenmode none");
 
 		if (xdp_attach(skeletons, skeletons->xdp_dummy->progs.xdp_dummy_prog, "veth1_2"))
 			return -1;
 	}
 
-	SYS("ip -netns ns_dst link set veth2_1 master bond2");
+	SYS(fail, "ip -netns ns_dst link set veth2_1 master bond2");
 
 	if (bond_both_attach == BOND_BOTH_AND_ATTACH)
-		SYS("ip -netns ns_dst link set veth2_2 master bond2");
+		SYS(fail, "ip -netns ns_dst link set veth2_2 master bond2");
 	else
-		SYS("ip -netns ns_dst link set veth2_2 up addrgenmode none");
+		SYS(fail, "ip -netns ns_dst link set veth2_2 up addrgenmode none");
 
 	/* Load a dummy program on sending side as with veth peer needs to have a
 	 * XDP program loaded as well.
@@ -194,17 +187,22 @@ static int bonding_setup(struct skeletons *skeletons, int mode, int xmit_policy,
 	}
 
 	return 0;
+fail:
+	return -1;
+}
 
-#undef SYS
+static void link_cleanup(struct skeletons *skeletons)
+{
+	while (skeletons->nlinks) {
+		skeletons->nlinks--;
+		bpf_link__destroy(skeletons->links[skeletons->nlinks]);
+	}
 }
 
 static void bonding_cleanup(struct skeletons *skeletons)
 {
 	restore_root_netns();
-	while (skeletons->nlinks) {
-		skeletons->nlinks--;
-		bpf_link__destroy(skeletons->links[skeletons->nlinks]);
-	}
+	link_cleanup(skeletons);
 	ASSERT_OK(system("ip link delete bond1"), "delete bond1");
 	ASSERT_OK(system("ip link delete veth1_1"), "delete veth1_1");
 	ASSERT_OK(system("ip link delete veth1_2"), "delete veth1_2");
@@ -500,6 +498,262 @@ out:
 	system("ip link del bond_nest2");
 }
 
+/*
+ * Test that XDP redirect via xdp_master_redirect() does not crash when
+ * the bond master device is not up. When bond is in round-robin mode but
+ * never opened, rr_tx_counter is NULL.
+ */
+static void test_xdp_bonding_redirect_no_up(struct skeletons *skeletons)
+{
+	struct nstoken *nstoken = NULL;
+	int xdp_pass_fd;
+	int veth1_ifindex;
+	int err;
+	char pkt[ETH_HLEN + 1];
+	struct xdp_md ctx_in = {};
+
+	DECLARE_LIBBPF_OPTS(bpf_test_run_opts, opts,
+			    .data_in = &pkt,
+			    .data_size_in = sizeof(pkt),
+			    .ctx_in = &ctx_in,
+			    .ctx_size_in = sizeof(ctx_in),
+			    .flags = BPF_F_TEST_XDP_LIVE_FRAMES,
+			    .repeat = 1,
+			    .batch_size = 1,
+		);
+
+	/* We can't use bonding_setup() because bond will be active */
+	SYS(out, "ip netns add ns_rr_no_up");
+	nstoken = open_netns("ns_rr_no_up");
+	if (!ASSERT_OK_PTR(nstoken, "open ns_rr_no_up"))
+		goto out;
+
+	/* bond0: active-backup, UP with slave veth0.
+	 * Attaching native XDP to bond0 enables bpf_master_redirect_enabled_key
+	 * globally.
+	 */
+	SYS(out, "ip link add bond0 type bond mode active-backup");
+	SYS(out, "ip link add veth0 type veth peer name veth0p");
+	SYS(out, "ip link set veth0 master bond0");
+	SYS(out, "ip link set bond0 up");
+	SYS(out, "ip link set veth0p up");
+
+	/* bond1: round-robin, never UP -> rr_tx_counter stays NULL */
+	SYS(out, "ip link add bond1 type bond mode balance-rr");
+	SYS(out, "ip link add veth1 type veth peer name veth1p");
+	SYS(out, "ip link set veth1 master bond1");
+
+	veth1_ifindex = if_nametoindex("veth1");
+	if (!ASSERT_GT(veth1_ifindex, 0, "veth1_ifindex"))
+		goto out;
+
+	/* Attach native XDP to bond0 -> enables global redirect key */
+	if (xdp_attach(skeletons, skeletons->xdp_tx->progs.xdp_tx, "bond0"))
+		goto out;
+
+	/* Attach generic XDP (XDP_TX) to veth1.
+	 * When packets arrive at veth1 via netif_receive_skb, do_xdp_generic()
+	 * runs this program. XDP_TX + bond slave triggers xdp_master_redirect().
+	 */
+	err = bpf_xdp_attach(veth1_ifindex,
+			     bpf_program__fd(skeletons->xdp_tx->progs.xdp_tx),
+			     XDP_FLAGS_SKB_MODE, NULL);
+	if (!ASSERT_OK(err, "attach generic XDP to veth1"))
+		goto out;
+
+	/* Run BPF_PROG_TEST_RUN with XDP_PASS live frames on veth1.
+	 * XDP_PASS frames become SKBs with skb->dev = veth1, entering
+	 * netif_receive_skb -> do_xdp_generic -> xdp_master_redirect.
+	 * Without the fix, bond_rr_gen_slave_id() dereferences NULL
+	 * rr_tx_counter and crashes.
+	 */
+	xdp_pass_fd = bpf_program__fd(skeletons->xdp_dummy->progs.xdp_dummy_prog);
+
+	memset(pkt, 0, sizeof(pkt));
+	ctx_in.data_end = sizeof(pkt);
+	ctx_in.ingress_ifindex = veth1_ifindex;
+
+	err = bpf_prog_test_run_opts(xdp_pass_fd, &opts);
+	ASSERT_OK(err, "xdp_pass test_run should not crash");
+
+out:
+	link_cleanup(skeletons);
+	close_netns(nstoken);
+	SYS_NOFAIL("ip netns del ns_rr_no_up");
+}
+
+static void test_xdp_bonding_features(struct skeletons *skeletons)
+{
+	LIBBPF_OPTS(bpf_xdp_query_opts, query_opts);
+	int bond_idx, veth1_idx, err;
+	struct bpf_link *link = NULL;
+
+	if (!ASSERT_OK(system("ip link add bond type bond"), "add bond"))
+		goto out;
+
+	bond_idx = if_nametoindex("bond");
+	if (!ASSERT_GE(bond_idx, 0, "if_nametoindex bond"))
+		goto out;
+
+	/* query default xdp-feature for bond device */
+	err = bpf_xdp_query(bond_idx, XDP_FLAGS_DRV_MODE, &query_opts);
+	if (!ASSERT_OK(err, "bond bpf_xdp_query"))
+		goto out;
+
+	if (!ASSERT_EQ(query_opts.feature_flags, 0,
+		       "bond query_opts.feature_flags"))
+		goto out;
+
+	if (!ASSERT_OK(system("ip link add veth0 type veth peer name veth1"),
+		       "add veth{0,1} pair"))
+		goto out;
+
+	if (!ASSERT_OK(system("ip link add veth2 type veth peer name veth3"),
+		       "add veth{2,3} pair"))
+		goto out;
+
+	if (!ASSERT_OK(system("ip link set veth0 master bond"),
+		       "add veth0 to master bond"))
+		goto out;
+
+	/* xdp-feature for bond device should be obtained from the single slave
+	 * device (veth0)
+	 */
+	err = bpf_xdp_query(bond_idx, XDP_FLAGS_DRV_MODE, &query_opts);
+	if (!ASSERT_OK(err, "bond bpf_xdp_query"))
+		goto out;
+
+	if (!ASSERT_EQ(query_opts.feature_flags,
+		       NETDEV_XDP_ACT_BASIC | NETDEV_XDP_ACT_REDIRECT |
+		       NETDEV_XDP_ACT_RX_SG,
+		       "bond query_opts.feature_flags"))
+		goto out;
+
+	veth1_idx = if_nametoindex("veth1");
+	if (!ASSERT_GE(veth1_idx, 0, "if_nametoindex veth1"))
+		goto out;
+
+	link = bpf_program__attach_xdp(skeletons->xdp_dummy->progs.xdp_dummy_prog,
+				       veth1_idx);
+	if (!ASSERT_OK_PTR(link, "attach program to veth1"))
+		goto out;
+
+	/* xdp-feature for veth0 are changed */
+	err = bpf_xdp_query(bond_idx, XDP_FLAGS_DRV_MODE, &query_opts);
+	if (!ASSERT_OK(err, "bond bpf_xdp_query"))
+		goto out;
+
+	if (!ASSERT_EQ(query_opts.feature_flags,
+		       NETDEV_XDP_ACT_BASIC | NETDEV_XDP_ACT_REDIRECT |
+		       NETDEV_XDP_ACT_RX_SG | NETDEV_XDP_ACT_NDO_XMIT |
+		       NETDEV_XDP_ACT_NDO_XMIT_SG,
+		       "bond query_opts.feature_flags"))
+		goto out;
+
+	if (!ASSERT_OK(system("ip link set veth2 master bond"),
+		       "add veth2 to master bond"))
+		goto out;
+
+	err = bpf_xdp_query(bond_idx, XDP_FLAGS_DRV_MODE, &query_opts);
+	if (!ASSERT_OK(err, "bond bpf_xdp_query"))
+		goto out;
+
+	/* xdp-feature for bond device should be set to the most restrict
+	 * value obtained from attached slave devices (veth0 and veth2)
+	 */
+	if (!ASSERT_EQ(query_opts.feature_flags,
+		       NETDEV_XDP_ACT_BASIC | NETDEV_XDP_ACT_REDIRECT |
+		       NETDEV_XDP_ACT_RX_SG,
+		       "bond query_opts.feature_flags"))
+		goto out;
+
+	if (!ASSERT_OK(system("ip link set veth2 nomaster"),
+		       "del veth2 to master bond"))
+		goto out;
+
+	err = bpf_xdp_query(bond_idx, XDP_FLAGS_DRV_MODE, &query_opts);
+	if (!ASSERT_OK(err, "bond bpf_xdp_query"))
+		goto out;
+
+	if (!ASSERT_EQ(query_opts.feature_flags,
+		       NETDEV_XDP_ACT_BASIC | NETDEV_XDP_ACT_REDIRECT |
+		       NETDEV_XDP_ACT_RX_SG | NETDEV_XDP_ACT_NDO_XMIT |
+		       NETDEV_XDP_ACT_NDO_XMIT_SG,
+		       "bond query_opts.feature_flags"))
+		goto out;
+
+	if (!ASSERT_OK(system("ip link set veth0 nomaster"),
+		       "del veth0 to master bond"))
+		goto out;
+
+	err = bpf_xdp_query(bond_idx, XDP_FLAGS_DRV_MODE, &query_opts);
+	if (!ASSERT_OK(err, "bond bpf_xdp_query"))
+		goto out;
+
+	ASSERT_EQ(query_opts.feature_flags, 0,
+		  "bond query_opts.feature_flags");
+out:
+	bpf_link__destroy(link);
+	system("ip link del veth0");
+	system("ip link del veth2");
+	system("ip link del bond");
+}
+
+/*
+ * Test that changing xmit_hash_policy to vlan+srcmac is rejected when a
+ * native XDP program is loaded on a bond in 802.3ad or balance-xor mode.
+ * These modes support XDP only when xmit_hash_policy != vlan+srcmac; freely
+ * changing the policy creates an inconsistency that triggers a WARNING in
+ * dev_xdp_uninstall() during device teardown.
+ */
+static void test_xdp_bonding_xmit_policy_compat(struct skeletons *skeletons)
+{
+	struct nstoken *nstoken = NULL;
+	int bond_ifindex = -1;
+	int xdp_fd, err;
+
+	SYS(out, "ip netns add ns_xmit_policy");
+	nstoken = open_netns("ns_xmit_policy");
+	if (!ASSERT_OK_PTR(nstoken, "open ns_xmit_policy"))
+		goto out;
+
+	/* 802.3ad with layer2+3 policy: native XDP is supported */
+	SYS(out, "ip link add bond0 type bond mode 802.3ad xmit_hash_policy layer2+3");
+	SYS(out, "ip link add veth0 type veth peer name veth0p");
+	SYS(out, "ip link set veth0 master bond0");
+	SYS(out, "ip link set bond0 up");
+
+	bond_ifindex = if_nametoindex("bond0");
+	if (!ASSERT_GT(bond_ifindex, 0, "bond0 ifindex"))
+		goto out;
+
+	xdp_fd = bpf_program__fd(skeletons->xdp_dummy->progs.xdp_dummy_prog);
+	if (!ASSERT_GE(xdp_fd, 0, "xdp_dummy fd"))
+		goto out;
+
+	err = bpf_xdp_attach(bond_ifindex, xdp_fd, XDP_FLAGS_DRV_MODE, NULL);
+	if (!ASSERT_OK(err, "attach XDP to bond0"))
+		goto out;
+
+	/* With XDP loaded, switching to vlan+srcmac must be rejected */
+	err = system("ip link set bond0 type bond xmit_hash_policy vlan+srcmac 2>/dev/null");
+	ASSERT_NEQ(err, 0, "vlan+srcmac change with XDP loaded should fail");
+
+	/* Detach XDP first, then the same change must succeed */
+	ASSERT_OK(bpf_xdp_detach(bond_ifindex, XDP_FLAGS_DRV_MODE, NULL),
+		  "detach XDP from bond0");
+
+	bond_ifindex = -1;
+	err = system("ip link set bond0 type bond xmit_hash_policy vlan+srcmac 2>/dev/null");
+	ASSERT_OK(err, "vlan+srcmac change without XDP should succeed");
+
+out:
+	if (bond_ifindex > 0)
+		bpf_xdp_detach(bond_ifindex, XDP_FLAGS_DRV_MODE, NULL);
+	close_netns(nstoken);
+	SYS_NOFAIL("ip netns del ns_xmit_policy");
+}
+
 static int libbpf_debug_print(enum libbpf_print_level level,
 			      const char *format, va_list args)
 {
@@ -554,6 +808,9 @@ void serial_test_xdp_bonding(void)
 	if (test__start_subtest("xdp_bonding_nested"))
 		test_xdp_bonding_nested(&skeletons);
 
+	if (test__start_subtest("xdp_bonding_features"))
+		test_xdp_bonding_features(&skeletons);
+
 	for (i = 0; i < ARRAY_SIZE(bond_test_cases); i++) {
 		struct bond_test_case *test_case = &bond_test_cases[i];
 
@@ -564,8 +821,14 @@ void serial_test_xdp_bonding(void)
 				test_case->xmit_policy);
 	}
 
+	if (test__start_subtest("xdp_bonding_xmit_policy_compat"))
+		test_xdp_bonding_xmit_policy_compat(&skeletons);
+
 	if (test__start_subtest("xdp_bonding_redirect_multi"))
 		test_xdp_bonding_redirect_multi(&skeletons);
+
+	if (test__start_subtest("xdp_bonding_redirect_no_up"))
+		test_xdp_bonding_redirect_no_up(&skeletons);
 
 out:
 	xdp_dummy__destroy(skeletons.xdp_dummy);

@@ -11,8 +11,6 @@
 #include <linux/io.h>
 #include <linux/mfd/syscon.h>
 #include <linux/of.h>
-#include <linux/of_address.h>
-#include <linux/of_platform.h>
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
 #include <linux/seq_file.h>
@@ -432,7 +430,7 @@ static int mvebu_pinctrl_dt_node_to_map(struct pinctrl_dev *pctldev,
 		return 0;
 	}
 
-	*map = kmalloc_array(nmaps, sizeof(**map), GFP_KERNEL);
+	*map = kmalloc_objs(**map, nmaps);
 	if (!*map)
 		return -ENOMEM;
 

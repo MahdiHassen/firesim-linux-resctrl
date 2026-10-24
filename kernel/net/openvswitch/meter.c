@@ -69,9 +69,7 @@ static struct dp_meter_instance *dp_meter_instance_alloc(const u32 size)
 {
 	struct dp_meter_instance *ti;
 
-	ti = kvzalloc(sizeof(*ti) +
-		      sizeof(struct dp_meter *) * size,
-		      GFP_KERNEL);
+	ti = kvzalloc_flex(*ti, dp_meters, size);
 	if (!ti)
 		return NULL;
 
@@ -135,17 +133,9 @@ static void dp_meter_instance_remove(struct dp_meter_instance *ti,
 
 static int attach_meter(struct dp_meter_table *tbl, struct dp_meter *meter)
 {
-	struct dp_meter_instance *ti = rcu_dereference_ovsl(tbl->ti);
-	u32 hash = meter_hash(ti, meter->id);
+	struct dp_meter_instance *ti;
+	u32 hash;
 	int err;
-
-	/* In generally, slots selected should be empty, because
-	 * OvS uses id-pool to fetch a available id.
-	 */
-	if (unlikely(rcu_dereference_ovsl(ti->dp_meters[hash])))
-		return -EBUSY;
-
-	dp_meter_instance_insert(ti, meter);
 
 	/* That function is thread-safe. */
 	tbl->count++;
@@ -154,16 +144,29 @@ static int attach_meter(struct dp_meter_table *tbl, struct dp_meter *meter)
 		goto attach_err;
 	}
 
-	if (tbl->count >= ti->n_meters &&
-	    dp_meter_instance_realloc(tbl, ti->n_meters * 2)) {
-		err = -ENOMEM;
+	ti = rcu_dereference_ovsl(tbl->ti);
+	if (tbl->count >= ti->n_meters) {
+		err = dp_meter_instance_realloc(tbl, ti->n_meters * 2);
+		if (err)
+			goto attach_err;
+
+		ti = rcu_dereference_ovsl(tbl->ti);
+	}
+
+	hash = meter_hash(ti, meter->id);
+
+	/* In general, selected slots should be empty, because
+	 * OvS uses id-pool to fetch available ids.
+	 */
+	if (unlikely(rcu_dereference_ovsl(ti->dp_meters[hash]))) {
+		err = -EBUSY;
 		goto attach_err;
 	}
 
+	dp_meter_instance_insert(ti, meter);
 	return 0;
 
 attach_err:
-	dp_meter_instance_remove(ti, meter);
 	tbl->count--;
 	return err;
 }
@@ -213,7 +216,7 @@ ovs_meter_cmd_reply_start(struct genl_info *info, u8 cmd,
 			  struct ovs_header **ovs_reply_header)
 {
 	struct sk_buff *skb;
-	struct ovs_header *ovs_header = info->userhdr;
+	struct ovs_header *ovs_header = genl_info_userhdr(info);
 
 	skb = nlmsg_new(NLMSG_DEFAULT_SIZE, GFP_ATOMIC);
 	if (!skb)
@@ -274,7 +277,7 @@ error:
 
 static int ovs_meter_cmd_features(struct sk_buff *skb, struct genl_info *info)
 {
-	struct ovs_header *ovs_header = info->userhdr;
+	struct ovs_header *ovs_header = genl_info_userhdr(info);
 	struct ovs_header *ovs_reply_header;
 	struct nlattr *nla, *band_nla;
 	struct sk_buff *reply;
@@ -343,7 +346,7 @@ static struct dp_meter *dp_meter_create(struct nlattr **a)
 			return ERR_PTR(-EINVAL);
 
 	/* Allocate and set up the meter before locking anything. */
-	meter = kzalloc(struct_size(meter, bands, n_bands), GFP_KERNEL_ACCOUNT);
+	meter = kzalloc_flex(*meter, bands, n_bands, GFP_KERNEL_ACCOUNT);
 	if (!meter)
 		return ERR_PTR(-ENOMEM);
 
@@ -411,7 +414,7 @@ static int ovs_meter_cmd_set(struct sk_buff *skb, struct genl_info *info)
 	struct dp_meter *meter, *old_meter;
 	struct sk_buff *reply;
 	struct ovs_header *ovs_reply_header;
-	struct ovs_header *ovs_header = info->userhdr;
+	struct ovs_header *ovs_header = genl_info_userhdr(info);
 	struct dp_meter_table *meter_tbl;
 	struct datapath *dp;
 	int err;
@@ -484,7 +487,7 @@ exit_free_meter:
 
 static int ovs_meter_cmd_get(struct sk_buff *skb, struct genl_info *info)
 {
-	struct ovs_header *ovs_header = info->userhdr;
+	struct ovs_header *ovs_header = genl_info_userhdr(info);
 	struct ovs_header *ovs_reply_header;
 	struct nlattr **a = info->attrs;
 	struct dp_meter *meter;
@@ -537,7 +540,7 @@ exit_unlock:
 
 static int ovs_meter_cmd_del(struct sk_buff *skb, struct genl_info *info)
 {
-	struct ovs_header *ovs_header = info->userhdr;
+	struct ovs_header *ovs_header = genl_info_userhdr(info);
 	struct ovs_header *ovs_reply_header;
 	struct nlattr **a = info->attrs;
 	struct dp_meter *old_meter;
