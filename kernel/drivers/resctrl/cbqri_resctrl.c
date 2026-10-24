@@ -987,7 +987,8 @@ static int cbqri_resctrl_pick_bw_alloc(void)
 		}
 
 		mb_min->ctrl = ctrl;
-		mb_wght->ctrl = ctrl;
+		if (!ctrl->fs_regulator)	/* FireSim regulators implement Rbwb only */
+			mb_wght->ctrl = ctrl;
 	}
 
 	return 0;

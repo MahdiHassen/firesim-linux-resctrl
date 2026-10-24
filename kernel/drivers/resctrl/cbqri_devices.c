@@ -505,7 +505,7 @@ int cbqri_read_rbwb(struct cbqri_controller *ctrl, u32 closid, u64 *rbwb_out)
 	cbqri_set_bc_bw_alloc(ctrl, ctrl->rbwb_cache[closid], mweight_sentinel);
 	err = cbqri_bc_alloc_op(ctrl, CBQRI_BC_ALLOC_CTL_OP_READ_LIMIT, closid);
 	if (err == 0) {
-		if (cbqri_get_mweight(ctrl) == mweight_sentinel) {
+		if (!ctrl->fs_regulator && cbqri_get_mweight(ctrl) == mweight_sentinel) {
 			pr_err_ratelimited("Rbwb READ_LIMIT did not update staging\n");
 			err = -EIO;
 		} else {
