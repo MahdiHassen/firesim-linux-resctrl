@@ -87,6 +87,16 @@
 #define CBQRI_MON_CTL_STATUS_MASK    GENMASK_ULL(38, 32)
 #define CBQRI_MON_CTL_STATUS_SUCCESS 1
 
+/*
+ * FireSim (crsullivan13) bandwidth regulators: registers outside the CBQRI
+ * spec. Regulation is off at reset; the period is in regulator clock cycles
+ * (25 bits). The counters count 64-byte line fills per MCID; Rbwb is a cap of
+ * fills per bank per period, not a reservation.
+ */
+#define CBQRI_FS_GLOBAL_EN_OFF   0x100
+#define CBQRI_FS_PERIOD_LEN_OFF  0x108
+#define CBQRI_FS_PERIOD_MAX      ((1u << 25) - 1)
+
 /* Capacity usage monitoring event IDs (CBQRI spec Table 4) */
 #define CBQRI_CC_EVT_ID_NONE         0
 #define CBQRI_CC_EVT_ID_OCCUPANCY    1
@@ -177,6 +187,9 @@ struct cbqri_controller {
 	enum cbqri_controller_type type;
 	u32 rcid_count;
 	u32 mcid_count;
+
+	/* FireSim regulator: Rbwb is a cap; has the CBQRI_FS_* registers */
+	bool fs_regulator;
 
 	/*
 	 * Per-RCID cache of the most recent Rbwb / Mweight values applied

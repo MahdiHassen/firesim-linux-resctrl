@@ -50,8 +50,25 @@ struct cbqri_controller_info {
 	u32				prox_dom;
 };
 
+/*
+ * Device-tree registration (drivers/resctrl/cbqri_dt.c): there are no firmware
+ * tables to resolve topology from, so the discovery layer supplies it.
+ * @dom_id is the resctrl domain id (cache id for a capacity controller,
+ * bandwidth domain for a bandwidth controller); every controller serves
+ * every CPU. @fs_regulator marks a FireSim bandwidth regulator, which has
+ * the non-spec enable / period registers and treats Rbwb as a cap.
+ */
+struct cbqri_dt_info {
+	int	dom_id;
+	u32	cache_level;
+	u32	cache_size;
+	bool	fs_regulator;
+};
+
 #if IS_ENABLED(CONFIG_RISCV_CBQRI_DRIVER)
 int riscv_cbqri_register_controller(const struct cbqri_controller_info *info);
+int riscv_cbqri_register_controller_dt(const struct cbqri_controller_info *info,
+				       const struct cbqri_dt_info *dt);
 void riscv_cbqri_unregister_last(unsigned int n);
 #else
 static inline int
@@ -61,6 +78,13 @@ riscv_cbqri_register_controller(const struct cbqri_controller_info *info)
 }
 
 static inline void riscv_cbqri_unregister_last(unsigned int n) { }
+
+static inline int
+riscv_cbqri_register_controller_dt(const struct cbqri_controller_info *info,
+				   const struct cbqri_dt_info *dt)
+{
+	return -ENODEV;
+}
 #endif
 
 #endif /* _LINUX_RISCV_CBQRI_H */

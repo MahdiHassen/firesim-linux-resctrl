@@ -11,6 +11,7 @@
 #include <linux/err.h>
 #include <linux/init.h>
 #include <linux/io.h>
+#include <linux/moduleparam.h>
 #include <linux/resctrl.h>
 #include <linux/slab.h>
 #include <linux/types.h>
@@ -48,6 +49,75 @@ static u32 max_rmid = U32_MAX;
 
 /* Protects ctrl_domain list mutations across CPU hotplug. */
 static DEFINE_MUTEX(cbqri_domain_list_lock);
+
+/*
+ * FireSim CBQRI regulators (cbqri_dt.c marks them): Rbwb caps the 64-byte line
+ * fills per bank per period instead of reserving bandwidth, so the
+ * sum(Rbwb) <= MRBWB rule does not apply, every RCID starts uncapped (MRBWB),
+ * and the regulators, which reset to "off", are switched on once every RCID
+ * has a budget. Boot parameters (prefix kept from the 6.2 driver so the test
+ * harness and command lines carry over):
+ *   qos_resctrl.period=<cycles>          every regulator's period (default 1e6)
+ *   qos_resctrl.mb_period=<dom0>,<dom1>  per-MB-domain override (0 = period)
+ *   qos_resctrl.regulate=<0|1>           leave regulation off at boot
+ */
+#undef MODULE_PARAM_PREFIX
+#define MODULE_PARAM_PREFIX "qos_resctrl."
+static unsigned int period = 1000000;
+module_param(period, uint, 0444);
+MODULE_PARM_DESC(period, "FireSim CBQRI regulator period in regulator clock cycles");
+static unsigned int mb_period[8];
+static int mb_period_count;
+module_param_array(mb_period, uint, &mb_period_count, 0444);
+MODULE_PARM_DESC(mb_period, "per-MB-domain regulator period in cycles (overrides period)");
+static bool regulate = true;
+module_param(regulate, bool, 0444);
+MODULE_PARM_DESC(regulate, "switch FireSim bandwidth regulation on at boot");
+
+/*
+ * mbm_total_bytes read from each bandwidth controller's own counters, exposed
+ * as one L3 monitoring domain per controller (same ids as the MB_MIN
+ * domains). Used when there is no L3 capacity controller to pair with.
+ */
+static bool bc_mon_domains;
+
+static u64 cbqri_fs_rbwb_default(struct cbqri_controller *ctrl)
+{
+	return ctrl->bc.mrbwb;
+}
+
+static void cbqri_fs_regulator_enable(struct cbqri_controller *ctrl, int dom_id)
+{
+	unsigned int p = period;
+
+	if (!ctrl->fs_regulator)
+		return;
+	if (dom_id >= 0 && dom_id < mb_period_count && mb_period[dom_id])
+		p = mb_period[dom_id];
+	if (!p || p > CBQRI_FS_PERIOD_MAX) {
+		pr_warn("MB domain %d: period %u out of range (1..%u), using %u\n",
+			dom_id, p, CBQRI_FS_PERIOD_MAX, CBQRI_FS_PERIOD_MAX);
+		p = CBQRI_FS_PERIOD_MAX;
+	}
+	iowrite64(p, ctrl->base + CBQRI_FS_PERIOD_LEN_OFF);
+	iowrite64(regulate ? 1 : 0, ctrl->base + CBQRI_FS_GLOBAL_EN_OFF);
+	pr_info("MB domain %d at %pa: regulation %s, period %llu cycles, Rbwb = fills/bank/period, max %u (of %u blocks)\n",
+		dom_id, &ctrl->addr, regulate ? "on" : "left off",
+		(unsigned long long)ioread64(ctrl->base + CBQRI_FS_PERIOD_LEN_OFF),
+		ctrl->bc.mrbwb, ctrl->bc.nbwblks);
+}
+
+static struct cbqri_controller *cbqri_mon_bc_for_domain(int id)
+{
+	struct cbqri_controller *ctrl;
+
+	list_for_each_entry(ctrl, &cbqri_controllers, list) {
+		if (ctrl->type == CBQRI_CONTROLLER_TYPE_BANDWIDTH &&
+		    ctrl->mon_capable && ctrl->mem.prox_dom == id)
+			return ctrl;
+	}
+	return NULL;
+}
 
 static struct rdt_ctrl_domain *
 cbqri_find_ctrl_domain(struct list_head *h, int id)
@@ -207,11 +277,15 @@ void resctrl_arch_reset_rmid(struct rdt_resource *r, struct rdt_l3_mon_domain *d
 	case QOS_L3_MBM_TOTAL_EVENT_ID: {
 		struct cbqri_controller *bc;
 
-		cd = cbqri_find_ctrl_domain(&r->ctrl_domains, d->hdr.id);
-		if (!cd)
-			break;
-		hw_dom = container_of(cd, struct cbqri_resctrl_dom, resctrl_ctrl_dom);
-		bc = hw_dom->paired_bc;
+		if (bc_mon_domains) {
+			bc = cbqri_mon_bc_for_domain(d->hdr.id);
+		} else {
+			cd = cbqri_find_ctrl_domain(&r->ctrl_domains, d->hdr.id);
+			if (!cd)
+				break;
+			hw_dom = container_of(cd, struct cbqri_resctrl_dom, resctrl_ctrl_dom);
+			bc = hw_dom->paired_bc;
+		}
 		if (!bc)
 			break;
 		if (WARN_ON_ONCE(!bc->mbm_total_states))
@@ -322,13 +396,17 @@ int resctrl_arch_rmid_read(struct rdt_resource *r, struct rdt_domain_hdr *hdr,
 		 * matching ctrl domain's hw_dom->paired_bc was cached at
 		 * add time to avoid walking cbqri_controllers on every read.
 		 */
-		d = cbqri_find_ctrl_domain(&r->ctrl_domains, hdr->id);
-		if (!d) {
-			err = -ENOENT;
-			break;
+		if (bc_mon_domains) {
+			bc = cbqri_mon_bc_for_domain(hdr->id);
+		} else {
+			d = cbqri_find_ctrl_domain(&r->ctrl_domains, hdr->id);
+			if (!d) {
+				err = -ENOENT;
+				break;
+			}
+			hw_dom = container_of(d, struct cbqri_resctrl_dom, resctrl_ctrl_dom);
+			bc = hw_dom->paired_bc;
 		}
-		hw_dom = container_of(d, struct cbqri_resctrl_dom, resctrl_ctrl_dom);
-		bc = hw_dom->paired_bc;
 		if (!bc) {
 			err = -ENOENT;
 			break;
@@ -497,8 +575,8 @@ int resctrl_arch_update_one(struct rdt_resource *r, struct rdt_ctrl_domain *d,
 	case RDT_RESOURCE_L3:
 		return cbqri_apply_cache_config_dom(dom, r, closid, t, cfg_val);
 	case RDT_RESOURCE_MB_MIN:
-		/* sum(Rbwb) <= MRBWB validation runs inside cbqri_apply_rbwb(). */
-		return cbqri_apply_rbwb(dom->hw_ctrl, closid, cfg_val, true);
+		/* sum(Rbwb) <= MRBWB validation runs inside cbqri_apply_rbwb(); not for a FireSim cap */
+		return cbqri_apply_rbwb(dom->hw_ctrl, closid, cfg_val, !dom->hw_ctrl->fs_regulator);
 	case RDT_RESOURCE_MB_WGHT:
 		return cbqri_apply_mweight_config(dom->hw_ctrl, closid, cfg_val);
 	default:
@@ -618,8 +696,9 @@ void resctrl_arch_reset_all_ctrls(struct rdt_resource *r)
 			 */
 			for (i = 0; i < hw_res->ctrl->rcid_count; i++) {
 				u32 rcid = (i + 1) % hw_res->ctrl->rcid_count;
-				u64 rbwb = (rcid == 0) ?
-					cbqri_rcid0_rbwb(dom->hw_ctrl) : 1;
+				u64 rbwb = dom->hw_ctrl->fs_regulator ?
+					cbqri_fs_rbwb_default(dom->hw_ctrl) :
+					(rcid == 0) ? cbqri_rcid0_rbwb(dom->hw_ctrl) : 1;
 				int rerr;
 
 				rerr = cbqri_apply_rbwb(dom->hw_ctrl, rcid, rbwb, false);
@@ -700,7 +779,8 @@ static int cbqri_init_domain_ctrlval(struct rdt_resource *r, struct rdt_ctrl_dom
 			 * CBQRI section 4.5: Rbwb >= 1, sum(Rbwb) <= MRBWB.
 			 * RCID 0 takes the remaining budget.
 			 */
-			rbwb = (rcid == 0) ? cbqri_rcid0_rbwb(dom->hw_ctrl) : 1;
+			rbwb = dom->hw_ctrl->fs_regulator ? cbqri_fs_rbwb_default(dom->hw_ctrl) :
+			       (rcid == 0) ? cbqri_rcid0_rbwb(dom->hw_ctrl) : 1;
 
 			err = cbqri_apply_rbwb(dom->hw_ctrl, rcid, rbwb, false);
 			break;
@@ -844,7 +924,7 @@ static int cbqri_resctrl_control_init(struct cbqri_resctrl_res *cbqri_res)
 		 * CBQRI section 4.5 caps sum(Rbwb) <= MRBWB. Default new
 		 * groups to min_bw so mkdir cannot overflow that sum.
 		 */
-		res->membw.default_to_min = true;
+		res->membw.default_to_min = !ctrl->fs_regulator;	/* FireSim: new groups uncapped */
 		res->alloc_capable = ctrl->alloc_capable;
 		INIT_LIST_HEAD(&res->ctrl_domains);
 		INIT_LIST_HEAD(&res->mon_domains);
@@ -961,6 +1041,42 @@ static void cbqri_resctrl_pick_counters(void)
 		resctrl_enable_mon_event(QOS_L3_MBM_TOTAL_EVENT_ID, false, 0, NULL);
 }
 
+/*
+ * FireSim: no capacity controller, but each bandwidth regulator counts the
+ * 64-byte fills per MCID that pass through it. Expose a monitor-only L3
+ * resource with one monitoring domain per regulator (ids as MB_MIN), so
+ * mon_L3_00/mbm_total_bytes is core->LLC traffic and mon_L3_01 LLC->DRAM.
+ */
+static void cbqri_resctrl_pick_bc_mon_domains(void)
+{
+	struct cbqri_resctrl_res *l3 = &cbqri_resctrl_resources[RDT_RESOURCE_L3];
+	struct rdt_resource *res = &l3->resctrl_res;
+	struct cbqri_controller *ctrl;
+	u32 nm = U32_MAX;
+
+	if (l3->ctrl)
+		return;
+	list_for_each_entry(ctrl, &cbqri_controllers, list) {
+		if (ctrl->type != CBQRI_CONTROLLER_TYPE_BANDWIDTH || !ctrl->mon_capable)
+			continue;
+		nm = min(nm, ctrl->mcid_count);
+	}
+	if (nm == U32_MAX)
+		return;
+
+	res->name = "L3";
+	res->ctrl_scope = RESCTRL_L3_CACHE;
+	res->mon_scope = RESCTRL_L3_CACHE;
+	res->mon_capable = true;
+	INIT_LIST_HEAD(&res->ctrl_domains);
+	INIT_LIST_HEAD(&res->mon_domains);
+	resctrl_enable_mon_event(QOS_L3_MBM_TOTAL_EVENT_ID, false, 0, NULL);
+	bc_mon_domains = true;
+	exposed_mon_capable = true;
+	max_rmid = min(max_rmid, nm);
+	pr_info("mbm_total_bytes from each bandwidth controller, %u MCIDs\n", nm);
+}
+
 static void cbqri_resctrl_accumulate_caps(void)
 {
 	struct cbqri_controller *l3_ctrl;
@@ -1045,6 +1161,10 @@ static struct rdt_ctrl_domain *cbqri_create_ctrl_domain(struct cbqri_controller 
 	list_add_tail(&domain->hdr.list, pos);
 
 	resctrl_online_ctrl_domain(res, domain);
+
+	/* FireSim regulators are off at reset: on once every RCID has a budget */
+	if (res->rid == RDT_RESOURCE_MB_MIN)
+		cbqri_fs_regulator_enable(ctrl, dom_id);
 
 	return domain;
 }
@@ -1341,6 +1461,54 @@ static void cbqri_detach_cpu_from_all_ctrls(unsigned int cpu)
 		if (rid == RDT_RESOURCE_L3 && hw_res->ctrl->mon_capable)
 			cbqri_detach_cpu_from_l3_mon(&hw_res->resctrl_res, cpu);
 	}
+	if (bc_mon_domains)
+		cbqri_detach_cpu_from_l3_mon(&cbqri_resctrl_resources[RDT_RESOURCE_L3].resctrl_res, cpu);
+}
+
+/* FireSim: this CPU joins the bandwidth controller's own L3 monitoring domain */
+static int cbqri_attach_cpu_to_bc_mon(struct cbqri_controller *ctrl, unsigned int cpu)
+{
+	struct rdt_resource *res = &cbqri_resctrl_resources[RDT_RESOURCE_L3].resctrl_res;
+	struct rdt_l3_mon_domain *mon_dom;
+	struct list_head *pos = NULL;
+	int dom_id = ctrl->mem.prox_dom;
+	int err;
+
+	lockdep_assert_held(&cbqri_domain_list_lock);
+
+	mon_dom = cbqri_find_l3_mon_domain(&res->mon_domains, dom_id);
+	if (mon_dom) {
+		cpumask_set_cpu(cpu, &mon_dom->hdr.cpu_mask);
+		return 0;
+	}
+
+	err = cbqri_init_bc_mon_counters(ctrl);
+	if (err) {
+		pr_err("BC @%pa: mon init failed (%d)\n", &ctrl->addr, err);
+		return err;
+	}
+
+	mon_dom = kzalloc_obj(*mon_dom, GFP_KERNEL);
+	if (!mon_dom)
+		return -ENOMEM;
+	mon_dom->hdr.id = dom_id;
+	mon_dom->hdr.type = RESCTRL_MON_DOMAIN;
+	mon_dom->hdr.rid = RDT_RESOURCE_L3;
+	cpumask_set_cpu(cpu, &mon_dom->hdr.cpu_mask);
+	INIT_LIST_HEAD(&mon_dom->hdr.list);
+	resctrl_find_domain(&res->mon_domains, dom_id, &pos);
+	if (pos)
+		list_add_tail(&mon_dom->hdr.list, pos);
+	else
+		list_add_tail(&mon_dom->hdr.list, &res->mon_domains);
+
+	err = resctrl_online_mon_domain(res, &mon_dom->hdr);
+	if (err) {
+		list_del(&mon_dom->hdr.list);
+		kfree(mon_dom);
+		return err;
+	}
+	return 0;
 }
 
 /*
@@ -1369,9 +1537,10 @@ static int cbqri_attach_cpu_to_all_ctrls(unsigned int cpu)
 		case CBQRI_CONTROLLER_TYPE_BANDWIDTH:
 			if (!cpumask_test_cpu(cpu, &ctrl->mem.cpu_mask))
 				continue;
-			if (!ctrl->alloc_capable)
-				continue;
-			err = cbqri_attach_cpu_to_bw_ctrl(ctrl, cpu);
+			if (ctrl->alloc_capable)
+				err = cbqri_attach_cpu_to_bw_ctrl(ctrl, cpu);
+			if (!err && bc_mon_domains && ctrl->mon_capable)
+				err = cbqri_attach_cpu_to_bc_mon(ctrl, cpu);
 			break;
 		default:
 			continue;
@@ -1404,6 +1573,7 @@ static void cbqri_resctrl_teardown(void)
 	}
 	exposed_alloc_capable = false;
 	exposed_mon_capable = false;
+	bc_mon_domains = false;
 	max_rmid = U32_MAX;
 	cbqri_resctrl_inited = false;
 }
@@ -1425,6 +1595,7 @@ static int cbqri_resctrl_setup(void)
 		return err;
 
 	cbqri_resctrl_pick_counters();
+	cbqri_resctrl_pick_bc_mon_domains();
 
 	for (rid = 0; rid < RDT_NUM_RESOURCES; rid++) {
 		err = cbqri_resctrl_control_init(&cbqri_resctrl_resources[rid]);

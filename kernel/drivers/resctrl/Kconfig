@@ -56,6 +56,17 @@ config RISCV_CBQRI_DRIVER_DEBUG
 	  per-controller registration steps.  Useful when bringing up a
 	  new platform; otherwise leave disabled to avoid log noise.
 
+config RISCV_CBQRI_DT
+	bool "Discover CBQRI controllers from the device tree (FireSim)"
+	depends on OF
+	default y
+	help
+	  Register the CBQRI controllers described by riscv,cbqri-cache and
+	  riscv,cbqri-bandwidth[-cache|-memory] device-tree nodes, as the
+	  FireSim CBQRI SoC describes them. The -cache / -memory regulators
+	  have non-spec enable and period registers that are programmed at
+	  boot (qos_resctrl.period, qos_resctrl.mb_period, qos_resctrl.regulate).
+
 endif
 
 config RISCV_CBQRI_RESCTRL_FS

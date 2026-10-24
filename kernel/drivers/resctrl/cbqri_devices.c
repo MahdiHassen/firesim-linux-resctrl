@@ -1151,3 +1151,67 @@ int riscv_cbqri_register_controller(const struct cbqri_controller_info *info)
 	list_add_tail(&ctrl->list, &cbqri_controllers);
 	return 0;
 }
+
+/*
+ * Device-tree registration (cbqri_dt.c): the caller resolved the topology.
+ * Every controller serves every CPU; dt->dom_id becomes the cache id of a
+ * capacity controller or the proximity-domain stand-in (= resctrl domain id)
+ * of a bandwidth controller.
+ */
+int riscv_cbqri_register_controller_dt(const struct cbqri_controller_info *info,
+				       const struct cbqri_dt_info *dt)
+{
+	struct cbqri_controller *ctrl;
+	int err;
+
+	if (!info->addr) {
+		pr_warn("skipping controller with invalid addr=0x0\n");
+		return -EINVAL;
+	}
+
+	ctrl = kzalloc(sizeof(*ctrl), GFP_KERNEL);
+	if (!ctrl)
+		return -ENOMEM;
+
+	mutex_init(&ctrl->lock);
+
+	ctrl->addr = info->addr;
+	ctrl->size = info->size;
+	ctrl->type = info->type;
+	ctrl->rcid_count = info->rcid_count;
+	ctrl->mcid_count = info->mcid_count;
+
+	if (WARN_ON_ONCE(ctrl->rcid_count > FIELD_MAX(SRMCFG_RCID_MASK) + 1) ||
+	    WARN_ON_ONCE(ctrl->mcid_count > FIELD_MAX(CBQRI_MON_CTL_MCID_MASK) + 1)) {
+		cbqri_controller_destroy(ctrl);
+		return -EINVAL;
+	}
+
+	switch (info->type) {
+	case CBQRI_CONTROLLER_TYPE_CAPACITY:
+		ctrl->cache.cache_id = dt->dom_id;
+		ctrl->cache.cache_level = dt->cache_level;
+		ctrl->cache.cache_size = dt->cache_size;
+		cpumask_copy(&ctrl->cache.cpu_mask, cpu_possible_mask);
+		break;
+	case CBQRI_CONTROLLER_TYPE_BANDWIDTH:
+		ctrl->mem.prox_dom = dt->dom_id;
+		cpumask_copy(&ctrl->mem.cpu_mask, cpu_possible_mask);
+		ctrl->fs_regulator = dt->fs_regulator;
+		break;
+	default:
+		pr_warn("controller at %pa: unknown type %u, skipping\n",
+			&ctrl->addr, info->type);
+		cbqri_controller_destroy(ctrl);
+		return -EINVAL;
+	}
+
+	err = cbqri_probe_controller(ctrl);
+	if (err) {
+		cbqri_controller_destroy(ctrl);
+		return err;
+	}
+
+	list_add_tail(&ctrl->list, &cbqri_controllers);
+	return 0;
+}
