@@ -6,6 +6,7 @@ R=/sys/fs/resctrl; P=/sys/module/qos_resctrl/parameters
 say() { echo "B72,$*"; }
 up() { cut -d' ' -f1 /proc/uptime; }
 taskset -p 0x1 $$ >/dev/null 2>&1
+echo 120 > /proc/sys/vm/nr_hugepages
 echo "==================== CBQRI 7.2 boot test ===================="
 say "uname: $(uname -r) | $(grep -m1 isa /proc/cpuinfo)"
 dmesg | grep -a -i "ssqosid\|cbqri\|qos\|resctrl\|sched_ext\|MB domain" | sed 's/^/B72,dmesg: /' | head -40

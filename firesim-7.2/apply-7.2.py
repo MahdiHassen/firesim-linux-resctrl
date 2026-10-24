@@ -7,7 +7,7 @@ Every edit is an exact-anchor replacement that fails loudly; new files are copie
 usage: apply-7.2.py <kernel tree> <this dir> [dt|force|irq ...]   (default: all)"""
 import os, re, shutil, sys
 K, SRC = sys.argv[1], sys.argv[2]
-GROUPS = sys.argv[3:] or ["dt", "force", "irq"]
+GROUPS = sys.argv[3:] or ["dt", "force", "irq", "bytes", "fsmw"]
 
 def edit(path, pairs):
     p = os.path.join(K, path); s = open(p).read()
@@ -273,4 +273,13 @@ if "bytes" in GROUPS:
         ("\t\t\t*val = bc->mbm_total_states[rmid].chunks;\n", "\t\t\t*val = cbqri_bc_bytes(bc, bc->mbm_total_states[rmid].chunks);\n", 1),
         ("\t\t\ts->prev_ctr = 0;\n\t\t\t*val = s->chunks;\n", "\t\t\ts->prev_ctr = 0;\n\t\t\t*val = cbqri_bc_bytes(bc, s->chunks);\n", 1),
         ("\t\t\t*val        = s->chunks;\n", "\t\t\t*val        = cbqri_bc_bytes(bc, s->chunks);\n", 1)])
+
+# ------------------------------------------------------------------ fsmw: FireSim regulators have no Mweight field
+if "fsmw" in GROUPS:
+    edit("drivers/resctrl/cbqri_resctrl.c", [
+        ("\t\tmb_min->ctrl = ctrl;\n\t\tmb_wght->ctrl = ctrl;\n",
+         "\t\tmb_min->ctrl = ctrl;\n\t\tif (!ctrl->fs_regulator)\t/* FireSim regulators implement Rbwb only */\n\t\t\tmb_wght->ctrl = ctrl;\n", 1)])
+    edit("drivers/resctrl/cbqri_devices.c", [
+        ("\t\tif (cbqri_get_mweight(ctrl) == mweight_sentinel) {\n",
+         "\t\tif (!ctrl->fs_regulator && cbqri_get_mweight(ctrl) == mweight_sentinel) {\n", 1)])
 print("all edits applied:", GROUPS)
