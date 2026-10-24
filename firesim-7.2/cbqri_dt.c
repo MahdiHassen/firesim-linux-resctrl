@@ -19,6 +19,8 @@
 #define pr_fmt(fmt) "cbqri-dt: " fmt
 
 #include <linux/init.h>
+#include <linux/minmax.h>
+#include <linux/moduleparam.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
 #include <linux/printk.h>
@@ -26,6 +28,15 @@
 #include <linux/sort.h>
 
 #define CBQRI_DT_MAX_CTRLS 8
+
+/*
+ * cbqri_dt.max_ids=N: use at most N RCIDs and N MCIDs per controller whatever the
+ * device tree advertises. The FireSim quad-BOOM bitstream advertises 16 of each but
+ * only honours 0-3, so resctrl must not hand out CLOSIDs or RMIDs above 3.
+ */
+static unsigned int cbqri_dt_max_ids;
+module_param_named(max_ids, cbqri_dt_max_ids, uint, 0444);
+MODULE_PARM_DESC(max_ids, "cap the RCID and MCID counts read from the device tree (0 = no cap)");
 
 static const struct of_device_id cbqri_bw_ids[] __initconst = {
 	{ .compatible = "riscv,cbqri-bandwidth" },
@@ -83,6 +94,11 @@ static int __init cbqri_dt_read_common(struct device_node *np, struct cbqri_dt_n
 	if (n->info.rcid_count > CBQRI_MAX_RCID || n->info.mcid_count > CBQRI_MAX_MCID) {
 		pr_err("%pOF: rcid/mcid count out of range\n", np);
 		return -EINVAL;
+	}
+	if (cbqri_dt_max_ids) {
+		n->info.rcid_count = min(n->info.rcid_count, cbqri_dt_max_ids);
+		n->info.mcid_count = min(n->info.mcid_count, cbqri_dt_max_ids);
+		pr_info("%pOF: rcid/mcid capped at %u (cbqri_dt.max_ids)\n", np, cbqri_dt_max_ids);
 	}
 	return 0;
 }
