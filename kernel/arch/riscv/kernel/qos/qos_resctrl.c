@@ -4,6 +4,7 @@
 
 #include <linux/slab.h>
 #include <linux/err.h>
+#include <linux/math64.h>
 #include <linux/cpu.h>
 #include <linux/cpumask.h>
 #include <linux/moduleparam.h>
@@ -21,11 +22,21 @@ static struct cbqri_resctrl_res cbqri_resctrl_resources[RDT_NUM_RESOURCES];
 /*
  * FireSim (crsullivan13) regulators are off at reset and need a period.
  * Boot-time: qos_resctrl.period=<cycles> qos_resctrl.regulate=<0|1>
- * With the default period, MB 100% = nbwblks fills per bank per period.
+ *            qos_resctrl.mb_period=<MB:0 cycles>,<MB:1 cycles>,...
+ * mb_period overrides period per MB domain (0 or missing = use period).
+ *
+ * MB percentages do not depend on the period: 100% = nbwblks fills per bank
+ * per CBQRI_FS_PCT_REF_PERIOD cycles, and each regulator's budget is scaled
+ * to its own period (see cbqri_pct_to_rbwb()). A short period only coarsens
+ * the step: one fill per bank per period is the smallest budget.
  */
 static unsigned int period = 1000000;
 module_param(period, uint, 0444);
 MODULE_PARM_DESC(period, "CBQRI bandwidth-regulator period in regulator clock cycles");
+static unsigned int mb_period[MAX_CONTROLLERS];
+static int mb_period_count;
+module_param_array(mb_period, uint, &mb_period_count, 0444);
+MODULE_PARM_DESC(mb_period, "Per-MB-domain regulator period in cycles (overrides period)");
 static bool regulate = true;
 module_param(regulate, bool, 0444);
 MODULE_PARM_DESC(regulate, "Turn CBQRI bandwidth regulation on at boot");
@@ -486,6 +497,48 @@ static u64 cbqri_get_rbwb(struct cbqri_controller *ctrl)
 		return reg;
 }
 
+/*
+ * The period the regulator runs with, in its clock cycles. cbqri_set_period()
+ * writes it before any budget, so this is right at boot too. Controllers
+ * without the FireSim registers use the reference period, i.e. plain
+ * nbwblks percentages.
+ */
+static u64 cbqri_bw_period(struct cbqri_controller *ctrl)
+{
+	u64 p;
+
+	if (!ctrl->ctrl_info->has_regulator_ctl)
+		return CBQRI_FS_PCT_REF_PERIOD;
+	p = ioread64(ctrl->base + CBQRI_FS_PERIOD_LEN_OFF) & CBQRI_FS_PERIOD_MAX;
+	return p ? p : CBQRI_FS_PCT_REF_PERIOD;
+}
+
+/* MB percentage -> fills per bank per period, rounded down, 1..mrbwb */
+static u64 cbqri_pct_to_rbwb(struct cbqri_controller *ctrl, u32 pct)
+{
+	u64 p = cbqri_bw_period(ctrl);
+	u64 rbwb;
+
+	rbwb = div64_u64((u64)pct * ctrl->bc.nbwblks * p,
+			 100ULL * CBQRI_FS_PCT_REF_PERIOD);
+	if (rbwb < 1)
+		rbwb = 1;
+	if (rbwb > ctrl->bc.mrbwb) {
+		pr_warn_ratelimited("%u%% needs %llu fills/bank at period %llu, capped at mrbwb=%u",
+				    pct, rbwb, p, ctrl->bc.mrbwb);
+		rbwb = ctrl->bc.mrbwb;
+	}
+	return rbwb;
+}
+
+/* fills per bank per period -> MB percentage, rounded up */
+static u32 cbqri_rbwb_to_pct(struct cbqri_controller *ctrl, u64 rbwb)
+{
+	u64 den = (u64)ctrl->bc.nbwblks * cbqri_bw_period(ctrl);
+
+	return div64_u64(rbwb * 100 * CBQRI_FS_PCT_REF_PERIOD + den - 1, den);
+}
+
 static int cbqri_wait_busy_flag(struct cbqri_controller *ctrl, int reg_offset)
 {
 	unsigned long timeout = jiffies + (HZ / 10); /* Timeout after 100ms */
@@ -737,8 +790,8 @@ int resctrl_arch_update_one(struct rdt_resource *r, struct rdt_domain *d,
 		err = cbqri_apply_cache_config(dom, closid, t, &cfg);
 		break;
 	case RDT_RESOURCE_MBA:
-		/* covert from percentage to bandwidth blocks */
-		cfg.rbwb = cfg_val * ctrl->bc.nbwblks / 100;
+		/* convert from percentage to bandwidth blocks at this period */
+		cfg.rbwb = cbqri_pct_to_rbwb(ctrl, cfg_val);
 		err = cbqri_apply_bw_config(dom, closid, t, &cfg);
 		break;
 	default:
@@ -776,8 +829,6 @@ u32 resctrl_arch_get_config(struct rdt_resource *r, struct rdt_domain *d,
 	struct cbqri_resctrl_dom *hw_dom;
 	struct cbqri_controller *ctrl;
 	int reg_offset;
-	u32 percent;
-	u32 rbwb;
 	u64 reg;
 	int err;
 
@@ -825,12 +876,7 @@ u32 resctrl_arch_get_config(struct rdt_resource *r, struct rdt_domain *d,
 		hw_dom->ctrl_val[closid] = cbqri_get_rbwb(ctrl);
 
 		/* Convert from bandwidth blocks to percent */
-		rbwb = hw_dom->ctrl_val[closid];
-		rbwb *= 100;
-		percent = rbwb / ctrl->bc.nbwblks;
-		if (rbwb % ctrl->bc.nbwblks)
-			percent++;
-		return percent;
+		return cbqri_rbwb_to_pct(ctrl, hw_dom->ctrl_val[closid]);
 
 	default:
 		return -EINVAL;
@@ -1236,30 +1282,56 @@ static int qos_resctrl_add_bw_mon_domain(struct cbqri_controller *ctrl, int id)
 	return 0;
 }
 
+static bool cbqri_is_fs_regulator(struct cbqri_controller *ctrl)
+{
+	return ctrl->ctrl_info->has_regulator_ctl &&
+	       ctrl->ctrl_info->type == CBQRI_CONTROLLER_TYPE_BANDWIDTH &&
+	       ctrl->alloc_capable;
+}
+
 /*
- * FireSim regulators: program the period and switch regulation on. Called
- * once every RCID has a valid budget (see qos_init_domain_ctrlval()).
+ * FireSim regulators: program the period of MB domain @id. Must run before
+ * any budget is converted from a percentage (cbqri_pct_to_rbwb()).
+ */
+static void cbqri_set_period(struct cbqri_controller *ctrl, int id)
+{
+	unsigned int p = period;
+
+	if (!cbqri_is_fs_regulator(ctrl))
+		return;
+
+	if (id >= 0 && id < mb_period_count && mb_period[id])
+		p = mb_period[id];
+	if (p == 0 || p > CBQRI_FS_PERIOD_MAX) {
+		pr_warn("MB:%d period %u out of range (1..%u), using %u", id, p,
+			CBQRI_FS_PERIOD_MAX, CBQRI_FS_PERIOD_MAX);
+		p = CBQRI_FS_PERIOD_MAX;
+	}
+
+	iowrite64(p, ctrl->base + CBQRI_FS_PERIOD_LEN_OFF);
+}
+
+/*
+ * FireSim regulators: switch regulation on. Called once every RCID has a
+ * valid budget (see qos_init_domain_ctrlval()).
  */
 static void cbqri_enable_regulation(struct cbqri_controller *ctrl)
 {
-	if (!ctrl->ctrl_info->has_regulator_ctl ||
-	    ctrl->ctrl_info->type != CBQRI_CONTROLLER_TYPE_BANDWIDTH ||
-	    !ctrl->alloc_capable)
+	u64 p, one_pct;
+
+	if (!cbqri_is_fs_regulator(ctrl))
 		return;
 
-	if (period == 0 || period > CBQRI_FS_PERIOD_MAX) {
-		pr_warn("period %u out of range (1..%u), using %u", period,
-			CBQRI_FS_PERIOD_MAX, CBQRI_FS_PERIOD_MAX);
-		period = CBQRI_FS_PERIOD_MAX;
-	}
-
-	iowrite64(period, ctrl->base + CBQRI_FS_PERIOD_LEN_OFF);
 	iowrite64(regulate ? 1 : 0, ctrl->base + CBQRI_FS_GLOBAL_EN_OFF);
 
-	pr_info("bandwidth regulation %s at 0x%lx: period=%llu cycles, MB 100%% = %u fills/bank/period, max %u%%",
-		regulate ? "enabled" : "left off", ctrl->ctrl_info->addr,
-		(unsigned long long)ioread64(ctrl->base + CBQRI_FS_PERIOD_LEN_OFF),
-		ctrl->bc.nbwblks, ctrl->bc.mrbwb * 100u / ctrl->bc.nbwblks);
+	/* fills/bank/period per 1%, in hundredths */
+	p = cbqri_bw_period(ctrl);
+	one_pct = div64_u64((u64)ctrl->bc.nbwblks * p, CBQRI_FS_PCT_REF_PERIOD);
+	pr_info("bandwidth regulation %s at 0x%lx: period=%llu cycles, MB 1%% = %llu.%02llu fills/bank/period (100%% = %u per %llu cycles), min %u%%, max %u%%",
+		regulate ? "enabled" : "left off", ctrl->ctrl_info->addr, p,
+		one_pct / 100, one_pct % 100, ctrl->bc.nbwblks,
+		CBQRI_FS_PCT_REF_PERIOD, cbqri_rbwb_to_pct(ctrl, 1),
+		ctrl->bc.mrbwb * 100u / ctrl->bc.nbwblks);
 }
 
 static int qos_resctrl_add_controller_domain(struct cbqri_controller *ctrl, int *id)
@@ -1372,6 +1444,8 @@ static int qos_resctrl_add_controller_domain(struct cbqri_controller *ctrl, int 
 		}
 		/* the regulators sit on the whole system's memory path */
 		cpumask_copy(&domain->cpu_mask, cpu_online_mask);
+		/* the budgets below are scaled to the period: set it first */
+		cbqri_set_period(ctrl, internal_id);
 	}
 	err = qos_init_domain_ctrlval(res, domain);
 	if (err)

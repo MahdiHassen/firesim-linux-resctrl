@@ -92,6 +92,8 @@
 #define CBQRI_FS_PERIOD_LEN_OFF 0x108
 #define CBQRI_FS_PERIOD_MAX     ((1u << 25) - 1)
 #define CBQRI_FS_LINE_BYTES     64
+/* MB 100% = nbwblks fills per bank per this many cycles, at any period */
+#define CBQRI_FS_PCT_REF_PERIOD 1000000ULL
 
 int qos_resctrl_setup(void);
 void qos_resctrl_exit(void);
