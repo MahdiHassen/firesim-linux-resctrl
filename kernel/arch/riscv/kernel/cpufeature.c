@@ -1125,6 +1125,20 @@ void __init riscv_fill_hwcap(void)
 		}
 	}
 
+	if (IS_ENABLED(CONFIG_RISCV_FORCE_SSQOSID)) {
+		int cpu;
+
+		/*
+		 * The FireSim CBQRI SoC implements srmcfg but its device tree
+		 * does not list ssqosid. The CSR is really there, so force the
+		 * extension on every hart (before the alternatives are patched).
+		 */
+		set_bit(RISCV_ISA_EXT_SSQOSID, riscv_isa);
+		for_each_possible_cpu(cpu)
+			set_bit(RISCV_ISA_EXT_SSQOSID, hart_isa[cpu].isa);
+		pr_info("Ssqosid forced on (CONFIG_RISCV_FORCE_SSQOSID)\n");
+	}
+
 	/*
 	 * We don't support systems with F but without D, so mask those out
 	 * here.

@@ -591,6 +591,14 @@ config RISCV_ISA_SVNAPOT
 
 	  If you don't know what to do here, say Y.
 
+config RISCV_FORCE_SSQOSID
+	bool "Assume Ssqosid is implemented even if firmware does not advertise it"
+	depends on RISCV_ISA_SSQOSID
+	help
+	  The FireSim CBQRI SoC implements the srmcfg CSR but its device tree
+	  does not list "ssqosid". Say Y only for that hardware: on a hart
+	  without the CSR the first context switch would trap.
+
 config RISCV_ISA_SSQOSID
 	bool "Ssqosid extension support for supervisor mode Quality of Service ID"
 	depends on 64BIT
