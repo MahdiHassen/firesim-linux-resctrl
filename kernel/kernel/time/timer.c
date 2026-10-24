@@ -19,6 +19,7 @@
  */
 
 #include <linux/kernel_stat.h>
+#include <linux/qos_work.h>
 #include <linux/export.h>
 #include <linux/interrupt.h>
 #include <linux/percpu.h>
@@ -1023,6 +1024,7 @@ __mod_timer(struct timer_list *timer, unsigned long expires, unsigned int option
 	int ret = 0;
 
 	debug_assert_init(timer);
+	timer->qos_tag = qos_work_tag();
 
 	/*
 	 * This is a common optimization triggered by the networking code - if
@@ -1302,6 +1304,7 @@ void add_timer_on(struct timer_list *timer, int cpu)
 	unsigned long flags;
 
 	debug_assert_init(timer);
+	timer->qos_tag = qos_work_tag();
 
 	if (WARN_ON_ONCE(timer_pending(timer)))
 		return;
@@ -1745,7 +1748,12 @@ static void call_timer_fn(struct timer_list *timer,
 	lock_map_acquire(&lockdep_map);
 
 	trace_timer_expire_entry(timer, baseclk);
-	fn(timer);
+	{
+		unsigned long qc = qos_work_begin(QOS_WORK_TIMER, 0, timer->qos_tag);
+
+		fn(timer);
+		qos_work_end(qc);
+	}
 	trace_timer_expire_exit(timer);
 
 	lock_map_release(&lockdep_map);
@@ -2472,7 +2480,12 @@ void update_process_times(int user_tick)
 	/* Note: this timer irq context must be accounted for as well. */
 	account_process_tick(p, user_tick);
 	run_local_timers();
-	rcu_sched_clock_irq(user_tick);
+	{
+		unsigned long qc = qos_work_begin(QOS_WORK_RCU_TICK, 0, QOS_NOSWITCH);
+
+		rcu_sched_clock_irq(user_tick);
+		qos_work_end(qc);
+	}
 #ifdef CONFIG_IRQ_WORK
 	if (in_hardirq())
 		irq_work_tick();

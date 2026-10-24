@@ -10,6 +10,7 @@
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/export.h>
+#include <linux/qos_work.h>
 #include <linux/kernel_stat.h>
 #include <linux/interrupt.h>
 #include <linux/init.h>
@@ -58,6 +59,8 @@ EXPORT_PER_CPU_SYMBOL(irq_stat);
 #endif
 
 static struct softirq_action softirq_vec[NR_SOFTIRQS] __cacheline_aligned_in_smp;
+/* srmcfg of whoever last raised each softirq on this CPU (qos_resctrl.irq_policy bit 2) */
+static DEFINE_PER_CPU(unsigned long, softirq_qos_tag[NR_SOFTIRQS]);
 
 DEFINE_PER_CPU(struct task_struct *, ksoftirqd);
 
@@ -619,7 +622,12 @@ restart:
 		kstat_incr_softirqs_this_cpu(vec_nr);
 
 		trace_softirq_entry(vec_nr);
-		h->action();
+		{
+			unsigned long qc = qos_work_begin(QOS_WORK_SOFTIRQ, vec_nr,
+							  __this_cpu_read(softirq_qos_tag[vec_nr]));
+			h->action();
+			qos_work_end(qc);
+		}
 		trace_softirq_exit(vec_nr);
 		if (unlikely(prev_count != preempt_count())) {
 			pr_err("huh, entered softirq %u %s %p with preempt_count %08x, exited with %08x?\n",
@@ -800,6 +808,7 @@ void __raise_softirq_irqoff(unsigned int nr)
 {
 	lockdep_assert_irqs_disabled();
 	trace_softirq_raise(nr);
+	__this_cpu_write(softirq_qos_tag[nr], qos_work_tag());
 	or_softirq_pending(1UL << nr);
 }
 

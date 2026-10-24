@@ -4,6 +4,7 @@
  */
 
 #include <linux/cpu.h>
+#include <linux/qos_work.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/irqflags.h>
@@ -424,12 +425,15 @@ asmlinkage __visible noinstr void do_page_fault(struct pt_regs *regs)
 static void noinstr handle_riscv_irq(struct pt_regs *regs)
 {
 	struct pt_regs *old_regs;
+	/* runs the handler under the RCID picked by qos_resctrl.irq_policy */
+	unsigned long qc = qos_work_begin(QOS_WORK_HARDIRQ, 0, QOS_NOSWITCH);
 
 	irq_enter_rcu();
 	old_regs = set_irq_regs(regs);
 	handle_arch_irq(regs);
 	set_irq_regs(old_regs);
 	irq_exit_rcu();
+	qos_work_end(qc);
 }
 
 asmlinkage void noinstr do_irq(struct pt_regs *regs)

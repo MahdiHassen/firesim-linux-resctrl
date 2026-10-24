@@ -46,6 +46,7 @@ struct hrtimer {
 	bool				is_soft;
 	bool				is_hard;
 	bool				is_lazy;
+	unsigned long			qos_tag;	/* srmcfg of the armer (qos_work.h) */
 	ktime_t				_softexpires;
 	enum hrtimer_restart		(*__private function)(struct hrtimer *);
 };

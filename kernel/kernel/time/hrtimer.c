@@ -23,6 +23,7 @@
  */
 
 #include <linux/cpu.h>
+#include <linux/qos_work.h>
 #include <linux/export.h>
 #include <linux/percpu.h>
 #include <linux/hrtimer.h>
@@ -1365,6 +1366,7 @@ static int __hrtimer_start_range_ns(struct hrtimer *timer, ktime_t tim, u64 delt
 	bool is_pinned, first, was_first, keep_base = false;
 	struct hrtimer_cpu_base *cpu_base = base->cpu_base;
 
+	timer->qos_tag = qos_work_tag();
 	was_first = cpu_base->next_timer == timer;
 	is_pinned = !!(mode & HRTIMER_MODE_PINNED);
 
@@ -2029,7 +2031,13 @@ static void __run_hrtimer(struct hrtimer_cpu_base *cpu_base, struct hrtimer_cloc
 	trace_hrtimer_expire_entry(timer, now);
 	expires_in_hardirq = lockdep_hrtimer_enter(timer);
 
-	restart = fn(timer);
+	{
+		/* hard hrtimers (the tick among them) follow the hardirq rule; soft ones their armer */
+		unsigned long qc = qos_work_begin(QOS_WORK_TIMER, 0, timer->is_soft ? timer->qos_tag : QOS_NOSWITCH);
+
+		restart = fn(timer);
+		qos_work_end(qc);
+	}
 
 	lockdep_hrtimer_exit(expires_in_hardirq);
 	trace_hrtimer_expire_exit(timer);
