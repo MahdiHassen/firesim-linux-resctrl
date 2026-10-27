@@ -1498,6 +1498,7 @@ void tick_setup_sched_timer(bool hrtimer)
 
 	/* Emulate tick processing via per-CPU hrtimers: */
 	hrtimer_setup(&ts->sched_timer, tick_nohz_handler, CLOCK_MONOTONIC, HRTIMER_MODE_ABS_HARD);
+	ts->sched_timer.qos_kernel = true;	/* the tick has no causer: it runs under the hardirq's RCID */
 
 	if (IS_ENABLED(CONFIG_HIGH_RES_TIMERS) && hrtimer)
 		tick_sched_flag_set(ts, TS_FLAG_HIGHRES);

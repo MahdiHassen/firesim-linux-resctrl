@@ -8,6 +8,7 @@
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/irq_work.h>
+#include <linux/qos_work.h>
 #include <linux/rcupdate.h>
 #include <linux/rculist.h>
 #include <linux/kernel.h>
@@ -576,10 +577,13 @@ static void __flush_smp_call_function_queue(bool warn_cpu_offline)
 				entry = &csd_next->node.llist;
 			}
 
+			unsigned long qc = qos_work_begin(QOS_WORK_IPI, 0, qos_node_tag(&csd->node));
+
 			csd_lock_record(csd);
 			csd_do_func(func, info, csd);
 			csd_unlock(csd);
 			csd_lock_record(NULL);
+			qos_work_end(qc);
 		} else {
 			prev = &csd->node.llist;
 		}
@@ -605,11 +609,14 @@ static void __flush_smp_call_function_queue(bool warn_cpu_offline)
 			if (type == CSD_TYPE_ASYNC) {
 				smp_call_func_t func = csd->func;
 				void *info = csd->info;
+				/* read before csd_unlock(): the owner may requeue (and retag) the csd after it */
+				unsigned long qc = qos_work_begin(QOS_WORK_IPI, 0, qos_node_tag(&csd->node));
 
 				csd_lock_record(csd);
 				csd_unlock(csd);
 				csd_do_func(func, info, csd);
 				csd_lock_record(NULL);
+				qos_work_end(qc);
 			} else if (type == CSD_TYPE_IRQ_WORK) {
 				irq_work_single(csd);
 			}
@@ -623,8 +630,13 @@ static void __flush_smp_call_function_queue(bool warn_cpu_offline)
 	 * Third; only CSD_TYPE_TTWU is left, issue those.
 	 */
 	if (entry) {
+		/* a batch of remote wakeups: charged to the waker of the first one */
+		unsigned long qc;
+
 		csd = llist_entry(entry, typeof(*csd), node.llist);
+		qc = qos_work_begin(QOS_WORK_IPI, 0, qos_node_tag(&csd->node));
 		csd_do_func(sched_ttwu_pending, entry, csd);
+		qos_work_end(qc);
 	}
 }
 
@@ -711,6 +723,7 @@ int smp_call_function_single(int cpu, smp_call_func_t func, void *info,
 
 	csd->func = func;
 	csd->info = info;
+	qos_node_set_tag(&csd->node);
 #ifdef CONFIG_CSD_LOCK_WAIT_DEBUG
 	csd->node.src = this_cpu;
 	csd->node.dst = cpu;
@@ -762,6 +775,7 @@ int smp_call_function_single_async(int cpu, call_single_data_t *csd)
 	}
 
 	csd->node.u_flags = CSD_FLAG_LOCK;
+	qos_node_set_tag(&csd->node);
 	smp_wmb();
 
 	err = generic_exec_single(cpu, csd);
@@ -866,6 +880,7 @@ static void smp_call_function_many_cond(const struct cpumask *mask,
 				csd->node.u_flags |= CSD_TYPE_SYNC;
 			csd->func = func;
 			csd->info = info;
+			qos_node_set_tag(&csd->node);
 #ifdef CONFIG_CSD_LOCK_WAIT_DEBUG
 			csd->node.src = this_cpu;
 			csd->node.dst = cpu;

@@ -10,6 +10,7 @@
 #include <linux/kernel.h>
 #include <linux/export.h>
 #include <linux/irq_work.h>
+#include <linux/qos_work.h>
 #include <linux/percpu.h>
 #include <linux/hardirq.h>
 #include <linux/irqflags.h>
@@ -66,6 +67,7 @@ static bool irq_work_claim(struct irq_work *work)
 	 */
 	if (oflags & IRQ_WORK_PENDING)
 		return false;
+	qos_node_set_tag(&work->node);	/* we own it until irq_work_single() clears PENDING */
 	return true;
 }
 
@@ -218,7 +220,12 @@ void irq_work_single(void *arg)
 	smp_mb();
 
 	lockdep_irq_work_enter(flags);
-	work->func(work);
+	{
+		unsigned long qc = qos_work_begin(QOS_WORK_IPI, 0, qos_node_tag(&work->node));
+
+		work->func(work);
+		qos_work_end(qc);
+	}
 	lockdep_irq_work_exit(flags);
 
 	/*

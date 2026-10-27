@@ -11,6 +11,7 @@
 #include <linux/sched.h>
 #include <linux/highmem.h>
 #include <linux/hrtimer_api.h>
+#include <linux/qos_work.h>
 #include <linux/ktime_api.h>
 #include <linux/sched/signal.h>
 #include <linux/syscalls_api.h>
@@ -3954,6 +3955,7 @@ static void __ttwu_queue_wakelist(struct task_struct *p, int cpu, int wake_flags
 	p->sched_remote_wakeup = !!(wake_flags & WF_MIGRATED);
 
 	WRITE_ONCE(rq->ttwu_pending, 1);
+	qos_node_set_tag(&p->wake_entry);	/* the waker: see QOS_WORK_IPI */
 #ifdef CONFIG_SMP
 	__smp_call_single_queue(cpu, &p->wake_entry.llist);
 #endif

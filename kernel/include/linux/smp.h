@@ -30,8 +30,13 @@ struct __call_single_data {
 	(struct __call_single_data){ .func = (_func), .info = (_info), }
 
 /* Use __aligned() to avoid to use 2 cache lines for 1 csd */
+#ifdef CONFIG_RISCV_ISA_SSQOSID
+/* qos_tag makes the node 24 bytes and the csd 40: keep a csd inside one cache line */
+typedef struct __call_single_data call_single_data_t __aligned(64);
+#else
 typedef struct __call_single_data call_single_data_t
 	__aligned(sizeof(struct __call_single_data));
+#endif
 
 #define INIT_CSD(_csd, _func, _info)		\
 do {						\

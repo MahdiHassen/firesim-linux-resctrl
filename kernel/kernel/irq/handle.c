@@ -13,6 +13,7 @@
 #include <linux/sched.h>
 #include <linux/interrupt.h>
 #include <linux/kernel_stat.h>
+#include <linux/qos_work.h>
 
 #include <asm/irq_regs.h>
 
@@ -200,13 +201,19 @@ irqreturn_t __handle_irq_event_percpu(struct irq_desc *desc)
 
 		trace_irq_handler_entry(irq, action);
 
-		if (static_branch_unlikely(&irqhandler_duration_check_enabled)) {
-			u64 ts_start = local_clock();
+		{
+			/* qos_resctrl.irq_owner: run this line's handler under its owner's RCID */
+			unsigned long qc = qos_work_begin(QOS_WORK_DEVIRQ, irq, QOS_NOSWITCH);
 
-			res = action->handler(irq, action->dev_id);
-			irqhandler_duration_check(ts_start, irq, action);
-		} else {
-			res = action->handler(irq, action->dev_id);
+			if (static_branch_unlikely(&irqhandler_duration_check_enabled)) {
+				u64 ts_start = local_clock();
+
+				res = action->handler(irq, action->dev_id);
+				irqhandler_duration_check(ts_start, irq, action);
+			} else {
+				res = action->handler(irq, action->dev_id);
+			}
+			qos_work_end(qc);
 		}
 
 		trace_irq_handler_exit(irq, action, res);

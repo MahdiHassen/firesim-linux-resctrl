@@ -1366,7 +1366,7 @@ static int __hrtimer_start_range_ns(struct hrtimer *timer, ktime_t tim, u64 delt
 	bool is_pinned, first, was_first, keep_base = false;
 	struct hrtimer_cpu_base *cpu_base = base->cpu_base;
 
-	timer->qos_tag = qos_work_tag();
+	timer->qos_tag = timer->qos_kernel ? QOS_NOSWITCH : qos_work_tag();
 	was_first = cpu_base->next_timer == timer;
 	is_pinned = !!(mode & HRTIMER_MODE_PINNED);
 
@@ -2032,8 +2032,8 @@ static void __run_hrtimer(struct hrtimer_cpu_base *cpu_base, struct hrtimer_cloc
 	expires_in_hardirq = lockdep_hrtimer_enter(timer);
 
 	{
-		/* hard hrtimers (the tick among them) follow the hardirq rule; soft ones their armer */
-		unsigned long qc = qos_work_begin(QOS_WORK_TIMER, 0, timer->is_soft ? timer->qos_tag : QOS_NOSWITCH);
+		/* soft hrtimers: timer rule (bit 3); hard ones: hrtimer rule (bit 5), else the hardirq's RCID */
+		unsigned long qc = qos_work_begin(timer->is_soft ? QOS_WORK_TIMER : QOS_WORK_HRTIMER, 0, timer->qos_tag);
 
 		restart = fn(timer);
 		qos_work_end(qc);

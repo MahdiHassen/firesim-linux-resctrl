@@ -64,6 +64,9 @@ struct __call_single_node {
 #ifdef CONFIG_64BIT
 	u16 src, dst;
 #endif
+#ifdef CONFIG_RISCV_ISA_SSQOSID
+	u32 qos_tag;	/* srmcfg of whoever queued this entry (qos_work.h) */
+#endif
 };
 
 #endif /* __LINUX_SMP_TYPES_H */
