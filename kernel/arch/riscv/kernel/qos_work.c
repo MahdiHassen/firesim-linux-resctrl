@@ -52,10 +52,10 @@
 
 #undef MODULE_PARAM_PREFIX
 #define MODULE_PARAM_PREFIX "qos_resctrl."
-static int irq_rcid = -1;
+static int irq_rcid;		/* RCID 0: all LLC ways, unregulated (the platform default) */
 module_param(irq_rcid, int, 0644);
 MODULE_PARM_DESC(irq_rcid, "the kernel's own RCID/MCID for irq_policy (-1 = none)");
-static unsigned int irq_policy;
+static unsigned int irq_policy = 0xfd;	/* causer accounting (see the top of this file) */
 module_param(irq_policy, uint, 0644);
 MODULE_PARM_DESC(irq_policy, "1 hardirq, 2 softirq, 16 RCU under irq_rcid; 4 softirq under its raiser, 8 timer, "
 		 "32 hard hrtimer under its armer, 64 IPI/irq_work/wakeup under its sender, 128 device irq under its owner; "
