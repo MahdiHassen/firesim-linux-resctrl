@@ -142,9 +142,29 @@ static inline void qos_write_srmcfg(u32 val)
 	RISCV_FENCE(o, rw);
 }
 
+/*
+ * A tag is a real srmcfg encoding: RCID and MCID fields only. cpu_srmcfg also
+ * holds U32_MAX ("CSR contents unknown", see arch/riscv/kernel/qos.c) from boot
+ * until the CPU's first srmcfg write, after hotplug and after CPU PM; that
+ * value must never be recorded as a tag nor be written to the CSR: it would
+ * select RCID/MCID 0xfff, which has no resources (on FireSim no bandwidth
+ * budget, so the hart's memory accesses stall).
+ */
+static inline bool qos_srmcfg_valid(unsigned long v)
+{
+	return !(v & ~(unsigned long)(SRMCFG_RCID_MASK | SRMCFG_MCID_MASK));
+}
+
+/*
+ * The srmcfg to charge work queued now to: QOS_NOSWITCH (no causer) while this
+ * CPU's srmcfg is unknown. Callers may be preemptible (mod_timer(),
+ * irq_work_queue(), ...): any CPU's cached value is then as good as this one's.
+ */
 unsigned long qos_work_tag(void)
 {
-	return __this_cpu_read(cpu_srmcfg);
+	u32 v = raw_cpu_read(cpu_srmcfg);
+
+	return qos_srmcfg_valid(v) ? v : QOS_NOSWITCH;
 }
 
 /* returns the cookie for qos_work_end(); QOS_NOSWITCH when the policy leaves srmcfg alone */
@@ -195,7 +215,8 @@ unsigned long qos_work_begin(enum qos_work kind, unsigned int nr, unsigned long 
 		}
 		break;
 	}
-	if (want == QOS_NOSWITCH)
+	/* also refuses a tag recorded before qos_work_tag() filtered the sentinel */
+	if (want == QOS_NOSWITCH || !qos_srmcfg_valid(want))
 		return QOS_NOSWITCH;
 
 	prev = __this_cpu_read(cpu_srmcfg);
@@ -209,8 +230,11 @@ void qos_work_end(unsigned long cookie)
 {
 	if (cookie == QOS_NOSWITCH)
 		return;
-	if (__this_cpu_dec_return(qos_work_depth) == 0) {
-		/* outermost: recomputed, not restored, as resctrl may have moved current meanwhile */
+	if (__this_cpu_dec_return(qos_work_depth) == 0 || !qos_srmcfg_valid(cookie)) {
+		/*
+		 * outermost: recomputed, not restored, as resctrl may have moved
+		 * current meanwhile (and the cookie may be the U32_MAX sentinel)
+		 */
 		__switch_to_srmcfg(current);
 	} else if (__this_cpu_read(cpu_srmcfg) != (u32)cookie) {
 		qos_write_srmcfg((u32)cookie);
