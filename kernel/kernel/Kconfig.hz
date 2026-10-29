@@ -17,6 +17,12 @@ choice
 	 per second.
 
 
+	config HZ_20
+		bool "20 HZ"
+	help
+	  20 Hz (50 ms tick). Experimental: used to study how the tick period
+	  affects memory-bandwidth regulation; jiffies-based timeouts become coarse.
+
 	config HZ_100
 		bool "100 HZ"
 	help
@@ -50,6 +56,7 @@ endchoice
 
 config HZ
 	int
+	default 20 if HZ_20
 	default 100 if HZ_100
 	default 250 if HZ_250
 	default 300 if HZ_300
