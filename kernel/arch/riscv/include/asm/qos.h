@@ -20,7 +20,15 @@ DECLARE_PER_CPU(u32, cpu_srmcfg);
 /* default srmcfg value for each cpu, set via resctrl cpu assignment */
 DECLARE_PER_CPU(u32, cpu_srmcfg_default);
 
-static inline void __switch_to_srmcfg(struct task_struct *next)
+/*
+ * qos_kernel_rcid0 (boot: qos_kernel_rcid0=1): all kernel-mode execution runs under
+ * srmcfg 0 (RCID 0 / MCID 0); a task's own srmcfg applies only in user mode. Loaded on
+ * every return to user mode, replaced by 0 on every entry from user mode, and context
+ * switches inside the kernel leave the CSR alone.
+ */
+extern bool qos_kernel_rcid0;
+
+static inline void __load_task_srmcfg(struct task_struct *next)
 {
 	u32 thread_srmcfg, default_srmcfg;
 
@@ -72,6 +80,31 @@ static inline void __switch_to_srmcfg(struct task_struct *next)
 	}
 }
 
+static inline void __switch_to_srmcfg(struct task_struct *next)
+{
+	if (qos_kernel_rcid0)
+		return;		/* still in the kernel: keep srmcfg 0 until the return to user mode */
+	__load_task_srmcfg(next);
+}
+
+/* entry from user mode: drain the user's accesses under its tag, then run the kernel under srmcfg 0 */
+static __always_inline void qos_kernel_enter(void)
+{
+	if (!qos_kernel_rcid0 || raw_cpu_read(cpu_srmcfg) == 0)
+		return;
+	RISCV_FENCE(rw, o);
+	raw_cpu_write(cpu_srmcfg, 0);
+	csr_write(CSR_SRMCFG, 0);
+	RISCV_FENCE(o, rw);
+}
+
+/* last step before returning to user mode: back to the task's own tag */
+static __always_inline void qos_user_return(void)
+{
+	if (qos_kernel_rcid0)
+		__load_task_srmcfg(current);
+}
+
 static __always_inline bool has_srmcfg(void)
 {
 	return riscv_has_extension_unlikely(RISCV_ISA_EXT_SSQOSID);
@@ -82,6 +115,8 @@ static __always_inline bool has_srmcfg(void)
 struct task_struct;
 static __always_inline bool has_srmcfg(void) { return false; }
 static inline void __switch_to_srmcfg(struct task_struct *next) { }
+static __always_inline void qos_kernel_enter(void) { }
+static __always_inline void qos_user_return(void) { }
 
 #endif /* CONFIG_RISCV_ISA_SSQOSID */
 #endif /* _ASM_RISCV_QOS_H */

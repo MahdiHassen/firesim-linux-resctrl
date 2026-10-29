@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include <linux/cpu.h>
+#include <linux/init.h>
+#include <linux/kstrtox.h>
 #include <linux/cpu_pm.h>
 #include <linux/cpuhotplug.h>
 #include <linux/notifier.h>
@@ -21,6 +23,13 @@ DEFINE_PER_CPU(u32, cpu_srmcfg) = U32_MAX;
 
 /* default srmcfg value for each cpu, set via resctrl cpu assignment */
 DEFINE_PER_CPU(u32, cpu_srmcfg_default);
+
+bool qos_kernel_rcid0 __read_mostly;
+static int __init qos_kernel_rcid0_setup(char *arg)
+{
+	return kstrtobool(arg, &qos_kernel_rcid0) ? -EINVAL : 0;
+}
+early_param("qos_kernel_rcid0", qos_kernel_rcid0_setup);
 
 /*
  * Seed the per-CPU srmcfg cache to a sentinel that no real srmcfg encoding
