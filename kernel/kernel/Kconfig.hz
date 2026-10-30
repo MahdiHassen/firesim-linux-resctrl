@@ -29,12 +29,27 @@ choice
 	  50 Hz (20 ms tick). Experimental: used to study how the tick period
 	  affects memory-bandwidth regulation.
 
+	config HZ_83
+		bool "83 HZ"
+	help
+	  83 Hz (12.05 ms tick). Experimental: tick-period sweep for memory-bandwidth regulation.
+
 	config HZ_100
 		bool "100 HZ"
 	help
 	  100 Hz is a typical choice for servers, SMP and NUMA systems
 	  with lots of processors that may show reduced performance if
 	  too many timer interrupts are occurring.
+
+	config HZ_125
+		bool "125 HZ"
+	help
+	  125 Hz (8 ms tick). Experimental: tick-period sweep for memory-bandwidth regulation.
+
+	config HZ_167
+		bool "167 HZ"
+	help
+	  167 Hz (5.99 ms tick). Experimental: tick-period sweep for memory-bandwidth regulation.
 
 	config HZ_250
 		bool "250 HZ"
@@ -52,6 +67,11 @@ choice
 	 on SMP and NUMA systems and exactly dividing by both PAL and
 	 NTSC frame rates for video and multimedia work.
 
+	config HZ_500
+		bool "500 HZ"
+	help
+	  500 Hz (2 ms tick). Experimental: tick-period sweep for memory-bandwidth regulation.
+
 	config HZ_1000
 		bool "1000 HZ"
 	help
@@ -64,9 +84,13 @@ config HZ
 	int
 	default 20 if HZ_20
 	default 50 if HZ_50
+	default 83 if HZ_83
 	default 100 if HZ_100
+	default 125 if HZ_125
+	default 167 if HZ_167
 	default 250 if HZ_250
 	default 300 if HZ_300
+	default 500 if HZ_500
 	default 1000 if HZ_1000
 
 config SCHED_HRTICK
