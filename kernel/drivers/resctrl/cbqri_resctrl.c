@@ -1077,7 +1077,12 @@ static void cbqri_resctrl_pick_bc_mon_domains(void)
 	res->mon_capable = true;
 	INIT_LIST_HEAD(&res->ctrl_domains);
 	INIT_LIST_HEAD(&res->mon_domains);
-	resctrl_enable_mon_event(QOS_L3_MBM_TOTAL_EVENT_ID, false, 0, NULL);
+	/*
+	 * any_cpu: the counters are MMIO and readable from any hart. Reading
+	 * in the caller's context keeps resctrl from running every read in a
+	 * kworker on the first CPU of the domain (core 0).
+	 */
+	resctrl_enable_mon_event(QOS_L3_MBM_TOTAL_EVENT_ID, true, 0, NULL);
 	bc_mon_domains = true;
 	exposed_mon_capable = true;
 	max_rmid = min(max_rmid, nm);
