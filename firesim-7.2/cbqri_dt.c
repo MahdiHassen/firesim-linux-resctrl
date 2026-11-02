@@ -30,7 +30,7 @@
 #define CBQRI_DT_MAX_CTRLS 8
 
 /*
- * cbqri_dt.max_ids=N: use at most N RCIDs and N MCIDs per controller whatever the
+ * cbqri.max_ids=N (cbqri_dt.o is linked into cbqri.o): use at most N RCIDs and N MCIDs per controller whatever the
  * device tree advertises. The FireSim quad-BOOM bitstream advertises 16 of each but
  * only honours 0-3, so resctrl must not hand out CLOSIDs or RMIDs above 3.
  */
@@ -98,7 +98,7 @@ static int __init cbqri_dt_read_common(struct device_node *np, struct cbqri_dt_n
 	if (cbqri_dt_max_ids) {
 		n->info.rcid_count = min(n->info.rcid_count, cbqri_dt_max_ids);
 		n->info.mcid_count = min(n->info.mcid_count, cbqri_dt_max_ids);
-		pr_info("%pOF: rcid/mcid capped at %u (cbqri_dt.max_ids)\n", np, cbqri_dt_max_ids);
+		pr_info("%pOF: rcid/mcid capped at %u (cbqri.max_ids)\n", np, cbqri_dt_max_ids);
 	}
 	return 0;
 }
