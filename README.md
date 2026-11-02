@@ -39,7 +39,9 @@ bank at a 1 ms period).
 
 ## Kernel configurations
 
-All variants use the same fragment, `firesim-7.2/cbqri-linux-config-7.2`, merged onto FireMarshal's RISC-V base config:
+Each block below is a complete FireMarshal config fragment (merged onto FireMarshal's RISC-V base config). They differ only in `CONFIG_CMDLINE`. `CONFIG_DEVMEM` without `STRICT_DEVMEM` lets the experiment harness program LLC way masks and regulator periods and read the latency counters with `devmem`; BPF/BTF/sched_ext are for tooling; `HZ_250` is a 4 ms tick.
+
+### 1. Kernel work on RCID 0, regulator periods LLC 400 / DRAM 4800 (experiment standard; `firesim-7.2/cbqri-linux-config-7.2`)
 
 ```
 CONFIG_RISCV_ISA_SSQOSID=y
@@ -63,50 +65,97 @@ CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT=y
 CONFIG_DEBUG_INFO_BTF=y
 CONFIG_SCHED_CLASS_EXT=y
 CONFIG_SCHED_DEBUG=y
-CONFIG_CMDLINE="<one of the command lines below>"
-```
-
-`DEVMEM` without `STRICT_DEVMEM` lets the experiment harness program LLC way masks and regulator periods and read the latency
-counters with `devmem`; BPF/BTF/sched_ext are for tooling. `HZ_250` is a 4 ms tick.
-
-### 1. Kernel work on RCID 0 (used for the experiments since run 59)
-
-Dual-regulator standard periods (LLC 400, DRAM 4800 cycles). This is the command line in the fragment:
-
-```
 CONFIG_CMDLINE="console=ttyS0 console=ttySIF0,3686400 earlycon qos_resctrl.mb_period=400,4800 qos_resctrl.irq_rcid=0 qos_resctrl.irq_policy=0 qos_kernel_rcid0=1 cbqri.max_ids=4"
 ```
 
-Both regulators at 1 ms (runs 81-82):
+All kernel-mode work (syscalls, softirqs, interrupts, the tick, kernel threads, idle) runs under RCID/MCID 0: unregulated, all LLC ways. A task's RCID tags only its user-mode accesses, so a group's `mbm_total_bytes` is user-mode traffic only and kernel traffic is never capped.
+
+### 2. Kernel work on RCID 0, both regulator periods 1 ms
 
 ```
+CONFIG_RISCV_ISA_SSQOSID=y
+CONFIG_RISCV_FORCE_SSQOSID=y
+CONFIG_RESCTRL_FS=y
+CONFIG_RISCV_CBQRI_DRIVER=y
+CONFIG_RISCV_CBQRI_DT=y
+CONFIG_DEBUG_FS=y
+CONFIG_DEVMEM=y
+# CONFIG_STRICT_DEVMEM is not set
+CONFIG_HZ_250=y
+CONFIG_HZ=250
+CONFIG_BPF=y
+CONFIG_BPF_SYSCALL=y
+CONFIG_BPF_JIT=y
+CONFIG_BPF_JIT_ALWAYS_ON=y
+CONFIG_BPF_JIT_DEFAULT_ON=y
+CONFIG_BPF_EVENTS=y
+CONFIG_DEBUG_INFO=y
+CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT=y
+CONFIG_DEBUG_INFO_BTF=y
+CONFIG_SCHED_CLASS_EXT=y
+CONFIG_SCHED_DEBUG=y
 CONFIG_CMDLINE="console=ttyS0 console=ttySIF0,3686400 earlycon qos_resctrl.mb_period=1000000,1000000 qos_resctrl.irq_rcid=0 qos_resctrl.irq_policy=0 qos_kernel_rcid0=1 cbqri.max_ids=4"
 ```
 
-All kernel-mode work (syscalls, softirqs, interrupts, the tick, kernel threads, idle) runs under RCID/MCID 0, which is
-unregulated and owns all LLC ways. A task's RCID tags only its user-mode accesses, so `mbm_total_bytes` of a group counts
-user-mode traffic only and kernel traffic is never capped.
+Same tagging as 1. At a 1 ms period the largest budget (52428 blocks) is 3.36 GB/s per bank, so a cap of "max" still limits an attacker that exceeds that.
 
-### 2. Upstream-equivalent tagging
+### 3. Upstream-equivalent tagging
 
 ```
+CONFIG_RISCV_ISA_SSQOSID=y
+CONFIG_RISCV_FORCE_SSQOSID=y
+CONFIG_RESCTRL_FS=y
+CONFIG_RISCV_CBQRI_DRIVER=y
+CONFIG_RISCV_CBQRI_DT=y
+CONFIG_DEBUG_FS=y
+CONFIG_DEVMEM=y
+# CONFIG_STRICT_DEVMEM is not set
+CONFIG_HZ_250=y
+CONFIG_HZ=250
+CONFIG_BPF=y
+CONFIG_BPF_SYSCALL=y
+CONFIG_BPF_JIT=y
+CONFIG_BPF_JIT_ALWAYS_ON=y
+CONFIG_BPF_JIT_DEFAULT_ON=y
+CONFIG_BPF_EVENTS=y
+CONFIG_DEBUG_INFO=y
+CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT=y
+CONFIG_DEBUG_INFO_BTF=y
+CONFIG_SCHED_CLASS_EXT=y
+CONFIG_SCHED_DEBUG=y
 CONFIG_CMDLINE="console=ttyS0 console=ttySIF0,3686400 earlycon qos_resctrl.mb_period=400,4800 qos_resctrl.irq_policy=0 cbqri.max_ids=4"
 ```
 
-`irq_policy=0` disables all re-tagging and `qos_kernel_rcid0` stays off, so `srmcfg` changes only on context switch, as in the
-upstream RFC: kernel work done while a task is current (its syscalls and faults, interrupts and softirqs that land on its CPU)
-runs under that task's RCID; kernel threads run under the default group (RCID 0). Omitting `irq_policy` is NOT equivalent,
-because this kernel's default is `0xfd`.
+`irq_policy=0` disables all re-tagging and `qos_kernel_rcid0` is off, so `srmcfg` changes only on context switch, as in the upstream RFC: kernel work done while a task is current (its syscalls and faults, interrupts and softirqs that land on its CPU) runs under that task's RCID; kernel threads run under the default group (RCID 0). Leaving `irq_policy` out is not equivalent: this kernel's default is `0xfd`.
 
-### 3. Causer accounting (this kernel's default)
+### 4. Causer accounting (this kernel's built-in default)
 
 ```
+CONFIG_RISCV_ISA_SSQOSID=y
+CONFIG_RISCV_FORCE_SSQOSID=y
+CONFIG_RESCTRL_FS=y
+CONFIG_RISCV_CBQRI_DRIVER=y
+CONFIG_RISCV_CBQRI_DT=y
+CONFIG_DEBUG_FS=y
+CONFIG_DEVMEM=y
+# CONFIG_STRICT_DEVMEM is not set
+CONFIG_HZ_250=y
+CONFIG_HZ=250
+CONFIG_BPF=y
+CONFIG_BPF_SYSCALL=y
+CONFIG_BPF_JIT=y
+CONFIG_BPF_JIT_ALWAYS_ON=y
+CONFIG_BPF_JIT_DEFAULT_ON=y
+CONFIG_BPF_EVENTS=y
+CONFIG_DEBUG_INFO=y
+CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT=y
+CONFIG_DEBUG_INFO_BTF=y
+CONFIG_SCHED_CLASS_EXT=y
+CONFIG_SCHED_DEBUG=y
 CONFIG_CMDLINE="console=ttyS0 console=ttySIF0,3686400 earlycon qos_resctrl.mb_period=400,4800 qos_resctrl.irq_rcid=0 qos_resctrl.irq_policy=0xfd cbqri.max_ids=4"
 ```
 
-Asynchronous kernel work runs under the RCID of the task that caused it (hard hrtimers under the task that armed them,
-softirqs under their raiser, IPIs/irq_work/wakeups under the sender, device interrupts under their owner); only work with no
-causer runs under `irq_rcid`. Syscalls and exceptions always keep the task's RCID.
+Asynchronous kernel work runs under the RCID of the task that caused it (hard hrtimers under the task that armed them, softirqs under their raiser, IPIs / irq_work / wakeups under the sender, device interrupts under their owner); only work with no causer runs under `irq_rcid`. Syscalls and exceptions keep the task's RCID.
 
 ## Using it from user space
 
