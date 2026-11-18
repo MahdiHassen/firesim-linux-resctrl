@@ -1078,6 +1078,13 @@ int riscv_cbqri_register_controller(const struct cbqri_controller_info *info)
 
 		ctrl->cache.cache_id = info->cache_id;
 
+		/* device tree: the discovery layer gives level and CPUs */
+		if (info->cache_level && info->cpus) {
+			ctrl->cache.cache_level = info->cache_level;
+			cpumask_copy(&ctrl->cache.cpu_mask, info->cpus);
+			break;
+		}
+
 		level = find_acpi_cache_level_from_id(info->cache_id);
 		if (level < 0) {
 			pr_warn("Failed to resolve cache level for cache id 0x%x (%d), skipping\n",

@@ -10,6 +10,8 @@
 
 #include <linux/types.h>
 
+struct cpumask;
+
 enum cbqri_controller_type {
 	CBQRI_CONTROLLER_TYPE_CAPACITY,
 	CBQRI_CONTROLLER_TYPE_BANDWIDTH,
@@ -35,10 +37,16 @@ enum cbqri_controller_type {
  * @cache_id:    PPTT cache id. Only meaningful for CAPACITY controllers
  * @prox_dom:    SRAT proximity domain. Only meaningful for BANDWIDTH
  *               controllers
+ * @cache_level: cache level of a CAPACITY controller when the discovery
+ *               layer knows it (device tree), given with @cpus; 0 resolves
+ *               @cache_id through PPTT
+ * @cpus:        CPUs sharing that cache when the discovery layer knows
+ *               them (device tree); NULL for ACPI
  *
  * Discovery layers populate one of @cache_id / @prox_dom according to
  * @type. The CBQRI driver resolves the matching cpumask internally so
- * callers do not need to know about cacheinfo/NUMA topology.
+ * callers do not need to know about cacheinfo/NUMA topology, unless the
+ * caller gives @cache_level and @cpus itself.
  */
 struct cbqri_controller_info {
 	phys_addr_t			addr;
@@ -48,6 +56,8 @@ struct cbqri_controller_info {
 	u32				mcid_count;
 	u32				cache_id;
 	u32				prox_dom;
+	u32				cache_level;
+	const struct cpumask		*cpus;
 };
 
 #if IS_ENABLED(CONFIG_RISCV_CBQRI_DRIVER)
