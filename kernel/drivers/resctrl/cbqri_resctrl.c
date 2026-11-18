@@ -612,12 +612,15 @@ void resctrl_arch_reset_all_ctrls(struct rdt_resource *r)
 		switch (r->rid) {
 		case RDT_RESOURCE_MB_MIN:
 			/*
-			 * CBQRI section 4.5: Rbwb >= 1, sum(Rbwb) <= MRBWB.
-			 * Walk N-1..1 first so RCID 0 lands last with the
-			 * remaining budget.
+			 * CBQRI section 4.5: Rbwb >= 1, sum(Rbwb) <= MRBWB,
+			 * and hardware rejects (STATUS 5) a CONFIG_LIMIT that
+			 * breaks the sum. At reset RCID 0 holds all bandwidth
+			 * (MRBWB), so lower RCID 0 to what is left after one
+			 * block per other RCID first, then give those theirs:
+			 * every intermediate sum stays within MRBWB.
 			 */
 			for (i = 0; i < hw_res->ctrl->rcid_count; i++) {
-				u32 rcid = (i + 1) % hw_res->ctrl->rcid_count;
+				u32 rcid = i;
 				u64 rbwb = (rcid == 0) ?
 					cbqri_rcid0_rbwb(dom->hw_ctrl) : 1;
 				int rerr;
@@ -688,11 +691,13 @@ static int cbqri_init_domain_ctrlval(struct rdt_resource *r, struct rdt_ctrl_dom
 
 	for (i = 0; i < hw_res->ctrl->rcid_count; i++) {
 		/*
-		 * For MB_MIN walk, RCIDs 1..N-1 then RCID 0 last so the sum
-		 * doesn't exceed MRBWB during the walk.
+		 * For MB_MIN walk RCID 0 first: at reset it holds all
+		 * bandwidth (MRBWB, CBQRI), and hardware rejects a
+		 * CONFIG_LIMIT that takes the sum past MRBWB, so lowering
+		 * RCID 0 before giving the others a block keeps every
+		 * intermediate sum legal.
 		 */
-		u32 rcid = (r->rid == RDT_RESOURCE_MB_MIN) ?
-				((i + 1) % hw_res->ctrl->rcid_count) : i;
+		u32 rcid = i;
 
 		switch (r->rid) {
 		case RDT_RESOURCE_MB_MIN:
