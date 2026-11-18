@@ -10,7 +10,9 @@ resctrl `L3` resource.
 
 - `drivers/resctrl/cbqri_dt.c` (`CONFIG_RISCV_CBQRI_DT`): registers each `riscv,cbqri-cache` node (the property
   names of the FireSim device trees: `reg`, `cache-level`, `riscv,cbqri-rcid`, `riscv,cbqri-mcid`) as a capacity
-  controller of a cache shared by every CPU (domain id 0). Bandwidth controllers are not described this way.
+  controller of a cache shared by every CPU (domain id 0), and each `riscv,cbqri-bandwidth` node as a bandwidth
+  controller of every CPU (domain id 0): the LLC's CBQRI bandwidth controller at `0x1040_1C00` (he-soc branch
+  `qos-bc`), which resctrl exposes as `MB_MIN` (Rbwb, 1..819 of 1024 blocks) and `MB_WGHT` (Mweight, 0 = hard limit).
 - `struct cbqri_controller_info` gains `cache_level` and `cpus`: a discovery layer that knows them (device tree)
   passes them; ACPI leaves them unset and the driver resolves them through PPTT as before.
 - `arch/riscv/configs/alsaqr_resctrl_defconfig`: AlSaqr's 6.18 kernel config (alsaqr-software branch `abdur-6.18`,
@@ -63,3 +65,27 @@ Checked on the board (2026-11-18, bitstream qosio_vm_4c): the groups' masks read
 page faults): 96-140 of 2048 lines refetched, as alone (88), against all of them when the two share ways
 (alsaqr-software `linux/resctrl/rdtpart`). A victim of half its partition (256 KB in 8 ways) does not stay resident
 even alone: random physical pages overflow some sets.
+
+## Memory bandwidth (he-soc `qos-bc`, bitstream qosbc2_4c)
+
+The controller's implementation registers are not CBQRI and the driver leaves them alone: set the period, the bytes
+per period that the 1024 blocks stand for, and enable regulation with pacing (1 SoC cycle = 1 target cycle):
+
+```
+devmem 0x10401C88 32 50000      # BC_PERIOD: 1 ms at 50 MHz
+devmem 0x10401C90 32 40000      # BC_CAPACITY: 40 KB per period = 40 MB/s
+devmem 0x10401C80 32 3          # BC_CTRL: EN | PACE
+echo "MB_MIN:0=100" > /sys/fs/resctrl/schemata     # the root group holds 804 blocks: lower it first (sum <= 819)
+echo "MB_MIN:0=410" > /sys/fs/resctrl/g1/schemata; echo "MB_WGHT:0=0" > /sys/fs/resctrl/g1/schemata
+```
+
+Checked on the board (2026-11-18), three readers on CPUs 1-3 in groups g1-g3 (alsaqr-software `linux/resctrl/rdtbw`,
+one read per 64-byte line over 8 MB each): regulation off 28.3 / 28.3 / 28.2 MB/s (85 MB/s, the CCU's limit); on at
+40 MB/s 12.2 each; `MB_MIN` 410 / 205 with `MB_WGHT` 0 (16 / 8 MB/s hard) and g3 best effort 14.9 / 7.7 / 11.8,
+and 15.2 / 7.8 with g3 idle (the limits hold); `MB_WGHT` 32 / 64 / 128: 17.5 / 34.2 / 48.3 % (compressed toward
+equal: each core has one miss in flight and the arbiter is work-conserving); g1 `MB_MIN` 410 `MB_WGHT` 1 against
+two 255s: 41.8 %.
+
+The series counted any mon-capable controller as making the system mon-capable; with a mon-capable BC next to an L3
+CC without monitoring (this SoC) no event is exposed, `max_rmid` stays `U32_MAX` and the mount fails with ENOMEM.
+Fixed here: only a mon-capable L3 CC makes the system mon-capable.

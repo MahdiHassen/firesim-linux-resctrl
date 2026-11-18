@@ -978,18 +978,25 @@ static void cbqri_resctrl_accumulate_caps(void)
 			continue;
 		if (hw_res->ctrl->alloc_capable)
 			exposed_alloc_capable = true;
-		if (hw_res->ctrl->mon_capable)
-			exposed_mon_capable = true;
 	}
 
 	/*
 	 * Narrow max_rmid against the picked occupancy source (the L3 CC)
 	 * only. A mon-capable controller that is not exposed as a counter
 	 * source must not clamp the rmid space.
+	 *
+	 * Monitoring surfaces only on the L3 resource (llc_occupancy from its
+	 * CC, mbm_total_bytes from a BC paired with a mon-capable L3 CC), so
+	 * only a mon-capable L3 CC makes the system mon-capable. Counting any
+	 * mon-capable controller (a BC next to an L3 CC without monitoring)
+	 * would expose no event and leave max_rmid at U32_MAX, which the
+	 * rmid allocation at mount cannot satisfy (-ENOMEM).
 	 */
 	l3_ctrl = cbqri_resctrl_resources[RDT_RESOURCE_L3].ctrl;
-	if (l3_ctrl && l3_ctrl->mon_capable)
+	if (l3_ctrl && l3_ctrl->mon_capable) {
+		exposed_mon_capable = true;
 		max_rmid = min(max_rmid, l3_ctrl->mcid_count);
+	}
 
 	/*
 	 * When mbm_total_bytes is enabled, the paired BC is a second counter
