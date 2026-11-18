@@ -1115,6 +1115,20 @@ int riscv_cbqri_register_controller(const struct cbqri_controller_info *info)
 		int node_id;
 
 		ctrl->mem.prox_dom = info->prox_dom;
+		/* device tree: the discovery layer gives the CPUs */
+		if (info->cpus) {
+			list_for_each_entry(other, &cbqri_controllers, list) {
+				if (other->type == CBQRI_CONTROLLER_TYPE_BANDWIDTH &&
+				    other->mem.prox_dom == info->prox_dom) {
+					pr_warn("controller at %pa: domain %u already claimed by %pa, skipping\n",
+						&ctrl->addr, info->prox_dom, &other->addr);
+					cbqri_controller_destroy(ctrl);
+					return -EEXIST;
+				}
+			}
+			cpumask_copy(&ctrl->mem.cpu_mask, info->cpus);
+			break;
+		}
 		node_id = pxm_to_node(info->prox_dom);
 		if (node_id == NUMA_NO_NODE) {
 			pr_warn("controller at %pa: proximity domain %u has no NUMA node, skipping\n",

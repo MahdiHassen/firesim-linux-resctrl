@@ -162,8 +162,15 @@
 
 		cbqri@10401800 {
 			compatible = "riscv,cbqri-cache";
-			reg = <0x00 0x10401800 0x00 0x800>;
+			reg = <0x00 0x10401800 0x00 0x400>;
 			cache-level = <0x03>;
+			riscv,cbqri-rcid = <0x10>;
+			riscv,cbqri-mcid = <0x10>;
+		};
+
+		cbqri@10401c00 {
+			compatible = "riscv,cbqri-bandwidth";
+			reg = <0x00 0x10401c00 0x00 0x100>;
 			riscv,cbqri-rcid = <0x10>;
 			riscv,cbqri-mcid = <0x10>;
 		};

@@ -40,8 +40,10 @@ enum cbqri_controller_type {
  * @cache_level: cache level of a CAPACITY controller when the discovery
  *               layer knows it (device tree), given with @cpus; 0 resolves
  *               @cache_id through PPTT
- * @cpus:        CPUs sharing that cache when the discovery layer knows
- *               them (device tree); NULL for ACPI
+ * @cpus:        CPUs sharing that cache (CAPACITY) or served by the
+ *               controller (BANDWIDTH; @prox_dom then only numbers the
+ *               domain) when the discovery layer knows them (device
+ *               tree); NULL for ACPI
  *
  * Discovery layers populate one of @cache_id / @prox_dom according to
  * @type. The CBQRI driver resolves the matching cpumask internally so

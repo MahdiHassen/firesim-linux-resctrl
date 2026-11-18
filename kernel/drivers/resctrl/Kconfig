@@ -63,10 +63,10 @@ config RISCV_CBQRI_RESCTRL_FS
 	default y if RISCV_CBQRI_DRIVER && RESCTRL_FS
 
 config RISCV_CBQRI_DT
-	bool "Device-tree discovery of CBQRI capacity controllers"
+	bool "Device-tree discovery of CBQRI controllers"
 	depends on RISCV_CBQRI_DRIVER && OF
 	default y
 	help
-	  Registers the CBQRI capacity controllers that "riscv,cbqri-cache"
-	  device-tree nodes describe, for systems without the ACPI RQSC
-	  table.
+	  Registers the CBQRI capacity and bandwidth controllers that
+	  "riscv,cbqri-cache" and "riscv,cbqri-bandwidth" device-tree nodes
+	  describe, for systems without the ACPI RQSC table.
