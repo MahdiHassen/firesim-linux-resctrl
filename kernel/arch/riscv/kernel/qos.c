@@ -1,4 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
+#include <linux/moduleparam.h>
+#include <linux/smp.h>
+#include <linux/sched.h>
 #include <linux/cpu.h>
 #include <linux/cpu_pm.h>
 #include <linux/cpuhotplug.h>
@@ -21,6 +24,50 @@ DEFINE_PER_CPU(u32, cpu_srmcfg) = U32_MAX;
 
 /* default srmcfg value for each cpu, set via resctrl cpu assignment */
 DEFINE_PER_CPU(u32, cpu_srmcfg_default);
+
+/* IDs of kernel-mode accesses (asm/qos.h); the cache starts at a value no encoding produces */
+unsigned int riscv_kqos_mode;
+u32 riscv_kqos_kernel_id = 0x80008;	/* RCID 8, MCID 8: what the AlSaqr loader gives HS mode */
+DEFINE_PER_CPU(u32, cpu_hqosid) = U32_MAX;
+EXPORT_SYMBOL_GPL(riscv_kqos_mode);
+
+/* the current task's kernel-mode IDs changed (work item started or ended, mode switched) */
+void riscv_kqos_refresh(void)
+{
+	unsigned long flags;
+
+	if (!READ_ONCE(riscv_kqos_mode))
+		return;
+	local_irq_save(flags);
+	riscv_kqos_write(riscv_kqos_task(current, __this_cpu_read(cpu_srmcfg)));
+	local_irq_restore(flags);
+}
+
+static void riscv_kqos_refresh_ipi(void *unused)
+{
+	riscv_kqos_refresh();
+}
+
+static int kqos_mode_set(const char *val, const struct kernel_param *kp)
+{
+	unsigned int mode;
+	int err = kstrtouint(val, 0, &mode);
+
+	if (err)
+		return err;
+	if (mode > KQOS_SELECT_TAG || !riscv_has_extension_unlikely(RISCV_ISA_EXT_SSQOSID))
+		return -EINVAL;
+	WRITE_ONCE(riscv_kqos_mode, mode);
+	on_each_cpu(riscv_kqos_refresh_ipi, NULL, 1);
+	return 0;
+}
+
+static const struct kernel_param_ops kqos_mode_ops = {
+	.set = kqos_mode_set,
+	.get = param_get_uint,
+};
+module_param_cb(kqos_mode, &kqos_mode_ops, &riscv_kqos_mode, 0644);
+module_param_named(kqos_kernel_id, riscv_kqos_kernel_id, uint, 0644);
 
 /*
  * Seed the per-CPU srmcfg cache to a sentinel that no real srmcfg encoding

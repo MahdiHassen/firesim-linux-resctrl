@@ -125,6 +125,8 @@ struct thread_struct {
 #endif
 #ifdef CONFIG_RISCV_ISA_SSQOSID
 	u32 srmcfg;
+	u32 kqos_self;	/* in a system call or a page fault of its own: the kernel works for this task */
+	u32 kqos_work;	/* kernel thread: IDs of the work item it runs (KQOS_TAG_VALID), see asm/qos.h */
 #endif
 };
 

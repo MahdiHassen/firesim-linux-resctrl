@@ -447,8 +447,15 @@ void resctrl_arch_sched_in(struct task_struct *tsk)
 
 void resctrl_arch_set_closid_rmid(struct task_struct *tsk, u32 closid, u32 rmid)
 {
-	u32 srmcfg = FIELD_PREP(SRMCFG_RCID_MASK, closid) |
-		     FIELD_PREP(SRMCFG_MCID_MASK, rmid);
+	u32 srmcfg;
+
+	/*
+	 * AlSaqr: without resctrl monitoring every group has RMID 0. Give the group's tasks MCID = RCID instead, so
+	 * the bandwidth controller's per-MCID byte counters (read from user space) count per control group.
+	 */
+	if (!resctrl_arch_mon_capable() && !rmid)
+		rmid = closid;
+	srmcfg = FIELD_PREP(SRMCFG_RCID_MASK, closid) | FIELD_PREP(SRMCFG_MCID_MASK, rmid);
 
 	WRITE_ONCE(tsk->thread.srmcfg, srmcfg);
 }

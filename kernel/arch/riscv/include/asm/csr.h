@@ -333,6 +333,8 @@
 #define CSR_SIP			0x144
 #define CSR_SATP		0x180
 #define CSR_SRMCFG		0x181
+/* AlSaqr privilege association: the IDs of HS-mode accesses while mqosctl[1] is set (layout of srmcfg) */
+#define CSR_HQOSID		0x6c4
 
 #define CSR_STIMECMP		0x14D
 #define CSR_STIMECMPH		0x15D

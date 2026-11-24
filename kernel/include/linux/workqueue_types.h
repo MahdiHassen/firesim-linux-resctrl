@@ -17,6 +17,7 @@ struct work_struct {
 	atomic_long_t data;
 	struct list_head entry;
 	work_func_t func;
+	unsigned int qos_tag;	/* QoS IDs of the task that queued it (arch), 0: none */
 #ifdef CONFIG_LOCKDEP
 	struct lockdep_map lockdep_map;
 #endif

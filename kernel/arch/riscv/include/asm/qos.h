@@ -20,6 +20,57 @@ DECLARE_PER_CPU(u32, cpu_srmcfg);
 /* default srmcfg value for each cpu, set via resctrl cpu assignment */
 DECLARE_PER_CPU(u32, cpu_srmcfg_default);
 
+/*
+ * Which IDs kernel-mode accesses carry (AlSaqr: hqosid, in effect while the loader has set mqosctl[1]).
+ * /sys/module/qos/parameters/kqos_mode:
+ *   0  hqosid is left alone
+ *   1  task:   the running task's IDs, as on a machine without privilege association
+ *   2  kernel: riscv_kqos_kernel_id for all kernel work (what PLZA gives)
+ *   3  select: the kernel's IDs, except inside a system call or a page fault taken from user mode, which run
+ *              under the task's IDs (interrupts that arrive there are the kernel's again)
+ *   4  select + tags: as 3, and a work item runs under the IDs of the task that queued it
+ */
+enum { KQOS_OFF, KQOS_TASK, KQOS_KERNEL, KQOS_SELECT, KQOS_SELECT_TAG };
+#define KQOS_TAG_VALID	BIT(31)
+extern unsigned int riscv_kqos_mode;
+extern u32 riscv_kqos_kernel_id;
+DECLARE_PER_CPU(u32, cpu_hqosid);
+void riscv_kqos_refresh(void);
+
+static __always_inline void riscv_kqos_write(u32 v)
+{
+	if (v != __this_cpu_read(cpu_hqosid)) {
+		__this_cpu_write(cpu_hqosid, v);
+		csr_write(CSR_HQOSID, v);
+	}
+}
+
+/* the IDs of @t's kernel-mode accesses in its own context; @srmcfg: its user-mode IDs */
+static inline u32 riscv_kqos_task(struct task_struct *t, u32 srmcfg)
+{
+	unsigned int mode = READ_ONCE(riscv_kqos_mode);
+	u32 tag;
+
+	if (mode == KQOS_TASK)
+		return srmcfg;
+	if (mode == KQOS_KERNEL)
+		return riscv_kqos_kernel_id;
+	if (!(t->flags & PF_KTHREAD))
+		return READ_ONCE(t->thread.kqos_self) ? srmcfg : riscv_kqos_kernel_id;
+	tag = READ_ONCE(t->thread.kqos_work);
+	if (mode == KQOS_SELECT_TAG && (tag & KQOS_TAG_VALID))
+		return tag & ~KQOS_TAG_VALID;
+	return riscv_kqos_kernel_id;
+}
+
+/* a system call or a user page fault starts (@on) or ends */
+static __always_inline void riscv_kqos_self(bool on)
+{
+	current->thread.kqos_self = on;
+	if (READ_ONCE(riscv_kqos_mode) >= KQOS_SELECT)
+		riscv_kqos_refresh();
+}
+
 static inline void __switch_to_srmcfg(struct task_struct *next)
 {
 	u32 thread_srmcfg, default_srmcfg;
@@ -70,6 +121,8 @@ static inline void __switch_to_srmcfg(struct task_struct *next)
 		 */
 		RISCV_FENCE(o, rw);
 	}
+	if (READ_ONCE(riscv_kqos_mode))
+		riscv_kqos_write(riscv_kqos_task(next, thread_srmcfg));
 }
 
 static __always_inline bool has_srmcfg(void)
@@ -80,6 +133,7 @@ static __always_inline bool has_srmcfg(void)
 #else /* ! CONFIG_RISCV_ISA_SSQOSID  */
 
 struct task_struct;
+static __always_inline void riscv_kqos_self(bool on) { }
 static __always_inline bool has_srmcfg(void) { return false; }
 static inline void __switch_to_srmcfg(struct task_struct *next) { }
 

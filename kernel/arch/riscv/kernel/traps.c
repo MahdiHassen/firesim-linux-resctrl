@@ -29,6 +29,7 @@
 #include <asm/csr.h>
 #include <asm/processor.h>
 #include <asm/ptrace.h>
+#include <asm/qos.h>
 #include <asm/syscall.h>
 #include <asm/thread_info.h>
 #include <asm/vector.h>
@@ -339,7 +340,9 @@ void do_trap_ecall_u(struct pt_regs *regs)
 
 		if (syscall >= 0 && syscall < NR_syscalls) {
 			syscall = array_index_nospec(syscall, NR_syscalls);
+			riscv_kqos_self(true);
 			syscall_handler(regs, syscall);
+			riscv_kqos_self(false);
 		}
 
 		syscall_exit_to_user_mode(regs);
@@ -412,8 +415,13 @@ asmlinkage __visible __trap_section void do_trap_software_check(struct pt_regs *
 asmlinkage __visible noinstr void do_page_fault(struct pt_regs *regs)
 {
 	irqentry_state_t state = irqentry_enter(regs);
+	bool self = user_mode(regs);
 
+	if (self)
+		riscv_kqos_self(true);
 	handle_page_fault(regs);
+	if (self)
+		riscv_kqos_self(false);
 
 	local_irq_disable();
 
@@ -435,12 +443,27 @@ static void noinstr handle_riscv_irq(struct pt_regs *regs)
 asmlinkage void noinstr do_irq(struct pt_regs *regs)
 {
 	irqentry_state_t state = irqentry_enter(regs);
+#ifdef CONFIG_RISCV_ISA_SSQOSID
+	/* an interrupt is the kernel's work, whoever it interrupts (asm/qos.h) */
+	bool kqos = READ_ONCE(riscv_kqos_mode) >= KQOS_SELECT;
+	u32 kqos_old = 0;
+
+	if (kqos) {
+		kqos_old = __this_cpu_read(cpu_hqosid);
+		riscv_kqos_write(riscv_kqos_kernel_id);
+	}
+#endif
 
 	if (IS_ENABLED(CONFIG_IRQ_STACKS) && on_thread_stack())
 		call_on_irq_stack(regs, handle_riscv_irq);
 	else
 		handle_riscv_irq(regs);
 
+#ifdef CONFIG_RISCV_ISA_SSQOSID
+	/* before a preemption in irqentry_exit(): the switch back to this task sets its IDs again */
+	if (kqos && kqos_old != U32_MAX)
+		riscv_kqos_write(kqos_old);
+#endif
 	irqentry_exit(regs, state);
 }
 

@@ -2272,6 +2272,38 @@ static int wq_select_unbound_cpu(int cpu)
 	return new_cpu;
 }
 
+/*
+ * A work item runs under the QoS IDs of the task that queued it. A kernel thread passes on the tag of the item
+ * it is running, so a chain of items keeps its origin. Queued from an interrupt (a delayed item's timer), the tag
+ * set when the delay was armed stays.
+ */
+#ifdef CONFIG_RISCV_ISA_SSQOSID
+#include <asm/qos.h>
+static inline void work_set_qos_tag(struct work_struct *work, bool always)
+{
+	if (in_task()) {
+		if (current->flags & PF_KTHREAD)
+			work->qos_tag = current->thread.kqos_work;
+		else
+			work->qos_tag = this_cpu_read(cpu_srmcfg) | KQOS_TAG_VALID;
+	} else if (always) {
+		work->qos_tag = 0;
+	}
+}
+
+static inline unsigned int work_run_qos_tag(unsigned int tag)
+{
+	if (tag || current->thread.kqos_work) {
+		current->thread.kqos_work = tag;
+		riscv_kqos_refresh();
+	}
+	return tag;
+}
+#else
+static inline void work_set_qos_tag(struct work_struct *work, bool always) { }
+static inline unsigned int work_run_qos_tag(unsigned int tag) { return 0; }
+#endif
+
 static void __queue_work(int cpu, struct workqueue_struct *wq,
 			 struct work_struct *work)
 {
@@ -2295,6 +2327,7 @@ static void __queue_work(int cpu, struct workqueue_struct *wq,
 	 * happen with IRQ disabled.
 	 */
 	lockdep_assert_irqs_disabled();
+	work_set_qos_tag(work, false);
 
 	/*
 	 * For a draining wq, only works from the same workqueue are
@@ -2557,6 +2590,7 @@ static void __queue_delayed_work(int cpu, struct workqueue_struct *wq,
 	WARN_ON_ONCE(timer->function != delayed_work_timer_fn);
 	WARN_ON_ONCE(timer_pending(timer));
 	WARN_ON_ONCE(!list_empty(&work->entry));
+	work_set_qos_tag(work, true);
 
 	/*
 	 * If @delay is 0, queue @dwork->work immediately.  This is for
@@ -3221,6 +3255,7 @@ static void process_one_work(struct worker *worker, struct work_struct *work)
 __releases(&pool->lock)
 __acquires(&pool->lock)
 {
+	unsigned int qos_tag;
 	struct pool_workqueue *pwq = get_work_pwq(work);
 	struct worker_pool *pool = worker->pool;
 	unsigned long work_data;
@@ -3261,6 +3296,8 @@ __acquires(&pool->lock)
 	strscpy(worker->desc, pwq->wq->name, WORKER_DESC_LEN);
 
 	list_del_init(&work->entry);
+	qos_tag = work->qos_tag;
+	work->qos_tag = 0;
 
 	/*
 	 * CPU intensive works don't participate in concurrency management.
@@ -3319,7 +3356,11 @@ __acquires(&pool->lock)
 	 */
 	lockdep_invariant_state(true);
 	trace_workqueue_execute_start(work);
+	if (in_task())
+		work_run_qos_tag(qos_tag);
 	worker->current_func(work);
+	if (in_task())
+		work_run_qos_tag(0);
 	/*
 	 * While we must be careful to not use "work" after this, the trace
 	 * point will only record its address.

@@ -250,6 +250,10 @@ int copy_thread(struct task_struct *p, const struct kernel_clone_args *args)
 		set_bit(MM_CONTEXT_LOCK_PMLEN, &p->mm->context.flags);
 
 	memset(&p->thread.s, 0, sizeof(p->thread.s));
+#ifdef CONFIG_RISCV_ISA_SSQOSID
+	p->thread.kqos_self = 0;	/* the child leaves the kernel without passing the end of the system call */
+	p->thread.kqos_work = 0;
+#endif
 
 	/* p->thread holds context to be restored by __switch_to() */
 	if (unlikely(args->fn)) {
